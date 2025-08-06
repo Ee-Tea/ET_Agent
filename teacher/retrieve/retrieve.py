@@ -1,9 +1,10 @@
-from nodes.extractor import extract_query_elements, query_rewrite
+from nodes.extractor import extract_query_elements, query_rewrite, query_reinforce
 from nodes.merge_responder import merge_context, generate_answer
 from nodes.search import wiki_tool, ddg_tool
 from langgraph.graph import END, StateGraph
 from langchain_core.runnables import RunnableLambda
 from typing_extensions import TypedDict
+from nodes.verifier import fact_check_with_context
 
 class RetrievalState(TypedDict):
     retrieval_question: str
@@ -57,6 +58,28 @@ def answer_fn(state):
     answer = generate_answer(question, context)
     return {"answer": answer}
 
+def verify_fn(state):
+    """답변 검증 노드"""
+    question = state["retrieval_question"]
+    context = state["merged_context"]
+    answer = state["answer"]
+    fact_check_result = fact_check_with_context(question, context, answer)
+    print(f"검증 결과: {fact_check_result}")
+    return {"fact_check_result": fact_check_result}
+
+def reinforce_fn(state):
+    """질문 보강 노드"""
+    rewritten_question = query_reinforce(state)
+    return {"retrieval_question": rewritten_question}
+
+def check_verdict(state):
+    """검증 결과에 따라 분기"""
+    verdict = state.get("fact_check_result", {}).get("verdict", "NOT ENOUGH INFO")
+    if verdict == "SUPPORTED":
+        return "pass"
+    else:
+        return "fail"
+
 def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, merge_fn, answer_fn):
     """검색 그래프 빌드"""
 
@@ -69,6 +92,8 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
     builder.add_node("search_ddg", RunnableLambda(search_ddg_fn))
     builder.add_node("merge", RunnableLambda(merge_fn))
     builder.add_node("answer", RunnableLambda(answer_fn))
+    builder.add_node("reinforce", RunnableLambda(reinforce_fn))
+    builder.add_node("verify", RunnableLambda(verify_fn))
 
     builder.set_entry_point("extract")
 
@@ -79,6 +104,10 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
     builder.add_edge("search_wiki", "merge")
     builder.add_edge("search_ddg", "merge")
     builder.add_edge("merge", "answer")
+    builder.add_edge("answer", "verify")
+    builder.add_conditional_edges("verify",check_verdict, {"pass": END, "fail" : "reinforce"})
+    builder.add_edge("reinforce", "search_wiki")  # 보강된 질문으로 다시 검색 시작
+    builder.add_edge("reinforce", "search_ddg")  # 보강된 질문으로 다시 검색 시작
 
     # 3️⃣ 최종 컴파일된 graph 얻기
     graph = builder.compile()

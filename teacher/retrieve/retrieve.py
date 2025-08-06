@@ -14,6 +14,7 @@ class RetrievalState(TypedDict):
     ddg: str
     merged_context: str
     answer: str
+    fact_check_result: dict
 
 def extract_fn(state):
     """키워드 추출 노드"""
@@ -70,7 +71,7 @@ def verify_fn(state):
 def reinforce_fn(state):
     """질문 보강 노드"""
     rewritten_question = query_reinforce(state)
-    return {"retrieval_question": rewritten_question}
+    return {"rewritten_question": rewritten_question}
 
 def check_verdict(state):
     """검증 결과에 따라 분기"""

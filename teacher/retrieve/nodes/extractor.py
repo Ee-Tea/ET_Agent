@@ -34,15 +34,15 @@ def parse_llama_json(result: str) -> dict:
 
 def extract_query_elements(user_question: str) -> dict:
     """
-    사용자 질문에서 작물명, 병해충명, 용도명을 추출합니다.
+    사용자 질문에서 키워드를 추출합니다.
     """
     system_prompt = """다음 사용자 질문에서 아래 정보를 추출하세요:
-- keyword: 질문에 언급된 사용자가 정보를 필요로 하는 용어
+    - keyword: 질문에 언급된 사용자가 정보를 필요로 하는 용어
 
-JSON 형식으로만 출력하세요. 예시:
-{
-  "keyword": "LLM"
-}"""
+    JSON 형식으로만 출력하세요. 예시:
+    {
+    "keyword": "LLM"
+    }"""
 
     response = client.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",  # 또는 gpt-3.5-turbo 사용 가능
@@ -60,5 +60,23 @@ JSON 형식으로만 출력하세요. 예시:
     print(result_dict)
     return result_dict
 
-# result = extract_query_elements("어떤 살균제를 써야 하나요?")
-# print(result)  
+def query_rewrite(question: str, keywords: list[str]) -> str:
+    """
+    질문을 LLM에 맞게 재작성합니다.
+    """
+    keyword_text = ", ".join(keywords)
+    original_question = question
+    rewrite_prompt = f"""
+    사용자의 원래 질문과 추출된 키워드를 바탕으로, 검색에 적합한 형태의 명확한 질문으로 바꿔주세요.
+
+    - 사용자 질문: {original_question}
+    - 추출 키워드: {keyword_text}
+
+    ==> 재작성된 검색 질문:
+    """
+    rewrited_question = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
+        messages=[{"role": "user", "content": rewrite_prompt}],
+        temperature=0.5,
+    )
+    return rewrited_question.choices[0].message.content.strip()

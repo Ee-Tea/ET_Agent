@@ -82,3 +82,38 @@ def query_rewrite(question: str, keywords: list[str]) -> str:
         temperature=0.5,
     )
     return rewritten_question.choices[0].message.content.strip()
+
+def query_reinforce(state: dict) -> dict:
+    """
+    검증에 실패한 경우 원 질문을 보완하여 재작성하는 함수.
+    """
+    original_question = state["retrieval_question"]
+    verdict = state.get("fact_check_result", {}).get("verdict", "NOT ENOUGH INFO")
+    answer = state.get("answer", "")
+    context = state.get("merged_context", "")
+
+    prompt = f"""
+    이전 질문은 다음과 같습니다:
+
+    "{original_question}"
+
+    해당 질문에 대한 LLM 응답은 다음과 같았습니다:
+
+    "{answer}"
+
+    하지만 다음 문맥을 기반으로 검토한 결과, 이 응답은 "{verdict}" 판정을 받았습니다:
+
+    "{context}"
+
+    따라서, 이 질문을 더 명확하고 사실 검증이 가능한 형태로 재작성해주세요.
+    """
+
+    response = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",  # Groq 또는 원하는 모델
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+
+    rewritten_question = response.choices[0].message.content.strip()
+    print(f"🔁 재작성된 질문 (보강): {rewritten_question}")
+    return rewritten_question

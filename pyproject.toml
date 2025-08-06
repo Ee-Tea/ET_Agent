@@ -9,8 +9,10 @@ dependencies = [
     "dotenv>=0.9.9",
     "langchain>=0.3.27",
     "langchain-community>=0.3.27",
+    "langchain-core>=0.3.72",
     "langgraph>=0.6.3",
     "openai>=1.98.0",
     "redis>=6.2.0",
+    "streamlit>=1.48.0",
     "wikipedia>=1.4.0",
 ]

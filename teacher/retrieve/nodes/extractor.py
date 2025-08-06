@@ -54,11 +54,13 @@ def extract_query_elements(user_question: str) -> dict:
     )
     result = response.choices[0].message.content
     result_dict = parse_llama_json(result)
-    # print(type(result))
-    # print(result)
-
-    print(result_dict)
-    return result_dict
+    keyword = result_dict.get("keyword", "")
+    if isinstance(keyword, str):
+        return [keyword]
+    elif isinstance(keyword, list):
+        return keyword
+    else:
+        return []
 
 def query_rewrite(question: str, keywords: list[str]) -> str:
     """
@@ -74,9 +76,9 @@ def query_rewrite(question: str, keywords: list[str]) -> str:
 
     ==> 재작성된 검색 질문:
     """
-    rewrited_question = client.chat.completions.create(
+    rewritten_question = client.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
         messages=[{"role": "user", "content": rewrite_prompt}],
         temperature=0.5,
     )
-    return rewrited_question.choices[0].message.content.strip()
+    return rewritten_question.choices[0].message.content.strip()

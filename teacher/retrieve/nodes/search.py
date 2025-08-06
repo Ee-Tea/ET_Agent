@@ -1,6 +1,6 @@
 from langchain.tools import Tool
-from langchain.utilities import WikipediaAPIWrapper
-from langchain.tools.ddg_search.tool import DuckDuckGoSearchRun
+from langchain_community.utilities import WikipediaAPIWrapper
+from langchain_community.tools import DuckDuckGoSearchRun
 
 wiki_tool = Tool(
     name="Wikipedia Search",

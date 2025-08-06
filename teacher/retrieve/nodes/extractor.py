@@ -10,27 +10,34 @@ groq_api_key = os.getenv("GROQAI_API_KEY")
 client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
 
 def parse_llama_json(result: str) -> dict:
-    """
-    LLaMA 응답에서 JSON을 추출하여 dict로 반환합니다.
-    코드 블록(```json … ```) 감싸짐을 제거합니다.
-    """
-    cleaned = result.strip()
+  """
+  LLaMA 응답에서 JSON을 추출하여 dict로 반환합니다.
+  코드 블록(```json … ```) 감싸짐과 설명 텍스트를 제거합니다.
+  """
+  cleaned = result.strip()
 
-    # 코드 블록 제거 (```json 또는 ```)
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r"```$", "", cleaned, flags=re.IGNORECASE).strip()
+  # 코드 블록 제거
+  if cleaned.startswith("```"):
+      cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
+      cleaned = re.sub(r"```$", "", cleaned, flags=re.IGNORECASE).strip()
 
-    # BOM 제거
-    cleaned = cleaned.encode("utf-8").decode("utf-8-sig")
+  # BOM 제거
+  cleaned = cleaned.encode("utf-8").decode("utf-8-sig")
 
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        print("❌ JSON 파싱 실패")
-        print("→ 오류:", e)
-        print("→ 원본:", repr(cleaned))
-        return {}
+  # JSON 본문만 추출 (중괄호로 시작하고 끝나는 가장 큰 JSON)
+  json_match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+  if not json_match:
+      print("❌ JSON 블록을 찾을 수 없음")
+      print("→ 원본:", repr(cleaned))
+      return {}
+
+  try:
+      return json.loads(json_match.group())
+  except json.JSONDecodeError as e:
+      print("❌ JSON 파싱 실패")
+      print("→ 오류:", e)
+      print("→ 원본:", repr(json_match.group()))
+      return {}
 
 def extract_query_elements(user_question: str) -> dict:
     """
@@ -83,7 +90,7 @@ def query_rewrite(question: str, keywords: list[str]) -> str:
     )
     return rewritten_question.choices[0].message.content.strip()
 
-def query_reinforce(state: dict) -> dict:
+def query_reinforce(state: dict) -> str:
     """
     검증에 실패한 경우 원 질문을 보완하여 재작성하는 함수.
     """

@@ -7,8 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "ddgs>=9.5.2",
     "dotenv>=0.9.9",
-    "duckduckgo-search>=8.1.1",
-    "guardrails-ai>=0.1.8",
     "langchain>=0.3.27",
     "langchain-community>=0.3.27",
     "langgraph>=0.6.3",

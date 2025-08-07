@@ -1,23 +1,24 @@
 # image_loader.py
 import os
-from pathlib import Path
-from pdf2image import convert_from_path
 from PIL import Image
+import fitz  # PyMuPDF
 
-def convert_pdf_to_images(pdf_path: str, output_dir: str = "temp_images"):
-    os.makedirs(output_dir, exist_ok=True)
-    images = convert_from_path(pdf_path, dpi=300)
+def convert_pdf_to_images(pdf_path: str, output_folder: str = "./converted_pages") -> list:
+    """
+    PDF 파일을 이미지로 변환 (Poppler 없이 PyMuPDF로 대체)
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    doc = fitz.open(pdf_path)
     image_paths = []
-    for i, img in enumerate(images):
-        path = os.path.join(output_dir, f"{Path(pdf_path).stem}_page{i+1}.png")
-        img.save(path, "PNG")
-        image_paths.append(path)
+
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=300)
+        output_path = os.path.join(output_folder, f"page_{i + 1}.png")
+        pix.save(output_path)
+        image_paths.append(output_path)
+
+    doc.close()
     return image_paths
 
 def load_image(image_path: str) -> Image.Image:
-    return Image.open(image_path).convert("RGB")
-
-if __name__ == "__main__":
-    pdf_file = "example.pdf"  # 여기에 실제 PDF 경로 입력
-    image_files = convert_pdf_to_images(pdf_file)
-    print("🔹 변환된 이미지 파일들:", image_files)
+    return Image.open(image_path)

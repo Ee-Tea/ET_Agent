@@ -4,14 +4,17 @@ from transformers import DonutProcessor, VisionEncoderDecoderModel
 from PIL import Image
 from image_loader import convert_pdf_to_images, load_image
 from openai import OpenAI
-import numpy as np
 import base64
 import io
 import easyocr
+import numpy as np
+import json
+import re
 import os
 from dotenv import load_dotenv
+
+# ✅ 환경변수 로드
 load_dotenv()
-groq_api_key = os.getenv("GROQAI_API_KEY")
 
 # ✅ 모델과 프로세서 로드 (Donut은 그림이 있을 때만 사용)
 MODEL_NAME = "naver-clova-ix/donut-base-finetuned-docvqa"
@@ -21,12 +24,19 @@ processor = DonutProcessor.from_pretrained(MODEL_NAME)
 model = VisionEncoderDecoderModel.from_pretrained(MODEL_NAME).to(device)
 reader = easyocr.Reader(['ko', 'en'], gpu=torch.cuda.is_available())
 
-# client = OpenAI(api_key=api_key)
+# ✅ Groq API 설정
+groq_api_key = os.getenv("GROQAI_API_KEY")
 client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
 
 def ocr_extract_text(image: Image.Image) -> str:
     results = reader.readtext(np.array(image), detail=0)
     return "\n".join(results)
+
+def extract_json_from_text(text: str) -> dict:
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        return json.loads(match.group(1))
+    return json.loads(text)  # fallback if no ```json block
 
 def extract_diagram_with_gpt(image: Image.Image) -> dict:
     buffered = io.BytesIO()
@@ -44,7 +54,7 @@ def extract_diagram_with_gpt(image: Image.Image) -> dict:
     """
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=[
             {"role": "system", "content": "이미지를 기반으로 구조화된 분석을 도와주는 어시스턴트입니다."},
             {"role": "user", "content": [
@@ -55,7 +65,11 @@ def extract_diagram_with_gpt(image: Image.Image) -> dict:
         max_tokens=800
     )
 
-    return eval(response.choices[0].message.content)
+    try:
+        return extract_json_from_text(response.choices[0].message.content)
+    except Exception as e:
+        print("❌ JSON 파싱 실패. 원본 응답:", response.choices[0].message.content)
+        raise e
 
 def extract_structure_json(image: Image.Image, has_diagram: bool) -> dict:
     ocr_text = ocr_extract_text(image)
@@ -65,7 +79,6 @@ def extract_structure_json(image: Image.Image, has_diagram: bool) -> dict:
     else:
         diagram_info = {"diagram_type": "", "diagram_structure": "", "diagram_description": ""}
 
-    # ✨ 구조 정형화
     return {
         "문제": ocr_text,
         "그림": {
@@ -78,12 +91,11 @@ def extract_structure_json(image: Image.Image, has_diagram: bool) -> dict:
     }
 
 def detect_diagram(image: Image.Image) -> bool:
-    # 간단한 기준: 이미지 면적 대비 채워진 영역 비율
     gray = image.convert("L")
     bw = gray.point(lambda x: 0 if x < 200 else 255, '1')
     non_white = bw.histogram()[0]
     ratio = non_white / (image.width * image.height)
-    return ratio > 0.05  # 5% 이상이면 그림 있다고 판단
+    return ratio > 0.05
 
 def parse_structure_from_pdf(pdf_path: str) -> list:
     image_paths = convert_pdf_to_images(pdf_path)
@@ -110,7 +122,7 @@ def send_to_answer_agent(structured_qas: list):
         # print("답변:", answer)
 
 if __name__ == "__main__":
-    pdf_file = "example.pdf"  # 여기에 실제 PDF 경로 입력
+    pdf_file = "1. 2024년3회_정보처리기사필기기출문제.pdf"  # 여기에 실제 PDF 경로 입력
     parsed = parse_structure_from_pdf(pdf_file)
 
     for page in parsed:

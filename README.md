@@ -88,6 +88,7 @@ docs: 커밋 메시지 규칙 문서화
 
 ## 구글 드라이브 문서 링크
 
+| 파일 | 링크 |
 |-----|-----|
 | **WBS** | https://docs.google.com/spreadsheets/d/15CpdDpFgmhpRz0SvhkaE3jrHX7b2lLZL/edit?gid=10265153#gid=10265153 |
 | **이슈리스트** | https://docs.google.com/spreadsheets/d/1FYnkbNEERuY9K436zcLwGOSl8Z7tKNhx/edit?gid=575308982#gid=575308982 |

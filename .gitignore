@@ -205,3 +205,37 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+volumes/
+volumes/*
+
+# Milvus 내부 데이터 파일들
+*.wal
+*.etcd
+*.meta
+*.db
+*.pid
+*.snap
+*.log
+
+# LangChain / embedding cache
+.cache/
+index/
+chroma/
+
+# MinIO or Blob storage 사용 시
+minio_data/
+a-bucket/
+*.bin
+*.blb
+
+# Editor & OS files
+*.swp
+*.DS_Store
+.vscode/
+.idea/
+
+# Milvus generated logs/data (in container)
+milvus/logs/
+milvus/data/
+milvus/configs/

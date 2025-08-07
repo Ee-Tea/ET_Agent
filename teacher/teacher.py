@@ -27,6 +27,10 @@ class Orchestrator:
             # "problem_generation": ProblemGenerationAgent(), 
         }
 
+    def get_available_agents(self) -> Dict[str, str]:
+        """등록된 에이전트들의 이름과 설명을 반환합니다."""
+        return {agent_key: agent.description for agent_key, agent in self.agents.items()}
+
     @traceable(name="Orchestrator Run")
     def run(self, agent_name: str, input_file_path: str):
         """
@@ -148,11 +152,23 @@ if __name__ == "__main__":
     # 예: python teacher.py analysis "path/to/your/input.json"
     if len(sys.argv) < 3:
         print("🔧 사용법: python teacher.py [agent_name] [input_file_path]")
+        
+        # 오케스트레이터 인스턴스 생성하여 등록된 에이전트 정보 가져오기
+        orchestrator = Orchestrator()
+        available_agents = orchestrator.get_available_agents()
+        
         print("\n📋 사용 가능한 에이전트:")
-        print("  - analysis: 학습자 답안을 분석하고 피드백을 생성합니다")
+        for agent_name, description in available_agents.items():
+            print(f"  - {agent_name}: {description}")
+        
         print("\n💡 예시:")
-        print("  python teacher.py analysis ./test_sample/analysis_sample.json")
-        print("  python teacher.py analysis C:/path/to/student_answers.json")
+        if "analysis" in available_agents:
+            print("  python teacher.py analysis ./test_sample/analysis_sample.json")
+            print("  python teacher.py analysis C:/path/to/student_answers.json")
+        else:
+            # 첫 번째 등록된 에이전트를 예시로 사용
+            first_agent = next(iter(available_agents.keys())) if available_agents else "agent_name"
+            print(f"  python teacher.py {first_agent} ./path/to/input.json")
         sys.exit(1)
         
     agent_to_run = sys.argv[1]

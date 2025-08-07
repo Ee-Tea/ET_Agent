@@ -83,10 +83,11 @@ feat: 검색 에이전트 추가
 fix: API 호출 시 파라미터 오류 수정
 chore: Prettier 설치 및 설정 파일 추가
 docs: 커밋 메시지 규칙 문서화
-
+```
 ---
 
 ## 구글 드라이브 문서 링크
+
 |-----|-----|
 | `WBS` | https://docs.google.com/spreadsheets/d/15CpdDpFgmhpRz0SvhkaE3jrHX7b2lLZL/edit?gid=10265153#gid=10265153 |
 | `이슈리스트` | https://docs.google.com/spreadsheets/d/1FYnkbNEERuY9K436zcLwGOSl8Z7tKNhx/edit?gid=575308982#gid=575308982 |

@@ -64,12 +64,12 @@
 
 | 타입 | 의미 | 예시 |
 |------|------|------|
-| `feat:` | 기능 추가 | `feat: 별점 등록 기능 구현` |
+| `feat:` | 기능 추가 | `feat: 문제 생성 기능 구현` |
 | `fix:` | 버그 수정 | `fix: 로그인 시 토큰 오류 해결` |
 | `style:` | 코드 스타일 수정 (기능 변화 없음) | `style: 세미콜론 누락 수정` |
 | `refactor:` | 리팩토링 (기능 변화 없음) | `refactor: 리뷰 모듈 구조 개선` |
 | `docs:` | 문서 수정 | `docs: README에 코딩 컨벤션 추가` |
-| `test:` | 테스트 코드 추가/수정 | `test: 리뷰 서비스 테스트 추가` |
+| `test:` | 테스트 코드 추가/수정 | `test: API 테스트 코드 수정` |
 | `chore:` | 설정, 패키지 관리 등 잡일 | `chore: ESLint 설정 추가` |
 | `build:` | 빌드 시스템 변경 | `build: Vite 설정 변경` |
 | `ci:` | CI 설정 변경 | `ci: GitHub Actions 워크플로우 추가` |
@@ -79,7 +79,14 @@
 ### ✅ 커밋 메시지 작성 예시
 
 ```bash
-feat: 유튜브 링크 등록 기능 추가
-fix: 리뷰 수정 시 페이지 새로고침 문제 해결
+feat: 검색 에이전트 추가
+fix: API 호출 시 파라미터 오류 수정
 chore: Prettier 설치 및 설정 파일 추가
 docs: 커밋 메시지 규칙 문서화
+
+---
+
+## 구글 드라이브 문서 링크
+|-----|-----|
+| `WBS` | https://docs.google.com/spreadsheets/d/15CpdDpFgmhpRz0SvhkaE3jrHX7b2lLZL/edit?gid=10265153#gid=10265153 |
+| `이슈리스트` | https://docs.google.com/spreadsheets/d/1FYnkbNEERuY9K436zcLwGOSl8Z7tKNhx/edit?gid=575308982#gid=575308982 |

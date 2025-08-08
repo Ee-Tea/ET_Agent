@@ -1,5 +1,5 @@
 import streamlit as st
-from solution_agent import graph, RAGState, HuggingFaceEmbeddings, Milvus, connections
+from solution_agent import SolutionAgent, HuggingFaceEmbeddings, Milvus, connections
 from pdf_generation import generate_pdf
 import os
 import json
@@ -40,57 +40,62 @@ all_results = []
 if uploaded_file:
     user_problems = json.load(uploaded_file)
 
-    for i, problem in enumerate(user_problems):
-        st.markdown(f"---\n### 📘 문제 {i+1}")
-        st.markdown(f"**문제:** {problem['question']}")
-        st.markdown(f"**보기:** {', '.join(problem['options'])}")
+    # ✅ SolutionAgent 초기화
+    agent = SolutionAgent()
 
-        with st.spinner(f"🧠 문제 {i+1}에 대한 해답 생성 중..."):
-            try:
-                # ✅ 상태 설정
-                state: RAGState = {
-                    "user_question": user_question,
-                    "user_problem": problem["question"],
-                    "user_problem_options": problem["options"],
-                    "vectorstore": vectorstore,
-                    "docs": [],
-                    "retrieved_docs": [],
-                    "similar_questions_text": "",
-                    "generated_answer": "",
-                    "generated_explanation": "",
-                    "validated": False,
-                    "chat_history": []
-                }
-
-                # ✅ LangGraph 실행
-                result = graph.invoke(state)
-
-                # ✅ 결과 누적
-                all_results.append({
-                    "index": i + 1,
-                    "question": problem["question"],
-                    "options": problem["options"],
-                    "answer": result["generated_answer"],
-                    "explanation": result["generated_explanation"]
-                })
-
+    with st.spinner("🧠 모든 문제에 대한 해답 생성 중..."):
+        try:
+            # ✅ SolutionAgent를 사용하여 모든 문제 처리
+            results = agent.execute(user_question, user_problems, vectorstore)
+            
+            for i, result in enumerate(results):
+                st.markdown(f"---\n### 📘 문제 {i+1}")
+                st.markdown(f"**문제:** {result['question']}")
+                st.markdown("**보기:**")
+                for j, option in enumerate(result['options'], 1):
+                    st.markdown(f"{j}. {option}")
 
                 # ✅ 해답 보기 버튼 (Expander 형태로 숨김)
                 with st.expander("📝 해답 보기"):
-                    st.markdown(f"**✅ 정답:** {result['generated_answer']}")
+                    # 정답 번호 찾기
+                    answer_text = result['generated_answer']
+                    answer_number = None
+                    
+                    # 정답이 "1", "2", "3", "4" 중 하나인지 확인
+                    if answer_text.strip() in ["1", "2", "3", "4"]:
+                        answer_number = int(answer_text.strip())
+                        st.markdown(f"**✅ 정답:** {answer_number}. {result['options'][answer_number-1]}")
+                    else:
+                        # 정답이 번호가 아닌 경우, 보기 옵션에서 일치하는 것을 찾기
+                        answer_found = False
+                        for j, option in enumerate(result['options'], 1):
+                            if answer_text.strip() in option or option in answer_text.strip():
+                                st.markdown(f"**✅ 정답:** {j}. {option}")
+                                answer_found = True
+                                break
+                        
+                        if not answer_found:
+                            st.markdown(f"**✅ 정답:** {result['generated_answer']}")
+                    
                     st.markdown(f"**📖 풀이:**\n{result['generated_explanation']}")
-
-                # ✅ 유사 문제
-                with st.expander("📚 유사 문제 보기"):
-                    st.markdown(f"```\n{result['similar_questions_text']}\n```")
+                    st.markdown(f"**🔍 검증:** {'통과' if result['validated'] else '불통과'}")
 
                 # ✅ 히스토리
                 with st.expander("📜 전체 히스토리"):
                     for item in result["chat_history"]:
                         st.text(item)
 
-            except Exception as e:
-                st.error(f"❌ 오류 발생: {e}")
+                # ✅ 결과 누적
+                all_results.append({
+                    "index": i + 1,
+                    "question": result["question"],
+                    "options": result["options"],
+                    "answer": result["generated_answer"],
+                    "explanation": result["generated_explanation"]
+                })
+
+        except Exception as e:
+            st.error(f"❌ 오류 발생: {e}")
 
 if all_results:
     st.markdown("---")

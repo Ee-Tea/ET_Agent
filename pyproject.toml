@@ -31,7 +31,8 @@ dependencies = [
     "transformers>=4.35.0",
     "torch>=2.0.0",
     "numpy>=1.21.0",
-    "requests>=2.28.0"
+    "requests>=2.28.0",
+    "groq>=0.31.0",
 ]
 
 [build-system]

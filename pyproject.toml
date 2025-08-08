@@ -31,9 +31,14 @@ dependencies = [
     "transformers>=4.35.0",
     "torch>=2.0.0",
     "numpy>=1.21.0",
-    "requests>=2.28.0"
+    "requests>=2.28.0",
+    "any>=0.0.2",
+    "groq>=0.31.0",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["common", "farmer", "teacher"]

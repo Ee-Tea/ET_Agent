@@ -7,6 +7,18 @@ class BaseAgent(ABC):
     모든 에이전트는 'execute' 메서드를 구현해야 합니다.
     """
     
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """에이전트의 고유한 이름을 반환합니다."""
+        pass
+
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """에이전트의 역할에 대한 설명을 반환합니다."""
+        pass
+    
     @abstractmethod
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """

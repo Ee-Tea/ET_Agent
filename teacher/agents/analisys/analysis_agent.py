@@ -2,16 +2,8 @@ import json
 import os
 from typing import Dict, List, TypedDict, Annotated
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-from dotenv import load_dotenv
 from groq import Groq
-from langchain_teddynote import logging
-logging.langsmith("analysis-agent")
-# 환경 변수 로드
-load_dotenv()
 
 from ..base_agent import BaseAgent
 
@@ -29,6 +21,16 @@ class AnalysisState(TypedDict):
 
 class AnalysisAgent(BaseAgent):
     """LangGraph 기반 분석 에이전트"""
+    
+    @property
+    def name(self) -> str:
+        """에이전트의 고유한 이름을 반환합니다."""
+        return "analysis"
+    
+    @property
+    def description(self) -> str:
+        """에이전트의 역할에 대한 설명을 반환합니다."""
+        return "학습자 답안을 분석하고 개인화된 피드백을 생성합니다"
     
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))

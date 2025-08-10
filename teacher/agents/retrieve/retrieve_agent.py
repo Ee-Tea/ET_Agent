@@ -122,6 +122,10 @@ class retrieve_agent(BaseAgent):
     검색 에이전트 클래스입니다.
     위키백과와 DuckDuckGo를 사용하여 질문에 대한 답변을 생성합니다.
     """
+    def __init__(self):
+        self.graph = build_retrieval_graph(
+            extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, merge_fn, answer_fn
+        )
 
     @property
     def name(self) -> str:
@@ -144,18 +148,8 @@ class retrieve_agent(BaseAgent):
         initial_state = {
             "retrieval_question": input_data.get("retrieval_question", "")
         }
-        
-        graph = build_retrieval_graph(
-            extract_fn,
-            rewrite_fn,
-            search_wiki_fn,
-            search_ddg_fn,
-            merge_fn,
-            answer_fn
-        )
-        result = graph.invoke(initial_state)
-        retrieve_result = {"retrieve_answer": result.get("answer", "No answer generated.")}
-        return retrieve_result
+        result = self.graph.invoke(initial_state)
+        return result
 
 # initial_state = {
 #     "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"

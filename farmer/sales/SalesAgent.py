@@ -158,8 +158,13 @@ def search_market_docs(query, top_k=3):
     predefined_locations = ['광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산광역', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
     locations = [kw for kw in query_nouns if kw in predefined_locations or any(suffix in kw for suffix in ['시', '군', '구', '도'])]
 
-    # 전체 쿼리 임베딩으로 검색
-    query_vec = embedder.encode([query])[0]
+    # 지역 키워드만 임베딩해서 검색
+    if locations:
+        region_query = " ".join(locations)
+        query_vec = embedder.encode([region_query])[0]
+    else:
+        query_vec = embedder.encode([query])[0]
+
     results = collection.search(
         data=[query_vec],
         anns_field="embedding",

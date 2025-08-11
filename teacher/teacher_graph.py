@@ -13,6 +13,7 @@ from agents.base_agent import BaseAgent
 from teacher_nodes import user_intent
 from ..common.short_term.redis_memory import *
 from agents.retrieve.retrieve_agent import retrieve_agent  # 방금 만든 클래스 import
+from TestGenerator.pdf_quiz_groq import generate_agent # 시험문제 생성 에이전트 (이름 바꿔야댐)
 
 # 한 번만 생성해서 재사용 (비용 절약)
 retriever = retrieve_agent()

@@ -92,13 +92,18 @@ def fetch_api_data(query=None):
             item_names = [part.strip() for part in item_name_parts]
             match_count = sum([q == name for q in keywords for name in item_names])
             partial_count = sum([q in name for q in keywords for name in item_names])
+            included_keywords = [q for q in keywords if any(q in name for name in item_names)]
+            score = 0
             if keywords:
                 if match_count > 0:
-                    filtered_items.append((3, item))  # 완전 일치
+                    score = 3 + len(included_keywords)  # 완전 일치 + 키워드 개수
                 elif partial_count > 0:
-                    filtered_items.append((2, item))  # 부분 일치
+                    score = 2 + len(included_keywords)  # 부분 일치 + 키워드 개수
+                else:
+                    score = len(included_keywords)      # 키워드 일부만 포함
             else:
-                filtered_items.append((0, item))
+                score = 0
+            filtered_items.append((score, item))
 
         filtered_items.sort(key=lambda x: x[0], reverse=True)
         filtered_items = [item for _, item in filtered_items]
@@ -133,7 +138,10 @@ def fetch_api_data(query=None):
     else:
         print("API 호출 실패:", response.status_code)
         print(response.text)
-    return docs
+    if docs and any(any(k in doc for k in extract_keywords(query)) for doc in docs):
+        return docs
+    else:
+        return ["해당 작물에 대한 정보는 현재 없습니다."]
 
 # CSV 파일 임베딩 및 Milvus에 저장
 def embed_and_store_csv(csv_path="data/info_20240812.csv"):
@@ -155,39 +163,46 @@ def search_market_docs(query, top_k=3):
     query_nouns = extract_keywords(query)
 
     # 미리 정의된 지역명 리스트와 명사 키워드를 비교하여 지역명만 추출
-    predefined_locations = ['광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산광역', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
+    predefined_locations = ['함평','서산','대전', '춘천','광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산광역', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
     locations = [kw for kw in query_nouns if kw in predefined_locations or any(suffix in kw for suffix in ['시', '군', '구', '도'])]
 
-    # 지역 키워드만 임베딩해서 검색
+    # 1. 지역 키워드 임베딩 검색
     if locations:
         region_query = " ".join(locations)
-        query_vec = embedder.encode([region_query])[0]
-    else:
-        query_vec = embedder.encode([query])[0]
+        region_vec = embedder.encode([region_query])[0]
+        region_results = collection.search(
+            data=[region_vec],
+            anns_field="embedding",
+            param={"metric_type": "IP", "params": {"nprobe": 20}},
+            limit=200,
+            output_fields=["text"],
+        )
+        if region_results and region_results[0]:
+            all_results.extend([hit.entity.get("text") for hit in region_results[0]])
 
-    results = collection.search(
+    # 2. 전체 쿼리 임베딩 검색
+    query_vec = embedder.encode([query])[0]
+    query_results = collection.search(
         data=[query_vec],
         anns_field="embedding",
         param={"metric_type": "IP", "params": {"nprobe": 20}},
         limit=200,
         output_fields=["text"],
     )
+    if query_results and query_results[0]:
+        all_results.extend([hit.entity.get("text") for hit in query_results[0]])
 
-    if results and results[0]:
-        all_results.extend([hit.entity.get("text") for hit in results[0]])
-
+    # 중복 제거
     all_results = list(dict.fromkeys(all_results))
 
     found_results = []
-    # 검색된 문서 중에서 쿼리의 지역 키워드 또는 전체 쿼리가 포함된 결과만 선별
     for result_text in all_results:
-        if any(loc in result_text for loc in locations) or any(q_part in result_text for q_part in query.split()):
+        if any(loc in result_text for loc in locations):
             found_results.append(result_text)
 
     if not found_results:
-        return []
+        return ["해당 지역에 위치한 판매점 정보가 없습니다."]
     else:
-        # 유사도 점수 계산 및 정렬 (기존 로직 유지)
         def overlap_score(result_text):
             item_part = result_text.split('(')[0].strip() if '주요 품목:' in result_text else result_text
             item_names = [x.strip() for x in re.split(r'[/,]', item_part)]
@@ -275,9 +290,9 @@ def make_prompt(context, query):
         - [정보]에 없는 내용은 포함하지 마세요.
         - 답변은 한국어로, 간결하게 작성하세요.
         - 아래 순서대로 답변하세요:
-            1. 품목과 등락율 (시세 정보가 없으면 "해당 작물에 대한 정보는 현재 없습니다."라고 답변 후 3번으로 넘어감)
+            1. **품목과 등락율** (시세 정보가 없으면 "해당 작물에 대한 정보는 현재 없습니다."라고 답변 후 3번으로 넘어감)
             2. 당일, 1개월전, 1년전 가격 (정보 없으면 생략)
-            3. 지역 매장 정보 및 주요 품목 ([질문]에서 물어본 주소와 일치하는 매장만 소개, 만약 판매처 정보가 없으면 "해당 지역에 판매점 정보가 없습니다."라고 답변)
+            3. **해당 지역의 판매처 정보를 안내** (만약 판매처 정보가 없으면 "해당 지역에 위치한 판매점 정보가 없습니다."라고 답변)
 
         [예시]
         감자(20kg)의 가격은 어제보다 2.8%(1060원) 증가한 39,660원입니다. 1개월전에는 33,260원, 1년전에는 31,576원이었습니다. 해당 지역의 판매처는 충남 태안군 태안 로컬푸드 판매장(충남 태안군 남면 안면대로 1641 / 주요 품목: 채소, 과일, 서류) 등이 있습니다.

@@ -8,6 +8,7 @@ from langsmith import traceable
 
 from agents.analisys.analysis_agent import AnalysisAgent, print_analysis_result
 from agents.base_agent import BaseAgent
+from agents.score.score_engine import ScoreEngine  # 추가
 
 class Orchestrator:
     """
@@ -25,8 +26,7 @@ class Orchestrator:
 
         self.agents: Dict[str, BaseAgent] = {
             "analysis": AnalysisAgent(),
-            # 다른 에이전트들을 여기에 추가할 수 있습니다.
-            # "problem_generation": ProblemGenerationAgent(), 
+            "score": ScoreEngine(),  # ScoreEngine 등록
         }
 
     def get_available_agents(self) -> Dict[str, str]:
@@ -110,6 +110,30 @@ class Orchestrator:
         # 결과 출력
         if agent_name == "analysis":
             print_analysis_result(result)
+        elif agent_name == "score":
+            print("\n--- 채점 결과 ---")
+            if result.get("status") == "success":
+                meta = result.get("metadata", {})
+                print(f"총 문제 수: {meta.get('total_problems', 0)}")
+                print(f"정답 수: {meta.get('correct_count', 0)}")
+                print(f"점수: {meta.get('score', 0)}%")
+                if meta.get("has_mismatch_length"):
+                    print("⚠️ user_answer 와 solution_answer 길이가 다릅니다.")
+                # 간단한 오답 리스트
+                details = result.get("grading", {}).get("details", [])
+                wrong = [d for d in details if not d.get("correct")]
+                if wrong:
+                    print("\n오답 목록(index, user -> solution):")
+                    for d in wrong[:10]:  # 너무 길면 상위 10개만
+                        print(f"  [{d['index']}] {d['user_answer']} -> {d['solution_answer']}")
+                    if len(wrong) > 10:
+                        print(f"  ... (총 {len(wrong)}개 오답)")
+            else:
+                print("❌ 오류 발생")
+                if result.get("error_message"):
+                    print("이유:", result["error_message"])
+            print("\n전체 결과(JSON):")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             # 다른 에이전트들의 결과 출력 로직
             print("\n--- 실행 결과 ---")

@@ -105,16 +105,24 @@ def split_question_blocks(ocr_lines: List[Dict[str, Any]]) -> List[Dict[str, Any
     return filtered
 
 # ================== 행 군집/유틸 ==================
-def group_lines_into_rows(lines: List[Dict[str, Any]], y_tol: int = 14) -> List[List[Dict[str, Any]]]:
+def estimate_line_height(lines: List[Dict[str, Any]]) -> int:
+    hs = [l["bbox"][3] - l["bbox"][1] for l in lines]
+    if not hs:
+        return 14
+    h = float(np.median(hs))
+    return int(max(12, min(24, round(h))))  # 12~24 범위로 클램프
+
+def group_lines_into_rows(lines: List[Dict[str, Any]], y_tol: int | None = None) -> List[List[Dict[str, Any]]]:
+    # y_tol 자동 추정
+    if y_tol is None:
+        y_tol = estimate_line_height(lines)
     rows: List[List[Dict[str, Any]]] = []
     for r in sorted(lines, key=lambda x: x["cy"]):
         placed = False
         for row in rows:
             cy_mean = sum(li["cy"] for li in row) / len(row)
             if abs(r["cy"] - cy_mean) <= y_tol:
-                row.append(r)
-                placed = True
-                break
+                row.append(r); placed = True; break
         if not placed:
             rows.append([r])
     return rows
@@ -197,38 +205,51 @@ def find_next_question_y(lines: List[Dict[str, Any]], start_y: float) -> Optiona
     return min(cand) if cand else None
 
 # ================== 개선: 토큰 x-분포로 2컬럼 분할 ==================
-def split_tokens_into_columns(tokens: List[Dict[str, Any]], bins: int = 32) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    보기 후보 토큰들의 x중심 분포를 히스토그램으로 보고, 가장 깊은 틈을 세로 구분선으로 삼아
-    좌/우 컬럼으로 분할. 실패하면 (전체, []) 반환.
-    """
+def split_tokens_into_columns(tokens: List[Dict[str, Any]], bins: int = 48) -> tuple[list, list]:
     if not tokens:
         return tokens, []
-
     xs = [t["cx"] for t in tokens]
     x_min, x_max = min(xs), max(xs)
-    if x_max - x_min < 60:  # 너무 좁으면 단일 컬럼으로 본다
+    if x_max - x_min < 60:
         return tokens, []
-
-    # 히스토그램
     hist, edges = np.histogram(xs, bins=bins, range=(x_min, x_max))
-    # 가장 깊은 valley 찾기
     mid = hist[1:-1]
     if len(mid) == 0:
         return tokens, []
     idx = int(np.argmin(mid)) + 1
     cut = (edges[idx] + edges[idx+1]) / 2.0
-
-    # 좌/우 최소 토큰 개수 확인
     left = [t for t in tokens if t["cx"] <= cut]
     right = [t for t in tokens if t["cx"] > cut]
-    if len(left) < 2 or len(right) < 2:
+    # 좌우 불균형이 심하면 실패로 간주
+    total = len(tokens)
+    if len(left) < 2 or len(right) < 2 or min(len(left), len(right)) < total * 0.2:
         return tokens, []
-
-    # 위→아래 정렬
     left.sort(key=lambda r: (round(r["cy"]/8), r["cx"]))
     right.sort(key=lambda r: (round(r["cy"]/8), r["cx"]))
     return left, right
+
+# ================== 개선: 파편 병합/중복 제거 ==================
+def merge_fragments(items: List[str], min_len=12) -> List[str]:
+    """짧은 파편(문자수 < min_len)을 앞 선택지와 자동 병합"""
+    out = []
+    for s in items:
+        s = re.sub(r"\s+", " ", s).strip()
+        if not s:
+            continue
+        if out and len(s) < min_len:
+            out[-1] = (out[-1] + " " + s).strip()
+        else:
+            out.append(s)
+    return out
+
+def dedup_preserve_order(items: List[str]) -> List[str]:
+    seen = set(); out = []
+    for s in items:
+        key = re.sub(r"\s+", " ", s).strip()
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
 
 # ================== 문제/보기 추출 ==================
 def extract_question_text_from_block(lines: List[Dict[str, Any]], qno: Optional[str] = None) -> str:
@@ -243,22 +264,14 @@ def extract_question_text_from_block(lines: List[Dict[str, Any]], qno: Optional[
     return f"{qno}. {full}" if qno and full else full
 
 def extract_choices_from_block(lines: List[Dict[str, Any]]) -> List[str]:
-    """
-    개선판:
-      A) 문제의 '?' ~ 다음 문항 헤더 직전까지를 '보기 후보 영역'으로 설정
-      B) 후보 토큰들로 x-히스토그램 기반 세로 구분선을 찾아 2열 분할 시도
-      C) 각 컬럼에서 위→아래로 읽어 보기를 구성 (마커 있으면 그 기준으로 묶기)
-      D) 부족분은 기존 휴리스틱(행→열 분할/행 자체)로 보강
-    """
     if not lines:
         return []
 
-    # 1) 문제 끝 y (첫 '?')
+    # 1) 문제 끝 y
     q_end_y = None
     for r in lines:
         if "?" in r["text"]:
-            q_end_y = r["bbox"][3]  # 하단 y
-            break
+            q_end_y = r["bbox"][3]; break
     if q_end_y is None:
         ys = [r["cy"] for r in lines]
         q_end_y = float(np.percentile(ys, 40))
@@ -266,20 +279,23 @@ def extract_choices_from_block(lines: List[Dict[str, Any]]) -> List[str]:
     # 2) 다음 문항 시작 y
     next_q_y = find_next_question_y(lines, q_end_y)
 
-    # 3) 보기 후보 토큰들만 필터링
-    def is_in_choice_band(r):
+    # 3) 후보 영역 필터 (넓게 잡고 → 이후 폴백에서 더 넓힘)
+    def in_band(r, low, high=None):
         y_top, y_bot = r["bbox"][1], r["bbox"][3]
-        if next_q_y is not None:
-            return y_top >= q_end_y - 2 and y_bot <= next_q_y - 1
-        return y_top >= q_end_y - 2
-    cand = [r for r in lines if is_in_choice_band(r)]
-    if not cand:
-        return []
+        if high is not None:
+            return y_top >= low - 2 and y_bot <= high - 1
+        return y_top >= low - 2
 
-    # 4) 빠른 경로: 마커 기반 + 줄바꿈 연결
-    rows = group_lines_into_rows(cand, y_tol=14)
-    choices: List[str] = []
-    carry = None  # (marker, body)
+    cand = [r for r in lines if in_band(r, q_end_y, next_q_y)]
+    if not cand:
+        cand = [r for r in lines if in_band(r, q_end_y, None)]  # 아래쪽 전체 폴백
+        if not cand:
+            return []
+
+    # 4) 빠른 경로: 마커 기반(줄 연결) → 충분하면 반환
+    rows = group_lines_into_rows(cand)  # y_tol 자동
+    choices: list[str] = []
+    carry = None
     for row in rows:
         rt = row_to_text(row)
         is_choice, marker, body = normalize_choice_marker(rt)
@@ -295,7 +311,10 @@ def extract_choices_from_block(lines: List[Dict[str, Any]]) -> List[str]:
     if carry is not None and len(choices) < 4:
         choices.append(f"{carry[0]} {carry[1]}".strip())
 
+    # 마커로 3~4개 확보되면 정리해서 반환
     if len(choices) >= 3:
+        choices = merge_fragments(choices)
+        choices = dedup_preserve_order(choices)
         cleaned = []
         for i, c in enumerate(choices[:4], start=1):
             c = re.sub(r"\s*:\s*", ": ", c)
@@ -303,45 +322,52 @@ def extract_choices_from_block(lines: List[Dict[str, Any]]) -> List[str]:
             cleaned.append(f"{CIRCLED[str(i)]} {c}")
         return cleaned
 
-    # 5) x-분포 기반 2컬럼 분할 시도 → 각 컬럼을 위→아래로 읽어서 후보 만들기
+    # 5) x-분포 2컬럼 분할 → 각 컬럼에서 위→아래 한 줄=한 보기 후보
     left, right = split_tokens_into_columns(cand)
-    tmp: List[str] = []
-    if right:  # 실제로 2컬럼 분할된 경우
-        for col_tokens in (left, right):
-            col_rows = group_lines_into_rows(col_tokens, y_tol=12)
+    tmp = []
+    if right:
+        for col in (left, right):
+            col_rows = group_lines_into_rows(col)
             for row in col_rows:
                 rt = row_to_text(row)
                 ok, m, b = normalize_choice_marker(rt)
                 tmp.append(b if ok else rt)
     else:
-        # 분할 실패면 전체 rows에서 한 행을 여러 칸으로 쪼개는 기존 방식
+        # 분할 실패: 행을 칸(cell)으로 더 쪼개서 후보 늘리기
         for row in rows:
             for cell in split_row_into_cells(row):
                 ok, m, b = normalize_choice_marker(cell)
                 tmp.append(b if ok else cell)
 
-    # 잡음 제거 + 4개까지 자르기
+    # 파편 병합/중복 제거/잡음 제거
     tmp = [t for t in tmp if len(t) > 1 and not re.fullmatch(r"[>\-{}[\]]+", t)]
+    tmp = merge_fragments(tmp)
+    tmp = dedup_preserve_order(tmp)
+
     if not choices:
         choices = tmp[:4]
     else:
         need = 4 - len(choices)
         choices.extend(tmp[:need])
 
+    # 여전히 모자라면 후보 영역 자체에서 남는 줄 채우기
     if len(choices) < 4:
-        # 마지막 폴백: 후보 영역 rows에서 남은 행을 보기로
         leftovers = [row_to_text(r) for r in rows if len(row_to_text(r)) > 1]
+        leftovers = merge_fragments(dedup_preserve_order(leftovers))
         need = 4 - len(choices)
         if need > 0:
-            choices.extend(leftovers[:need])
+            choices.extend([s for s in leftovers if s not in choices][:need])
 
-    # 최종 클린업 + ①~④ 강제
+    # 최종 정리 + ①~④
+    choices = merge_fragments(choices)
+    choices = dedup_preserve_order(choices)
     cleaned = []
     for i, c in enumerate(choices[:4], start=1):
         c = re.sub(r"\s*:\s*", ": ", c)
         c = re.sub(r"\s+", " ", c).strip()
         cleaned.append(f"{CIRCLED[str(i)]} {c}")
     return cleaned
+
 
 # ================== 페이지 → 문항 ==================
 def parse_question_blocks_from_page(image: Image.Image) -> List[Dict[str, Any]]:

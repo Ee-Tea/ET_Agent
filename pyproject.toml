@@ -11,7 +11,6 @@ dependencies = [
     "dotenv>=0.9.9",
     "easyocr>=1.7.2",
     "faiss-cpu>=1.11.0.post1",
-    "fitz>=0.0.1.dev2",
     "frontend>=0.0.3",
     "hf-xet>=1.1.7",
     "langchain>=0.3.27",
@@ -48,6 +47,8 @@ dependencies = [
     "requests>=2.28.0",
     "groq>=0.31.0",
     "langchain-teddynote>=0.3.45",
+    "paddleocr>=3.1.0",
+    "paddlepaddle-gpu>=2.6.2",
 ]
 
 [build-system]

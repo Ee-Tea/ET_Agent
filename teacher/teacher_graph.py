@@ -1,3 +1,6 @@
+# 에이전트 및 변수 명 정리 필요
+# 에이전트 별 input / result 스테이트 토의 후 공유 스테이트 구조 확정 / 추가로 인풋 데이터도 확인해서 코드 수정해야함
+# 그리고 답변 노드가 필요할까...?
 import json
 from pathlib import Path
 import sys
@@ -5,28 +8,58 @@ from typing import Dict, Any
 import os
 from dotenv import load_dotenv
 from langsmith import traceable
-from langgraph.graph import END, StateGraph
+from langgraph.graph import START, END, StateGraph
 from langchain_core.runnables import RunnableLambda
 
-from agents.analisys.analysis_agent import AnalysisAgent, print_analysis_result
+from agents.analisys.analysis_agent import AnalysisAgent, print_analysis_result, score_agent # score_agent는 바꿔야함
 from agents.base_agent import BaseAgent
 from teacher_nodes import user_intent
 from ..common.short_term.redis_memory import *
 from agents.retrieve.retrieve_agent import retrieve_agent  # 방금 만든 클래스 import
-from TestGenerator.pdf_quiz_groq import generate_agent # 시험문제 생성 에이전트 (이름 바꿔야댐)
+from TestGenerator.pdf_quiz_groq_class import generate_agent # 시험문제 생성 에이전트 (이거 아래로는 이름 바꿔야댐)
+from solution.solution_agent import solution_agent  # 문제 풀이 에이전트
 
 # 한 번만 생성해서 재사용 (비용 절약)
 retriever = retrieve_agent()
+generator = generate_agent()
+solution = solution_agent()
+score = score_agent()
+analyst = AnalysisAgent()
 
 from typing_extensions import TypedDict, NotRequired
 
+class QuestionItem(TypedDict):
+    id: str              # 고유 ID (문자열 권장)
+    text: str            # 문제 본문
+    type: NotRequired[str]           # "mcq" | "short" | "tf" 등
+    tags: NotRequired[list[str]]     # 단원/유형 태그
+
+class AnswerItem(TypedDict):
+    qid: str
+    answer: str          # "A" / "정답 텍스트" 등
+
+class ExplanationItem(TypedDict):
+    qid: str
+    explanation: str
+
+class NoteItem(TypedDict):
+    qid: str
+    note: str
+
+class SharedState(TypedDict):
+    # 요청하신 필드 이름을 그대로 맞췄습니다.
+    question: NotRequired[list[QuestionItem]]          # 문제들
+    # answer: NotRequired[list[AnswerItem]]              # 각 문제에 대한 정답
+    # explanation: NotRequired[list[ExplanationItem]]    # 해설
+    wrong_question: NotRequired[list[str]]             # 틀린 문제 ID 목록
+    weak_type: NotRequired[list[str]]                  # 취약 유형(태그/단원명 등)
+    retrieve_answer: NotRequired[str]                  # 검색 결과 요약/답변
+    notes: NotRequired[list[NoteItem]]                 # 오답노트
 class TeacherState(TypedDict):
     user_query: str
     intent: str
-
     # 공통/공유: 여러 노드가 읽는 값
-    shared: NotRequired[dict]
-
+    shared: NotRequired[SharedState]
     # 개별 그래프 영역
     retrieval: NotRequired[dict]
     generation: NotRequired[dict]
@@ -34,11 +67,28 @@ class TeacherState(TypedDict):
     score: NotRequired[dict]
     analysis: NotRequired[dict]
 
+
 class Orchestrator:
     """
     전체 워크플로우를 관리하고, 사용자 요청에 따라 
     적절한 에이전트를 선택하고 실행하는 오케스트레이터 클래스입니다.
     """
+    def __init__(self, user_id: str, service: str, chat_id: str):
+    # .env 파일에서 환경 변수 로드
+        load_dotenv()
+        # LangSmith 추적 환경 변수 확인
+        if not os.getenv("LANGCHAIN_API_KEY"):
+            print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
+            print(".env 파일에 키를 추가하거나 직접 환경 변수를 설정해주세요.")
+        self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
+
+    # load / save 래퍼 (RunnableLambda용)
+    def load_state(self, state: TeacherState) -> TeacherState:
+        return self.memory.load(state)
+
+    def persist_state(self, state: TeacherState) -> TeacherState:
+        self.memory.save(state, state)
+        return state
     
     def intent_classifier(state: TeacherState) -> TeacherState:
         """
@@ -95,7 +145,23 @@ class Orchestrator:
         """
         # 문제 생성 로직을 여기에 추가할 수 있습니다.
         print("문제 생성 노드 실행")
-        return state
+        # 1. 에이전트 실행
+        agent_input = {
+            "query": state.get("user_query", "")
+        }
+        agent_result = generator.execute(agent_input)
+
+        # 2. TeacherState에 결과 병합
+        new_state = dict(state)
+        new_state.setdefault("generation", {})
+        new_state["generation"].update(agent_result)
+
+        # 필요 시 공유 영역(shared)에도 승격, 문제, 답, 해설 저장
+        # if "retrieve_answer" in agent_result:
+        #     new_state.setdefault("shared", {})
+        #     new_state["shared"]["retrieve_answer"] = agent_result["retrieve_answer"]
+
+        return new_state
     
     def solution(state: TeacherState) -> TeacherState:
         """
@@ -109,7 +175,22 @@ class Orchestrator:
         """
         # 문제 풀이 로직을 여기에 추가할 수 있습니다.
         print("문제 풀이 노드 실행")
-        return state
+        # 1. 에이전트 실행
+        # agent_input = {
+        #     "retrieval_question": state.get("user_query", "")
+        # }
+        agent_result = solution.execute()
+
+        # 2. TeacherState에 결과 병합
+        new_state = dict(state)
+        new_state.setdefault("solution", {})
+        new_state["solution"].update(agent_result)
+
+        # 필요 시 공유 영역(shared)에도 승격, 문제, 답, 해설 저장
+        # if "retrieve_answer" in agent_result:
+        #     new_state.setdefault("shared", {})
+        #     new_state["shared"]["retrieve_answer"] = agent_result["retrieve_answer"]
+        return new_state
     
     def score(state: TeacherState) -> TeacherState:
         """
@@ -123,7 +204,22 @@ class Orchestrator:
         """
         # 채점 로직을 여기에 추가할 수 있습니다.
         print("채점 노드 실행")
-        return state
+        # 1. 에이전트 실행
+        # agent_input = {
+        #     "retrieval_question": state.get("user_query", "")
+        # }
+        agent_result = score.execute()
+
+        # 2. TeacherState에 결과 병합
+        new_state = dict(state)
+        new_state.setdefault("score", {})
+        new_state["score"].update(agent_result)
+
+        # 필요 시 공유 영역(shared)에도 승격, 문제, 답, 해설 저장
+        # if "retrieve_answer" in agent_result:
+        #     new_state.setdefault("shared", {})
+        #     new_state["shared"]["retrieve_answer"] = agent_result["retrieve_answer"]
+        return new_state
     
     def analysis(state: TeacherState) -> TeacherState:
         """
@@ -137,7 +233,22 @@ class Orchestrator:
         """
         # 오답 분석 로직을 여기에 추가할 수 있습니다.
         print("오답 분석 노드 실행")
-        return state
+        # 1. 에이전트 실행
+        # agent_input = {
+        #     "retrieval_question": state.get("user_query", "")
+        # }
+        agent_result = analyst.execute()
+
+        # 2. TeacherState에 결과 병합
+        new_state = dict(state)
+        new_state.setdefault("analysis", {})
+        new_state["analysis"].update(agent_result)
+
+        # 필요 시 공유 영역(shared)에도 승격, 문제, 답, 해설 저장
+        # if "retrieve_answer" in agent_result:
+        #     new_state.setdefault("shared", {})
+        #     new_state["shared"]["retrieve_answer"] = agent_result["retrieve_answer"]
+        return new_state
     
     def retrieve(state: TeacherState) -> TeacherState:
         """
@@ -171,7 +282,12 @@ class Orchestrator:
     
     def build_teacher_graph(self):
         builder = StateGraph(TeacherState)
+            # 2) 시작점 → 로드 → 분기
+        builder.add_edge(START, "load_state")
+        builder.add_edge("load_state", "intent_classifier")
         
+        builder.add_node("load_state", RunnableLambda(self.load_state))
+        builder.add_node("persist_state", RunnableLambda(self.persist_state))
         builder.add_node("intent_classifier", RunnableLambda(self.intent_classifier))
         builder.add_node("generator", RunnableLambda(self.generator))
         builder.add_node("solution", RunnableLambda(self.solution))
@@ -190,24 +306,13 @@ class Orchestrator:
                 "score": "score"
             }
         )
+        for leaf in ["retrieve", "generator", "solution", "score", "analysis"]:
+            builder.add_edge(leaf, "persist_state")
         
+        return builder.compile()
         
     
     #ㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡ
-    def __init__(self):
-        # .env 파일에서 환경 변수 로드
-        load_dotenv()
-        # LangSmith 추적 환경 변수 확인
-        if not os.getenv("LANGCHAIN_API_KEY"):
-            print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
-            print(".env 파일에 키를 추가하거나 직접 환경 변수를 설정해주세요.")
-
-        self.agents: Dict[str, BaseAgent] = {
-            "analysis": AnalysisAgent(),
-            # 다른 에이전트들을 여기에 추가할 수 있습니다.
-            # "problem_generation": ProblemGenerationAgent(), 
-        }
-
     def get_available_agents(self) -> Dict[str, str]:
         """등록된 에이전트들의 이름과 설명을 반환합니다."""
         return {agent_key: agent.description for agent_key, agent in self.agents.items()}

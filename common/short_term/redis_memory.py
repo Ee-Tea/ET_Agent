@@ -1,104 +1,190 @@
-import redis
+# redis_memory.py  (et_agent/common/short_term/redis_memory.py)
 import json
+import redis
+from typing import Any, Dict, List, Optional
 
-class RedisMemory:
-    def __init__(self, session_id: str,chat_id : str, redis_host="localhost", redis_port=6379):
-        self.client = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
-        self.session_id = session_id
-        self.chat_id = chat_id
+# 길이 제한/TTL 설정 (필요에 맞게 조정)
+MAX_QAS = 200          # shared의 리스트 항목 최대 길이(최근 N개 유지)
+HISTORY_LIMIT = 200    # history 최근 N개만 유지
+DEFAULT_TTL = 72 * 3600  # 72시간
 
-    def _key(self, step: str):
-        return f"{self.user_id}:{self.chat_id}:{step}"
+# teacher_graph의 규격 재사용
+try:
+    from ...teacher.teacher_graph import ensure_shared, SHARED_DEFAULTS
+except Exception:
+    SHARED_DEFAULTS = {
+        "question": [],
+        "options": [],
+        "answer": [],
+        "explanation": [],
+        "subject": [],
+        "wrong_question": [],
+        "weak_type": [],
+        "notes": [],
+        "user_answer": [],
+        "retrieve_answer": "",
+    }
+    def ensure_shared(state: Dict[str, Any]) -> Dict[str, Any]:
+        state = dict(state or {})
+        state.setdefault("shared", {})
+        for k, v in SHARED_DEFAULTS.items():
+            if k not in state["shared"] or not isinstance(state["shared"][k], type(v)):
+                state["shared"][k] = json.loads(json.dumps(v)) if isinstance(v, (dict, list)) else v
+        return state
 
-    # 전체 저장 (리스트 단위)
-    def save_list(self, step: str, value_list: list):
-        self.client.set(self._key(step), json.dumps(value_list))
-
-    def load_list(self, step: str) -> list:
-        data = self.client.get(self._key(step))
-        return json.loads(data) if data else []
-
-    # 히스토리 누적
-    def append_history(self, role: str, content: str):
-        entry = {"role": role, "content": content}
-        self.client.rpush(self._key("history"), json.dumps(entry))
-
-    def get_history(self, limit: int = None):
-        entries = self.client.lrange(self._key("history"), 0, -1 if limit is None else limit - 1)
-        return [json.loads(e) for e in entries]
-
-    # def clear_all(self):
-    #     for step in ["question", "solution", "answer", "score", "note", "history"]:
-    #         self.client.delete(self._key(step))
 
 class RedisLangGraphMemory:
-    def __init__(self, user_id: str, service: str, chat_id: str, redis_host="localhost", redis_port=6379):
-        """
-        :param user_id: 사용자 ID (ex: user123)
-        :param service: 서비스 종류 (ex: exam, farming)
-        :param chat_id: 채팅 세션 ID (ex: chat1)
-        """
+    """
+    단기 메모리:
+    - shared 전체를 JSON으로 {user_id}:{service}:{chat_id}:shared 키에 저장/로드
+    - 채팅 히스토리는 리스트 {…}:history 에 rpush / lrange
+    - append-only 병합 + TTL + 길이 제한
+    """
+    def __init__(
+        self,
+        user_id: str,
+        service: str,
+        chat_id: str,
+        redis_host: str = "localhost",
+        redis_port: int = 6379,
+        ttl_seconds: Optional[int] = DEFAULT_TTL,
+    ):
         self.user_id = user_id
         self.service = service
         self.chat_id = chat_id
+        self.ttl_seconds = ttl_seconds
         self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
 
-    def _key(self, field: str) -> str:
-        """
-        Redis 키 구성: {user_id}:{service}:{chat_id}:{field}
-        """
-        return f"{self.user_id}:{self.service}:{self.chat_id}:{field}"
+    def _k(self, suffix: str) -> str:
+        return f"{self.user_id}:{self.service}:{self.chat_id}:{suffix}"
 
-    def _load_list(self, field: str):
-        """
-        리스트 형태로 저장된 JSON 불러오기
-        """
-        data = self.redis.get(self._key(field))
-        return json.loads(data) if data else []
+    @property
+    def k_shared(self) -> str:
+        return self._k("shared")
 
-    def _save_list(self, field: str, value: list):
-        """
-        리스트 형태로 JSON 저장
-        """
-        self.redis.set(self._key(field), json.dumps(value))
+    @property
+    def k_history(self) -> str:
+        return self._k("history")
 
-    def _append_history(self, entry: dict):
-        """
-        채팅 히스토리 한 항목 추가 (role, content 포함)
-        """
-        self.redis.rpush(self._key("history"), json.dumps(entry))
+    # ---------- 내부 IO ----------
+    def _load_shared(self) -> Dict[str, Any]:
+        raw = self.redis.get(self.k_shared)
+        if not raw:
+            return json.loads(json.dumps(SHARED_DEFAULTS))  # deepcopy
+        try:
+            data = json.loads(raw)
+            tmp = {"shared": data}
+            tmp = ensure_shared(tmp)
+            return tmp["shared"]
+        except Exception:
+            return json.loads(json.dumps(SHARED_DEFAULTS))
 
-    def _load_history(self):
-        """
-        전체 채팅 히스토리 로드
-        """
-        entries = self.redis.lrange(self._key("history"), 0, -1)
-        return [json.loads(e) for e in entries]
+    def _enforce_limits(self, shared: Dict[str, Any]) -> Dict[str, Any]:
+        for k in ("question","options","answer","explanation","subject","wrong_question","notes","user_answer","weak_type"):
+            if isinstance(shared.get(k), list) and len(shared[k]) > MAX_QAS:
+                shared[k] = shared[k][-MAX_QAS:]
+        return shared
 
-    def load(self, state: dict) -> dict:
-        """
-        LangGraph가 노드 실행 전에 호출. Redis에서 상태 불러오기.
-        """
-        return {
-            **state,
-            "questions": self._load_list("question"),
-            "solutions": self._load_list("solution"),
-            "answers": self._load_list("answer"),
-            "score": self._load_list("score"),
-            "notes": self._load_list("note"),
-            "history": self._load_history()
-        }
+    def _save_shared(self, shared: Dict[str, Any]) -> None:
+        shared = self._enforce_limits(shared)
+        payload = json.dumps(shared, ensure_ascii=False)
+        with self.redis.pipeline() as pipe:
+            pipe.set(self.k_shared, payload)
+            if self.ttl_seconds:
+                pipe.expire(self.k_shared, self.ttl_seconds)
+            pipe.execute()
 
-    def save(self, state: dict, output: dict) -> dict:
-        """
-        LangGraph가 노드 실행 후 호출. Redis에 필요한 항목 저장.
-        """
-        for key in ["questions", "solutions", "answers", "score", "notes"]:
-            if key in output:
-                self._save_list(key[:-1] if key.endswith("s") else key, output[key])
+    def _append_history_entries(self, entries: List[Dict[str, Any]]) -> None:
+        if not entries:
+            return
+        with self.redis.pipeline() as pipe:
+            for e in entries:
+                role = e.get("role", "user")
+                content = e.get("content", "")
+                # trace_id/node/ts 같은 메타를 함께 넣으시면 디버깅이 쉬워집니다.
+                pipe.rpush(self.k_history, json.dumps({"role": role, "content": content}, ensure_ascii=False))
+            # 최근 HISTORY_LIMIT만 유지
+            pipe.ltrim(self.k_history, -HISTORY_LIMIT, -1)
+            if self.ttl_seconds:
+                pipe.expire(self.k_history, self.ttl_seconds)
+            pipe.execute()
 
-        if "history" in output:
-            for h in output["history"]:
-                self._append_history(h)
+    def _load_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        if limit is None:
+            entries = self.redis.lrange(self.k_history, 0, -1)
+        else:
+            length = self.redis.llen(self.k_history)
+            start = max(0, length - limit)
+            entries = self.redis.lrange(self.k_history, start, -1)
+        out = []
+        for e in entries:
+            try:
+                out.append(json.loads(e))
+            except Exception:
+                pass
+        return out
 
-        return output
+    # ---------- append-only 병합 로직 ----------
+    @staticmethod
+    def _merge_shared_append_only(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        리스트 필드: 기존 길이 이후로만 append (순서/중복 보존)
+        문자열/스칼라: incoming이 있으면 덮어쓰기, 없으면 기존 유지
+        """
+        result: Dict[str, Any] = {}
+        for key, default in SHARED_DEFAULTS.items():
+            old_val = existing.get(key, default)
+            new_val = incoming.get(key, default)
+
+            if isinstance(default, list):
+                old_list = old_val if isinstance(old_val, list) else []
+                new_list = new_val if isinstance(new_val, list) else []
+                if len(new_list) > len(old_list):
+                    tail = new_list[len(old_list):]
+                    merged = old_list + tail
+                else:
+                    merged = old_list  # 짧아졌거나 같으면 기존 유지
+                result[key] = merged
+            else:
+                result[key] = new_val if (new_val is not None and new_val != "") else old_val
+        return result
+
+    # ---------- LangGraph 인터페이스 ----------
+    def load(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        state = ensure_shared(state or {})
+        stored_shared = self._load_shared()
+
+        # 현재 state.shared가 비어있다면 저장된 것을 채워 넣음 (현재 값 우선)
+        merged_shared = {}
+        for k, default in SHARED_DEFAULTS.items():
+            cur = state["shared"].get(k)
+            merged_shared[k] = cur if (cur not in (None, []) and cur != "") else stored_shared.get(k, default)
+
+        state["shared"] = merged_shared
+        state["history"] = self._load_history()
+        return state
+
+    def save(self, state: Dict[str, Any], output: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(output or {})
+        incoming_shared = (out.get("shared") or state.get("shared") or {})
+        incoming_shared = ensure_shared({"shared": incoming_shared})["shared"]
+
+        # 기존 shared 불러와서 append-only 병합 후 저장
+        existing_shared = self._load_shared()
+        merged_shared = self._merge_shared_append_only(existing_shared, incoming_shared)
+        self._save_shared(merged_shared)
+
+        # history append
+        new_history = out.get("history")
+        if isinstance(new_history, list) and new_history:
+            self._append_history_entries(new_history)
+
+        out["shared"] = merged_shared
+        return out
+
+    # 편의
+    def clear(self) -> None:
+        with self.redis.pipeline() as pipe:
+            pipe.delete(self.k_shared)
+            pipe.delete(self.k_history)
+            pipe.execute()

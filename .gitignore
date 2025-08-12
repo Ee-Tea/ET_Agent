@@ -239,5 +239,3 @@ a-bucket/
 milvus/logs/
 milvus/data/
 milvus/configs/
-
-*.json

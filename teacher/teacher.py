@@ -1,14 +1,14 @@
 import json
 from pathlib import Path
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, cast
 import os
 from dotenv import load_dotenv
 from langsmith import traceable
 
 from agents.analisys.analysis_agent import AnalysisAgent, print_analysis_result
 from agents.base_agent import BaseAgent
-from agents.score.score_engine import ScoreEngine  # 추가
+from agents.score.score_engine import ScoreEngine, print_score_result, ScoreResult
 
 class Orchestrator:
     """
@@ -109,29 +109,7 @@ class Orchestrator:
         if agent_name == "analysis":
             print_analysis_result(result)
         elif agent_name == "score":
-            print("\n--- 채점 결과 ---")
-            if result.get("status") == "success":
-                meta = result.get("metadata", {})
-                print(f"총 문제 수: {meta.get('total_problems', 0)}")
-                print(f"정답 수: {meta.get('correct_count', 0)}")
-                print(f"점수: {meta.get('score', 0)}%")
-                if meta.get("has_mismatch_length"):
-                    print("⚠️ user_answer 와 solution_answer 길이가 다릅니다.")
-                # 간단한 오답 리스트
-                details = result.get("grading", {}).get("details", [])
-                wrong = [d for d in details if not d.get("correct")]
-                if wrong:
-                    print("\n오답 목록(index, user -> solution):")
-                    for d in wrong[:10]:  # 너무 길면 상위 10개만
-                        print(f"  [{d['index']}] {d['user_answer']} -> {d['solution_answer']}")
-                    if len(wrong) > 10:
-                        print(f"  ... (총 {len(wrong)}개 오답)")
-            else:
-                print("❌ 오류 발생")
-                if result.get("error_message"):
-                    print("이유:", result["error_message"])
-            print("\n전체 결과(JSON):")
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print_score_result(cast(ScoreResult, result))
         else:
             # 다른 에이전트들의 결과 출력 로직
             print("\n--- 실행 결과 ---")
@@ -155,17 +133,7 @@ class Orchestrator:
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             print(f"\n💾 결과가 '{output_file}'에 저장되었습니다.")
-            
-            # 요약 정보 출력
-            if result.get("status") == "success" and result.get("metadata"):
-                metadata = result["metadata"]
-                print(f"\n📋 저장된 결과 요약:")
-                print(f"  - 상태: {result.get('status', '알 수 없음')}")
-                if agent_name == "analysis":
-                    print(f"  - 총 문제 수: {metadata.get('total_problems', 0)}")
-                    print(f"  - 정답률: {metadata.get('score', 0)}%")
-                    print(f"  - 오답 여부: {'있음' if metadata.get('has_mistakes', False) else '없음'}")
-                    
+
         except Exception as e:
             print(f"❌ 결과 저장 중 오류 발생: {e}")
             print("결과가 저장되지 않았지만, 분석은 완료되었습니다.")

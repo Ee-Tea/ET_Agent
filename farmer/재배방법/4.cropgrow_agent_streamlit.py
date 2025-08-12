@@ -238,25 +238,14 @@ def classify_question_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "classification": classification_str}
 
 def retrieve_and_check_node(state: GraphState) -> Dict[str, Any]:
-    """통합 DB 검색 및 충분성 확인을 더 안정적인 방식으로 실행합니다."""
-    print("---노드: 통합 DB 검색 및 충분성 확인 실행---")
     question = state["question"]
-    vectorstore = st.session_state.vectorstore
-
-    print("통합 DB에서 관련 정보 검색 중...")
+    vectorstore = state["vectorstore"]
     context = retrieve_relevant_chunks(vectorstore, question)
     
-    # LLM을 사용하지 않고, 검색 결과(context)의 존재 여부로 충분성을 판단
-    if context.strip():
-        # 검색된 정보가 있으면 'sufficient'로 판단
-        retrieval_sufficiency = "sufficient"
-        print("검색된 정보가 충분하여 'sufficient'로 판단합니다.")
-    else:
-        # 검색된 정보가 없으면 'insufficient'로 판단
-        retrieval_sufficiency = "insufficient"
-        print("검색된 정보가 불충분하여 'insufficient'로 판단합니다.")
-        
-    return {**state, "context": context, "retrieval_sufficiency": retrieval_sufficiency}
+    chain = retrieval_check_prompt | llm_keyword | StrOutputParser()
+    retrieval_sufficiency = chain.invoke({"question": question, "context": context})
+    
+    return {**state, "context": context, "retrieval_sufficiency": retrieval_sufficiency.strip()}
 
 def generate_node(state: GraphState) -> Dict[str, Any]:
     context = state["context"]

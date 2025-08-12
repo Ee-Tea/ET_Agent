@@ -103,3 +103,42 @@ class ScoreEngine(BaseAgent):
             return _success(binary_results)
         except Exception as e:
             return _unexpected(str(e))
+
+# 간단 출력 유틸리티
+def print_score_result(result: ScoreResult) -> None:
+    """
+    ScoreEngine 결과를 요약 출력합니다.
+    성공: 총 문항/정답/오답/오답 번호 목록(+ 소량일 때 O/X 행 출력)
+    오류: 오류 유형/메시지 출력
+    """
+    print("\n=== 채점 결과 ===")
+    if not is_success(result):
+        err = getattr(result, "get", None) and result.get("error")
+        msg = result.get("message") if hasattr(result, "get") else None
+        print(f"❌ 오류: {err or 'unknown_error'}")
+        if msg:
+            print(f"이유: {msg}")
+        if err == "length_mismatch":
+            exp = result.get("expected_total")
+            rec = result.get("received_total")
+            print(f"기대 길이={exp}, 입력 길이={rec}")
+        return
+
+    results = result["results"]
+    total = len(results)
+    correct = sum(results)
+    incorrect = total - correct
+    wrong_indices = [i + 1 for i, r in enumerate(results) if r == 0]
+
+    print(f"- 총 문항: {total}")
+    print(f"- 정답: {correct}")
+    print(f"- 오답: {incorrect}")
+    if wrong_indices:
+        print(f"- 오답 번호(1-based): {', '.join(map(str, wrong_indices))}")
+
+    # 문항 수가 작을 때만 O/X 행 출력
+    if total <= 30:
+        print("\n[문항별 결과]")
+        for i, r in enumerate(results, start=1):
+            mark = "O" if r == 1 else "X"
+            print(f"  #{i:02d} {mark}")

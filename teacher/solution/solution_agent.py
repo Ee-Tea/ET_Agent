@@ -6,14 +6,16 @@ from langchain_milvus import Milvus
 from pymilvus import connections
 from langgraph.graph import StateGraph, END
 from langchain_huggingface import HuggingFaceEmbeddings
-import re
-import json
+import json, re
 from langchain_openai import ChatOpenAI
 from teacher.base_agent import BaseAgent
 from docling.document_converter import DocumentConverter
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+
+
 
 # ✅ 상태 정의
 class SolutionState(TypedDict):
@@ -85,13 +87,68 @@ class SolutionAgent(BaseAgent):
         )
 
         # 저장 후 남은 문제가 있으면 next_problem로 루프
-        g.add_conditional_edges(
+        graph.add_conditional_edges(
             "store",
             lambda s: "more" if len(s.get("user_problems", [])) > 0 else "done",
             {"more": "next_problem", "done": END}
         )
 
         return graph.compile()
+    
+    def _llm_extract_qas(self, text: str, llm) -> List[tuple]:
+        """
+        LLM에게 페이지 텍스트를 주고
+        [{"문제":"...","옵션":["...","..."]}, ...] 만 받는다.
+        실패 시 [] 반환.
+        """
+        sys_prompt = (
+            "너는 시험 문제 PDF에서 텍스트를 구조화하는 도우미다. "
+            "다양한 번호/불릿(1., (1), ①, 가., -, • 등)을 이해하고, "
+            "문항을 '문제'와 '옵션'으로만 묶어 JSON 배열로 출력한다. "
+            "옵션은 보기 항목만 포함하고, 설명/해설/정답 등은 포함하지 않는다. "
+            "응답은 반드시 JSON 배열만 출력한다. 다른 문장이나 코드는 절대 포함하지 말 것."
+        )
+        user_prompt = (
+            "다음 텍스트에서 문항을 최대한 정확히 추출해 JSON 배열로 만들어줘.\n"
+            "요구 스키마: [{\"문제\":\"...\",\"옵션\":[\"...\",\"...\"]}]\n"
+            "규칙:\n"
+            "- 질문 본문에서 번호(예: '1.', '(1)', '①', '가.' 등)와 불필요한 머리글은 제거.\n"
+            "- 옵션에서도 마찬가지로 번호/불릿 제거 후 순수 텍스트만 남김.\n"
+            "- 옵션은 2~6개가 일반적이며, 그보다 많으면 상위 6개까지만 사용.\n"
+            "- 추출이 불가하면 빈 배열([])을 출력.\n\n"
+            f"텍스트:\n{text}"
+        )
+
+        try:
+            resp = llm.invoke([{"role":"system","content":sys_prompt},
+                            {"role":"user","content":user_prompt}])
+            content = (resp.content or "").strip()
+
+            # JSON만 남기기 (혹시 모델이 불필요한 텍스트를 붙였을 때 대비)
+            m = re.search(r"\[.*\]", content, re.S)
+            if not m:
+                return []
+            arr = json.loads(m.group(0))
+
+            results = []
+            for item in arr:
+                q = (item.get("문제") or "").strip()
+                opts = [str(o).strip() for o in (item.get("옵션") or [])]
+                if q:
+                    results.append((q, opts))
+            return results
+        except Exception:
+            return []
+
+    def _clean_numbering(self, s: str) -> str:
+        if not s:
+            return s
+        s = s.strip()
+        # 선행 번호/불릿 패턴 제거
+        s = re.sub(r"^\s*(?:\(?\d{1,3}\)?[.)]|[①-⑳]|[A-Za-z가-힣][.)]|[-•])\s*", "", s)
+        # 내부 이중 공백 정리
+        s = re.sub(r"\s{2,}", " ", s)
+        return s.strip()
     
     # --------- 분기 ----------
     def _route(self, state: SolutionState) -> SolutionState:
@@ -112,26 +169,74 @@ class SolutionAgent(BaseAgent):
     def _load_from_external(self, state: SolutionState) -> SolutionState:
         print("📄 [외부] 첨부 문서 로드 및 Docling 변환")
         paths = state.get("external_file_paths", [])
+        if not paths:
+            raise ValueError("external_file_paths 가 비어있습니다. 외부 분기에서는 파일 경로가 필요합니다.")
+
         converter = DocumentConverter()
         extracted_pairs: List[Dict[str, object]] = []
 
+        # LLM (구조화 전용, temperature 0)
+        llm = ChatOpenAI(
+            api_key=GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            temperature=0
+        )
+
         for p in paths:
-            doc = converter.convert(p)  # Docling Document
-            text = doc.export_to_text()
-            # 간단한 규칙: '보기' 또는 선택지 패턴이 있는 블록을 문제/옵션으로 분리
-            chunks = self._split_by_questions(text)
-            for qtext, opts in chunks:
-                # 요구: JSON 키는 "문제", "옵션" 만 사용
-                extracted_pairs.append({"문제": qtext.strip(), "옵션": [o.strip() for o in opts]})
+            result = converter.convert(p)
+            doc = result.document
+
+            # 페이지 단위로 텍스트 추출 (가능하면 페이지 경계 보존)
+            if hasattr(doc, "export_to_markdown"):
+                raw = doc.export_to_markdown(strict_text=True)
+            elif hasattr(doc, "export_to_text"):
+                raw = doc.export_to_text()
+            else:
+                raw = ""
+
+            pages = [pg for pg in raw.split("\f")] if "\f" in raw else raw.split("\n\n\n")  # 간단한 페이지 분리 폴백
+
+            for page_text in pages:
+                page_text = page_text.strip()
+                if not page_text:
+                    continue
+
+                # 1차: 자동 패턴 파서
+                blocks = self._split_by_questions_auto(page_text)
+
+                # 문항 수가 너무 적거나(예: 0~1개) 옵션 없는 항목이 많으면 LLM으로 재시도
+                need_llm = (len(blocks) <= 1) or (sum(1 for q, opts in blocks if opts) <= 0)
+
+                if need_llm:
+                    llm_items = self._llm_extract_qas(page_text, llm)
+                    blocks = llm_items if llm_items else blocks  # LLM 실패하면 1차 결과 유지
+
+                for qtext, opts in blocks:
+                    qtext = self._clean_numbering(qtext)
+                    opts = [self._clean_numbering(o) for o in (opts or [])]
+                    # 최소 품질 필터
+                    if len(qtext) < 3:
+                        continue
+                    if opts and not (2 <= len(opts) <= 6):
+                        opts = opts[:6]
+                    extracted_pairs.append({"문제": qtext.strip(), "옵션": [o.strip() for o in opts]})
 
         if not extracted_pairs:
-            raise ValueError("Docling으로부터 문제를 추출하지 못했습니다. 문서 포맷을 확인하세요.")
+            raise ValueError("문서에서 문제/보기를 추출하지 못했습니다. PDF 포맷을 확인하세요.")
 
-        # 일단 첫 문제만 이번 state에 적재 (한 번에 한 문제 흐름 유지)
-        state["user_problems"] = [{"question": p["문제"], "options": p["옵션"]} for p in extracted_pairs]
+        # 중복 제거(질문 텍스트 기준)
+        seen = set()
+        deduped = []
+        for it in extracted_pairs:
+            key = it["문제"]
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(it)
 
-        # 필요시, 이후 문제는 다음 실행 사이클에서 처리하도록 별도 보관 로직을 추가해도 됨.
-        print(f"✅ Docling 추출(문제/옵션) 예시: {first}")
+        state["user_problems"] = [{"question": it["문제"], "options": it["옵션"]} for it in deduped]
+        print(f"✅ 추출된 문항 수: {len(state['user_problems'])}")
         return state
     
     # 간단한 문제/보기 파서 (문서 포맷에 맞게 조정 가능)
@@ -357,6 +462,7 @@ class SolutionAgent(BaseAgent):
             exam_title: str = "정보처리기사 모의고사 (Groq 순차 버전)",
             difficulty: str = "중급",
             subject: str = "기타",
+            recursion_limit: int = 1000,
         ) -> Dict:
 
         # ✅ Milvus 연결 및 벡터스토어 생성
@@ -403,7 +509,7 @@ class SolutionAgent(BaseAgent):
             "chat_history": []
         }
         
-        final_state = self.graph.invoke(initial_state)
+        final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
         return final_state["results"]
 
 if __name__ == "__main__":
@@ -432,6 +538,15 @@ if __name__ == "__main__":
 
     agent = SolutionAgent()
     results = agent.execute(user_question, user_problems, vectorstore)
+
+    # 그래프 시각화
+    try:
+        graph_image_path = "agent_workflow.png"
+        with open(graph_image_path, "wb") as f:
+            f.write(agent.get_graph().draw_mermaid_png())
+        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        print(f"그래프 시각화 중 오류 발생: {e}")
    
     for i, result in enumerate(results):
         print(f"\n==== 문제 {i + 1} ====")
@@ -440,12 +555,3 @@ if __name__ == "__main__":
         print("E:", result["generated_explanation"])
         print("검증:", "통과" if result["validated"] else "불통과")
         print("히스토리:", result["chat_history"])
-
-    # # 그래프 시각화
-    # try:
-    #     graph_image_path = "agent_workflow.png"
-    #     with open(graph_image_path, "wb") as f:
-    #         f.write(graph.get_graph().draw_mermaid_png())
-    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    # except Exception as e:
-    #     print(f"그래프 시각화 중 오류 발생: {e}")

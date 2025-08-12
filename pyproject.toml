@@ -35,6 +35,7 @@ dependencies = [
     "any>=0.0.2",
     "groq>=0.31.0",
     "langchain-groq>=0.3.7",
+    "graphviz>=0.21",
 ]
 
 [build-system]

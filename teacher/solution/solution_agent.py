@@ -1,34 +1,43 @@
 import os
-from typing import TypedDict, List, Dict
+from typing import TypedDict, List, Dict, Literal, Optional
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_milvus import Milvus
 from pymilvus import connections
 from langgraph.graph import StateGraph, END
-from langchain_core.runnables import RunnableLambda
 from langchain_huggingface import HuggingFaceEmbeddings
 import re
 import json
 from langchain_openai import ChatOpenAI
-from groq import Groq
 from teacher.base_agent import BaseAgent
+from docling.document_converter import DocumentConverter
 
 load_dotenv()
 GROQ_API_KEY=REDACTED("GROQ_API_KEY=REDACTED SolutionState(TypedDict):
     user_question: str
+    user_problems: List[Dict]
     user_problem: str
     user_problem_options: List[str]
-    chat_history: List[str]
+
+    source_type: Literal["internal", "external"]
+    # 내부/외부 원천
+    short_term_memory: List[Dict]
+    external_file_paths: List[str] 
 
     vectorstore: Milvus
-    docs: List[Document]
     retrieved_docs: List[Document]
     similar_questions_text : str
 
     generated_answer: str         # 해답
     generated_explanation: str   # 풀이
+    results: List[Dict]
     validated: bool
 
+    exam_title: str
+    difficulty: str
+    subject: str
+
+    chat_history: List[str]
 class SolutionAgent(BaseAgent):
     """문제 해답/풀이 생성 에이전트"""
 
@@ -43,25 +52,103 @@ class SolutionAgent(BaseAgent):
         
         graph = StateGraph(SolutionState)
 
+        # 분기 & 로딩
+        graph.add_node("route", self._route)
+        graph.add_node("load_from_short_term_memory", self._load_from_stm)
+        graph.add_node("load_from_external_docs", self._load_from_external)
+
+        # 공통 처리
         graph.add_node("search_similarity", self._search_similar_questions)
         graph.add_node("generate_solution", self._generate_solution)
         graph.add_node("validate", self._validate_solution)
         graph.add_node("store", self._store_to_vector_db)
+        graph.add_node("next_problem", self._next_problem)
 
-        graph.set_entry_point("search_similarity")
+        graph.set_entry_point("route")
+        graph.add_conditional_edges("route", lambda s: s["source_type"],
+                                {"internal": "load_from_short_term_memory",
+                                "external": "load_from_external_docs"})
+        graph.add_edge("load_from_short_term_memory", "next_problem")
+        graph.add_edge("load_from_external_docs", "next_problem")
+
+        graph.add_edge("next_problem", "search_similarity")
         graph.add_edge("search_similarity", "generate_solution")
         graph.add_edge("generate_solution", "validate")
+
         graph.add_conditional_edges(
-            "validate",
-            lambda s: "true" if s["validated"] else "false",
-            {
-                "true": "store",
-                "false": END
-            }
+            "validate", 
+            lambda s: "ok" if s["validated"] else "stop",
+            {"ok": "store", "stop": END}
         )
-        graph.add_edge("store", END)
+
+        # 저장 후 남은 문제가 있으면 next_problem로 루프
+        g.add_conditional_edges(
+            "store",
+            lambda s: "more" if len(s.get("user_problems", [])) > 0 else "done",
+            {"more": "next_problem", "done": END}
+        )
 
         return graph.compile()
+    
+    # --------- 분기 ----------
+    def _route(self, state: SolutionState) -> SolutionState:
+        # 오케스트레이터가 채워준 source_type을 그대로 사용
+        st = state["source_type"]
+        print(f"🧭 분기: {st}")
+        return state
+
+    # --------- 내부: STM에서 문제 1개 꺼내와 state에 세팅 ----------
+    def _load_from_stm(self, state: SolutionState) -> SolutionState:
+        stm = state.get("short_term_memory", [])
+        state["user_problems"] = [{"question": x.get("question",""),
+                                "options": x.get("options",[])} for x in stm]
+        state["short_term_memory"] = []  # 큐로 이관
+        return state
+    
+    # --------- 외부: Docling으로 문서 → 텍스트 → JSON(문제/옵션) → state에 세팅 ----------
+    def _load_from_external(self, state: SolutionState) -> SolutionState:
+        print("📄 [외부] 첨부 문서 로드 및 Docling 변환")
+        paths = state.get("external_file_paths", [])
+        converter = DocumentConverter()
+        extracted_pairs: List[Dict[str, object]] = []
+
+        for p in paths:
+            doc = converter.convert(p)  # Docling Document
+            text = doc.export_to_text()
+            # 간단한 규칙: '보기' 또는 선택지 패턴이 있는 블록을 문제/옵션으로 분리
+            chunks = self._split_by_questions(text)
+            for qtext, opts in chunks:
+                # 요구: JSON 키는 "문제", "옵션" 만 사용
+                extracted_pairs.append({"문제": qtext.strip(), "옵션": [o.strip() for o in opts]})
+
+        if not extracted_pairs:
+            raise ValueError("Docling으로부터 문제를 추출하지 못했습니다. 문서 포맷을 확인하세요.")
+
+        # 일단 첫 문제만 이번 state에 적재 (한 번에 한 문제 흐름 유지)
+        state["user_problems"] = [{"question": p["문제"], "options": p["옵션"]} for p in extracted_pairs]
+
+        # 필요시, 이후 문제는 다음 실행 사이클에서 처리하도록 별도 보관 로직을 추가해도 됨.
+        print(f"✅ Docling 추출(문제/옵션) 예시: {first}")
+        return state
+    
+    # 간단한 문제/보기 파서 (문서 포맷에 맞게 조정 가능)
+    def _split_by_questions(self, text: str) -> List[tuple]:
+        blocks = re.split(r"\n\s*\n", text)  # 빈 줄 기준 거칠게 분할
+        results = []
+        for b in blocks:
+            lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
+            if not lines:
+                continue
+            # 옵션 라인 감지 (숫자. 또는 숫자) 패턴)
+            opts = [ln for ln in lines if re.match(r"^\(?\d+\)?[).]\s*", ln)]
+            if opts:
+                # 문제문은 옵션 라인 제외 첫 줄 위주로 사용
+                question_lines = [ln for ln in lines if ln not in opts]
+                qtext = " ".join(question_lines) if question_lines else lines[0]
+                # 옵션 텍스트 정제: "1) ..." → "..." 로
+                clean_opts = [re.sub(r"^\(?\d+\)?[).]\s*", "", o) for o in opts]
+                results.append((qtext, clean_opts))
+        return results
 
 
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
@@ -84,8 +171,8 @@ class SolutionAgent(BaseAgent):
                 """
             similar_questions.append(formatted)
         
-            state["retrieved_docs"] = results
-            state["similar_questions_text"] = "\n\n".join(similar_questions) 
+        state["retrieved_docs"] = results
+        state["similar_questions_text"] = "\n\n".join(similar_questions) 
 
         print(f"유사 문제 {len(results)}개 검색 완료.")
         print("🔍 [1단계] 유사 문제 검색 함수 종료")
@@ -170,29 +257,103 @@ class SolutionAgent(BaseAgent):
     def _store_to_vector_db(self, state: SolutionState) -> SolutionState:  
         print("\n🧩 [4단계] 임베딩 및 벡터 DB 저장 시작")
 
-        vectorstore = state["vectorstore"] 
+        if state["source_type"] == "external":
 
-        # 중복 문제 확인
-        similar = vectorstore.similarity_search(state["user_problem"], k=1)
-        if similar and state["user_problem"].strip() in similar[0].page_content:
-            print("⚠️ 동일한 문제가 존재하여 저장 생략")
+            vectorstore = state["vectorstore"] 
+
+            # 중복 문제 확인
+            similar = vectorstore.similarity_search(state["user_problem"], k=1)
+            if similar and state["user_problem"].strip() in similar[0].page_content:
+                print("⚠️ 동일한 문제가 존재하여 저장 생략")
+                return state
+
+            # 문제, 해답, 풀이를 각각 metadata로 저장
+            doc = Document(
+                page_content=state["user_problem"],
+                metadata={
+                    "options": json.dumps(state.get("user_problem_options", [])), 
+                    "answer": state["generated_answer"],
+                    "explanation": state["generated_explanation"]
+                }
+            )
+            vectorstore.add_documents([doc])
+            print("✅ 문제+해답+풀이 저장 완료")
+
             return state
-
-        # 문제, 해답, 풀이를 각각 metadata로 저장
-        doc = Document(
-            page_content=state["user_problem"],
-            metadata={
-                "options": json.dumps(state.get("user_problem_options", [])), 
-                "answer": state["generated_answer"],
-                "explanation": state["generated_explanation"]
+        else:
+            print("⚠️ 내부 저장소는 벡터 DB 저장을 지원하지 않습니다. 내부 문제로만 저장합니다.")
+            # 내부: 요구 스키마(JSON)로 파일 누적 저장
+            store_path = "./internal_store.json"
+            data = {
+                "exam_title": state.get("exam_title", "내부 문제 모음"),
+                "total_questions": 0,
+                "difficulty": state.get("difficulty", "중급"),
+                "subjects": {},  # subject명: {"requested_count":0,"actual_count":n,"questions":[...]}
             }
-        )
-        vectorstore.add_documents([doc])
-        print("✅ 문제+해답+풀이 저장 완료")
 
+            if os.path.exists(store_path):
+                try:
+                    with open(store_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    pass
+
+            subj = state.get("subject", "기타")
+            subjects = data.setdefault("subjects", {})
+            bucket = subjects.setdefault(subj, {"requested_count": 0, "actual_count": 0, "questions": []})
+
+            bucket["questions"].append({
+                "question": state["user_problem"],
+                "options": [f"  {i+1}. {opt}" for i, opt in enumerate(state.get("user_problem_options", []))],
+                "answer": state["generated_answer"],
+                "explanation": state["generated_explanation"],
+                "subject": subj,
+            })
+            bucket["actual_count"] = len(bucket["questions"])
+
+            # 총 문항 수 재계산
+            total = 0
+            for v in subjects.values():
+                total += len(v.get("questions", []))
+            data["total_questions"] = total
+
+            with open(store_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"✅ 내부 문제 저장(JSON 스키마) 완료 → {store_path}")
+
+        item = {
+            "question": state["user_problem"],
+            "options": state["user_problem_options"],
+            "generated_answer": state["generated_answer"],
+            "generated_explanation": state["generated_explanation"],
+            "validated": state["validated"],
+            "chat_history": state.get("chat_history", []),
+        }
+        state.setdefault("results", []).append(item)
+        return state
+    
+    def _next_problem(self, state: SolutionState) -> SolutionState:
+        queue = state.get("user_problems", [])
+        if not queue:
+            raise ValueError("처리할 문제가 없습니다. user_problems가 비어있어요.")
+        current = queue.pop(0)
+        state["user_problem"] = current.get("question", "")
+        state["user_problem_options"] = current.get("options", [])
+        state["user_problems"] = queue
         return state
 
-    def execute(self, user_question: str, user_problems: List[Dict], vectorstore=None) -> List[Dict]:
+    def execute(
+            self, 
+            user_question: str, 
+            source_type: Literal["internal", "external"],
+            vectorstore: Optional[Milvus] = None,
+            short_term_memory: Optional[List[Dict]] = None,
+            external_file_paths: Optional[List[str]] = None,
+            exam_title: str = "정보처리기사 모의고사 (Groq 순차 버전)",
+            difficulty: str = "중급",
+            subject: str = "기타",
+        ) -> Dict:
+
         # ✅ Milvus 연결 및 벡터스토어 생성
         if vectorstore is None:
 
@@ -210,38 +371,35 @@ class SolutionAgent(BaseAgent):
                 collection_name="problems",
                 connection_args={"host": "localhost", "port": "19530"}
             )
+        
+        initial_state: SolutionState = {
+            "user_question": user_question,
+            "user_problems": [], 
+            "user_problem": "",
+            "user_problem_options": [],
 
-        results = []
-        for i, problem in enumerate(user_problems):
-            print(f"\n===== 문제 {i + 1} 처리 시작 =====")
-            initial_state: SolutionState = {
-                "user_question": user_question,
-                "user_problem": problem["question"],
-                "user_problem_options": problem.get("options", []),
-                "vectorstore": vectorstore,
-                "docs": [],
-                "retrieved_docs": [],
-                "similar_questions_text": "",
-                "generated_answer": "",
-                "generated_explanation": "",
-                "validated": False,
-                "chat_history": []
-            }
+            "source_type": source_type,
+            "short_term_memory": short_term_memory or [],
+            "external_file_paths": external_file_paths or [],
 
-            # ✅ LangGraph 실행
-            state = self.graph.invoke(initial_state)
+            "vectorstore": vectorstore,
+            "retrieved_docs": [],
+            "similar_questions_text": "",
 
-            results.append({
-                "question": problem["question"],
-                "options": problem.get("options", []),
-                "generated_answer": state["generated_answer"],
-                "generated_explanation": state["generated_explanation"],
-                "validated": state["validated"],
-                "chat_history": state["chat_history"]
-            })
+            "generated_answer": "",
+            "generated_explanation": "",
+            "validated": False,
+            "results": [],
             
-        return results
+            "exam_title": exam_title,
+            "difficulty": difficulty,
+            "subject": subject,
 
+            "chat_history": []
+        }
+        
+        final_state = self.graph.invoke(initial_state)
+        return final_state["results"]
 
 if __name__ == "__main__":
     # ✅ Milvus 연결 및 벡터스토어 생성

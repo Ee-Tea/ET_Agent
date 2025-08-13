@@ -96,24 +96,21 @@ class SolutionAgent(BaseAgent):
     def _llm_extract_qas(self, text: str, llm) -> List[tuple]:
         """
         LLM에게 페이지 텍스트를 주고
-        [{"문제":"...","옵션":["...","..."]}, ...] 만 받는다.
+        [{"question":"...","options":["...","..."]}, ...] 만 받는다.
         실패 시 [] 반환.
         """
         sys_prompt = (
             "너는 시험 문제 PDF에서 텍스트를 구조화하는 도우미다. "
-            "다양한 번호/불릿(1., (1), ①, 가., -, • 등)을 이해하고, "
-            "문항을 '문제'와 '옵션'으로만 묶어 JSON 배열로 출력한다. "
-            "옵션은 보기 항목만 포함하고, 설명/해설/정답 등은 포함하지 않는다. "
+            "문제 질문과 보기를 구분해서 question과 options 배열로 출력한다."
+            "options는 보기 항목만 포함하고, 설명/해설/정답 등은 포함하지 않는다. "
             "응답은 반드시 JSON 배열만 출력한다. 다른 문장이나 코드는 절대 포함하지 말 것."
         )
         user_prompt = (
-            "다음 텍스트에서 문항을 최대한 정확히 추출해 JSON 배열로 만들어줘.\n"
+            "다음 텍스트에서 문항을 최대한 그대로, 정확히 추출해 JSON 배열로 만들어줘.\n"
             "요구 스키마: [{\"question\":\"...\",\"options\":[\"...\",\"...\"]}]\n"
             "규칙:\n"
-            "- 질문 본문에서 번호(예: '1.', '(1)', '①', '가.' 등)와 불필요한 머리글은 제거.\n"
-            "- 옵션에서도 마찬가지로 번호/불릿 제거 후 순수 텍스트만 남김.\n"
-            "- 옵션은 2~6개가 일반적이며, 그보다 많으면 상위 6개까지만 사용.\n"
-            "- 추출이 불가하면 빈 배열([])을 출력.\n\n"
+            "- 문제 질문에서 번호(예: '문제 1.' 등)와 불필요한 머리글은 제거.\n"
+            "- 옵션은 4개가 일반적임.\n"
             f"텍스트:\n{text}"
         )
 
@@ -130,23 +127,48 @@ class SolutionAgent(BaseAgent):
 
             results = []
             for item in arr:
-                q = (item.get("문제") or "").strip()
-                opts = [str(o).strip() for o in (item.get("옵션") or [])]
+                q = (item.get("question") or "").strip()
+                opts = [str(o).strip() for o in (item.get("options") or [])]
                 if q:
                     results.append((q, opts))
             return results
         except Exception:
             return []
 
-    def _clean_numbering(self, s: str) -> str:
-        if not s:
-            return s
-        s = s.strip()
-        # 선행 번호/불릿 패턴 제거
-        s = re.sub(r"^\s*(?:\(?\d{1,3}\)?[.)]|[①-⑳]|[A-Za-z가-힣][.)]|[-•])\s*", "", s)
-        # 내부 이중 공백 정리
-        s = re.sub(r"\s{2,}", " ", s)
-        return s.strip()
+    @staticmethod
+    def _split_problem_blocks(raw: str) -> List[str]:
+        """
+        빈 줄(2개 이상) 기준으로 블록 분할.
+        페이지 구분(\f)은 빈 줄로 치환.
+        머리글/푸터/잡음 라인은 1차 필터링.
+        """
+        if not raw:
+            return []
+
+        text = raw.replace("\f", "\n\n")      # 페이지 경계는 빈 줄로
+        text = re.sub(r"[ \t]+\n", "\n", text)  # 행 끝 공백 제거
+        # 문서 공통 잡음 헤더/푸터(필요시 추가)
+        noise_patterns = [
+            r"^\s*문제\s*지\s*$", r"^\s*모의\s*고사\s*$", r"^\s*페이지\s*\d+\s*$"
+        ]
+
+        blocks = [b.strip() for b in re.split(r"\n{2,}", text) if b.strip()]
+
+        cleaned_blocks = []
+        for b in blocks:
+            lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
+            # 잡음 제거
+            kept = []
+            for ln in lines:
+                if any(re.search(pat, ln, re.I) for pat in noise_patterns):
+                    continue
+                kept.append(ln)
+            if not kept:
+                continue
+            cleaned_blocks.append("\n".join(kept))
+
+        return cleaned_blocks
+
     
     # --------- 분기 ----------
     def _route(self, state: SolutionState) -> SolutionState:
@@ -165,80 +187,129 @@ class SolutionAgent(BaseAgent):
     
     # --------- 외부: Docling으로 문서 → 텍스트 → JSON(문제/옵션) → state에 세팅 ----------
     def _load_from_external(self, state: SolutionState) -> SolutionState:
-        print("📄 [외부] 첨부 문서 로드 및 Docling 변환")
+        """
+        PDF/문서 → 텍스트 → [문제 블록 분할] → (블록 단위) LLM 파싱 → '문항+보기4'만 저장
+        """
+        print("📄 [외부] 첨부 문서 로드 → 텍스트 변환 → 블록 단위 LLM 파싱 시작")
         paths = state.get("external_file_paths", [])
         if not paths:
             raise ValueError("external_file_paths 가 비어있습니다. 외부 분기에서는 파일 경로가 필요합니다.")
 
         converter = DocumentConverter()
-        extracted_pairs: List[Dict[str, object]] = []
 
-        # LLM (구조화 전용, temperature 0)
+        # LLM (엄격한 구조화 전용)
         llm = ChatOpenAI(
             api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             temperature=0
         )
 
-        for p in paths:
-            result = converter.convert(p)
-            doc = result.document
+        # ----- 블록 1개를 LLM으로 파싱하는 내부 함수 -----
+        def parse_block_with_llm(block_text: str) -> Optional[Dict[str, object]]:
+            # 노이즈 제거 (정답/해설 라인)
+            cleaned = []
+            for ln in block_text.splitlines():
+                if re.search(r"(정답|해설|답안|풀이|answer|solution)\s*[:：]", ln, re.I):
+                    continue
+                cleaned.append(ln)
+            cleaned_text = "\n".join(cleaned).strip()
 
-            # 페이지 단위로 텍스트 추출 (가능하면 페이지 경계 보존)
+            if len(cleaned_text) < 5:
+                return None
+
+            sys_prompt = (
+                "너는 시험 블록 텍스트를 정확히 구조화하는 도우미다. "
+                "입력 블록에는 '한 문제'가 들어있다. "
+                "출력은 반드시 JSON 하나의 객체로만 하며, 다음 스키마를 지켜라:\n"
+                '{"question": "<질문 본문(번호/머리글 제거)>", "options": ["<보기1>","<보기2>","<보기3>","<보기4>"]}\n'
+                "주의사항:\n"
+                "- 반드시 options는 정확히 4개여야 한다.\n"
+                "- 입력 블록에 있는 보기 텍스트만 사용하고 새로 만들지 마라.\n"
+                "- 불필요한 설명/정답/해설/코드블록/문자열은 출력하지 마라. JSON만 출력하라."
+            )
+            user_prompt = f"다음 블록을 구조화하라:\n```\n{cleaned_text}\n```"
+
+            try:
+                resp = llm.invoke([
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ])
+                content = (resp.content or "").strip()
+                m = re.search(r"\{.*\}", content, re.S)  # JSON 객체만 추출
+                if not m:
+                    return None
+                obj = json.loads(m.group(0))
+
+                q = (obj.get("question") or "").strip()
+                opts = [str(o).strip() for o in (obj.get("options") or []) if str(o).strip()]
+                if not q or len(opts) != 4:
+                    return None
+
+                # 번호/머리글 정리
+                q = re.sub(r"^\s*(?:문제\s*)?\d{1,3}\s*[\).:]\s*", "", q).strip()
+                norm_opts = []
+                for o in opts:
+                    o = re.sub(r"^\s*(?:\(?[①-④1-4A-Da-d가-라]\)?[\).．\.]?)\s*", "", o).strip()
+                    norm_opts.append(o)
+
+                return {"question": q, "options": norm_opts}
+
+            except Exception as e:
+                print(f"⚠️ LLM 파싱 실패: {e}")
+                return None
+
+        extracted: List[Dict[str, object]] = []
+
+        for p in paths:
+            try:
+                result = converter.convert(p)
+                doc = result.document
+            except Exception as e:
+                print(f"⚠️ 변환 실패: {p} - {e}")
+                continue
+
+            # 문서 전체 텍스트 추출
+            raw = ""
             if hasattr(doc, "export_to_markdown"):
                 raw = doc.export_to_markdown()
             elif hasattr(doc, "export_to_text"):
                 raw = doc.export_to_text()
-            else:
-                raw = ""
+            raw = (raw or "").replace("\r\n", "\n")
 
-            pages = [pg for pg in raw.split("\f")] if "\f" in raw else raw.split("\n\n\n")  # 간단한 페이지 분리 폴백
+            # ✅ 문제 블록 분할 (빈 줄 2개 이상 기준 + 일부 헤더 제거)
+            blocks = self._split_problem_blocks(raw)
+            print(f"📦 {p} | 추정 문제 블록 수: {len(blocks)}")
 
-            for page_text in pages:
-                page_text = page_text.strip()
-                if not page_text:
-                    continue
+            for idx, block in enumerate(blocks, 1):
+                item = parse_block_with_llm(block)
+                if item:
+                    extracted.append({
+                        "question": item["question"],
+                        "options": item["options"],
+                        "source": p,
+                        "block_index": idx
+                    })
 
-                # 1차: 자동 패턴 파서
-                blocks = self._split_by_questions(page_text)
+        if not extracted:
+            raise ValueError("문서에서 '문항 + 보기4'를 추출하지 못했습니다. LLM 파싱 규칙 또는 블록 분할 기준을 조정하세요.")
 
-                # 문항 수가 너무 적거나(예: 0~1개) 옵션 없는 항목이 많으면 LLM으로 재시도
-                need_llm = (len(blocks) <= 1) or (sum(1 for q, opts in blocks if opts) <= 0)
-
-                if need_llm:
-                    llm_items = self._llm_extract_qas(page_text, llm)
-                    blocks = llm_items if llm_items else blocks  # LLM 실패하면 1차 결과 유지
-
-                for qtext, opts in blocks:
-                    qtext = self._clean_numbering(qtext)
-                    opts = [self._clean_numbering(o) for o in (opts or [])]
-                    # 최소 품질 필터
-                    if len(qtext) < 3:
-                        continue
-                    if opts and not (2 <= len(opts) <= 6):
-                        opts = opts[:6]
-                    extracted_pairs.append({"question": qtext.strip(), "options": [o.strip() for o in opts]})
-
-        if not extracted_pairs:
-            raise ValueError("문서에서 문제/보기를 추출하지 못했습니다. PDF 포맷을 확인하세요.")
-
-        # 중복 제거(질문 텍스트 기준)
-        seen = set()
-        deduped = []
-        for it in extracted_pairs:
-            key = it["question"]
+        # ✅ 질문 텍스트 기준 중복 제거
+        seen, deduped = set(), []
+        for it in extracted:
+            key = re.sub(r"\s+", " ", it["question"]).strip()
             if key in seen:
                 continue
             seen.add(key)
             deduped.append(it)
 
         state["user_problems"] = [{"question": it["question"], "options": it["options"]} for it in deduped]
-        print(f"✅ 추출된 문항 수: {len(state['user_problems'])}")
-        
+        print(f"✅ 최종 추출 문항 수(보기 4개): {len(state['user_problems'])}")
+
         saved_file = self.save_user_problems_to_json(state["user_problems"], "user_problems_json.json")
-        print(f"저장된 파일: {saved_file}")
+        print(f"💾 저장된 파일: {saved_file}")
         return state
-    
+
+
     # 간단한 문제/보기 파서 (문서 포맷에 맞게 조정 가능)
     def _split_by_questions(self, text: str) -> List[tuple]:
         blocks = re.split(r"\n\s*\n", text)  # 빈 줄 기준 거칠게 분할

@@ -5,14 +5,14 @@
         "자료 흐름도(Data Flow Diagram)의 구성 요소로 옳은 것은?\n① process, data flow, data store, comment\n② process, data flow, data store, terminator\n③ data flow, data store, terminator, data dictionary\n④ process, data store, terminator, mini-spec",
         "분산 시스템에서의 미들웨어(Middleware)와 관련한 설명으로 틀린 것은?\n① 분산 시스템에서 다양한 부분을 관리하고 통신하며 데이터를 교환하게 해주는 소프트웨어로 볼 수 있다.\n② 위치 투명성(Location Transparency)을 제공한다.\n③ 분산 시스템의 여러 컴포넌트가 요구하는 재사용 가능한 서비스의 구현을 제공한다.\n④ 애플리케이션과 사용자 사이에서만 분산 서비스를 제공한다."
     ],
-    "problem_types": [
+        "problem_types": [
         "소프트웨어 설계","정보 시스템 구축 관리","소프트웨어 설계","소프트웨어 설계"
     ],
     "user_answer": [
+        4,
         3,
-        4,
-        4,
-        2
+        2,
+        4
     ],
     "solution_answer": [
         3,
@@ -27,9 +27,9 @@
         "애플리케이션과 사용자 사이뿐만 아니라 클라이언트와 서버, 운영체제와 응용 프로그램과 같이 두 시스템 사이에서 다양한 서비스를 제공하는 소프트웨어를 미들웨어(Middleware)라고 합니다."
     ],
     "results": [
-    1,
-    1,
     0,
-    0
+    0,
+    1,
+    1
   ]
 }

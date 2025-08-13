@@ -1,0 +1,118 @@
+{
+  "quiz_type": "weakness_based_llm",
+  "difficulty": "중급",
+  "weakness_analysis": {
+    "weakness_concepts": [
+      "자료흐름도",
+      "미들웨어",
+      "자료흐름도의 구성 요소",
+      "미들웨어의 역할과 범위",
+      "분산 시스템에서의 통신"
+    ],
+    "subject_focus": [
+      "소프트웨어 설계",
+      "데이터베이스 구축"
+    ],
+    "difficulty_level": "중급",
+    "question_types": [
+      "개념 이해",
+      "응용 문제"
+    ],
+    "learning_priorities": [
+      "자료흐름도 구성요소 이해",
+      "미들웨어 역할과 기능",
+      "분산 시스템에서의 미들웨어 적용"
+    ]
+  },
+  "weakness_concepts": [
+    "자료흐름도",
+    "미들웨어",
+    "자료흐름도의 구성 요소",
+    "미들웨어의 역할과 범위",
+    "분산 시스템에서의 통신"
+  ],
+  "requested_count": 5,
+  "quiz_count": 5,
+  "questions": [
+    {
+      "question": "자료흐름도의 구성 요소로 옳은 것은?",
+      "options": [
+        "  1. process, data flow, data store, comment",
+        "  2. process, data flow, data store, terminator",
+        "  3. data flow, data store, terminator, data dictionary",
+        "  4. process, data store, terminator, mini-spec"
+      ],
+      "answer": "2",
+      "explanation": "자료흐름도의 구성 요소로는 process, data flow, data store, terminator가 있습니다. comment는 자료흐름도에서 공식적으로 인정되는 구성 요소는 아닙니다.",
+      "weakness_focus": "자료흐름도",
+      "subject": "소프트웨어 설계",
+      "weakness_concept": "자료흐름도"
+    },
+    {
+      "question": "미들웨어(Middleware)에 대한 설명으로 가장 적절한 것은?",
+      "options": [
+        "  1. 여러 운영체제에서 응용 프로그램들 사이에 위치한 소프트웨어이다.",
+        "  2. 미들웨어의 서비스 이용을 위해 사용자가 정보 교환 방법 등의 내부 동작을 쉽게 확인할 수 있어야 한다.",
+        "  3. 소프트웨어 컴포넌트를 연결하기 위한 준비된 인프라 구조를 제공한다.",
+        "  4. 주로 데이터베이스와 직접 연결되어 데이터 처리 성능을 향상시킨다."
+      ],
+      "answer": "1",
+      "explanation": "미들웨어는 여러 운영체제에서 응용 프로그램들 사이에 위치한 소프트웨어로, 이질적인 환경에서 응용 프로그램이 원활하게 통신할 수 있도록 도와줍니다. 미들웨어는 소프트웨어 컴포넌트를 연결하기 위한 인프라 구조를 제공하며, 여러 컴포넌트를 다양한 형태로 연결할 수 있습니다.",
+      "weakness_focus": "미들웨어",
+      "subject": "소프트웨어 설계",
+      "weakness_concept": "미들웨어"
+    },
+    {
+      "question": "자료를 변환하는 기능을 가진 ( )은 입력 자료를 받아서 처리한 후 출력 자료를 생산합니다.",
+      "options": [
+        "  1. 자료흐름",
+        "  2. 처리과정",
+        "  3. 자료사전",
+        "  4. 단말"
+      ],
+      "answer": "2",
+      "explanation": "처리과정은 자료를 변환하는 기능을 가진 것으로, 입력 자료를 받아서 처리한 후 출력 자료를 생산합니다.",
+      "weakness_focus": "자료흐름도의 구성 요소",
+      "subject": "소프트웨어 설계",
+      "weakness_concept": "자료흐름도의 구성 요소"
+    },
+    {
+      "question": "미들웨어(Middleware)의 역할로 옳지 않은 것은?",
+      "options": [
+        "  1. 여러 운영체제에서 응용 프로그램들 사이에 위치한 소프트웨어이다.",
+        "  2. 소프트웨어 컴포넌트를 연결하기 위한 준비된 인프라 구조를 제공한다.",
+        "  3. 여러 컴포넌트를 1대1, 1대 다, 다대 다 등 여러 가지 형태로 연결이 가능하다.",
+        "  4. 미들웨어의 서비스 이용을 위해 사용자가 정보 교환 방법 등의 내부 동작을 쉽게 확인할 수 있어야 한다."
+      ],
+      "answer": "4",
+      "explanation": "미들웨어는 내부 동작을 추상화하여 사용자가 복잡한 내부 동작을 알 필요가 없이 서비스를 이용할 수 있도록 설계되어야 한다. 따라서 미들웨어의 서비스 이용을 위해 사용자가 정보 교환 방법 등의 내부 동작을 쉽게 확인할 수 있어야 하는 것은 옳지 않다.",
+      "weakness_focus": "미들웨어의 역할과 범위",
+      "subject": "소프트웨어 설계",
+      "weakness_concept": "미들웨어의 역할과 범위"
+    },
+    {
+      "question": "분산 처리 시스템(Distributed Processing System)의 특징으로 옳지 않은 것은?",
+      "options": [
+        "  1. 여러 개의 컴퓨터를 통신 회선으로 연결하여 하나의 작업을 처리하는 방식이다.",
+        "  2. 고속 및 고품질의 통신 서비스를 제공한다.",
+        "  3. 대형 컴퓨터의 공동 이용이 가능하다.",
+        "  4. 시스템의 신뢰도가 낮다."
+      ],
+      "answer": "4",
+      "explanation": "분산 처리 시스템은 여러 개의 컴퓨터를 통신 회선으로 연결하여 하나의 작업을 처리하는 방식으로, 고속 및 고품질의 통신 서비스를 제공하고 대형 컴퓨터의 공동 이용이 가능합니다. 따라서, 시스템의 신뢰도가 낮다는 것은 옳지 않습니다.",
+      "weakness_focus": "분산 시스템에서의 통신",
+      "subject": "소프트웨어 설계",
+      "weakness_concept": "분산 시스템에서의 통신"
+    }
+  ],
+  "generation_summary": {
+    "analyzed_concepts": 5,
+    "generated_questions": 5,
+    "success_rate": "100.0%",
+    "focus_subjects": [
+      "소프트웨어 설계",
+      "데이터베이스 구축"
+    ]
+  },
+  "status": "SUCCESS"
+}

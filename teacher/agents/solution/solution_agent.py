@@ -8,7 +8,7 @@ from langgraph.graph import StateGraph, END
 from langchain_huggingface import HuggingFaceEmbeddings
 import json, re
 from langchain_openai import ChatOpenAI
-from teacher.base_agent import BaseAgent
+from ..base_agent import BaseAgent
 from docling.document_converter import DocumentConverter
 from datetime import datetime
 

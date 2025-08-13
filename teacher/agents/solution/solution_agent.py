@@ -48,6 +48,14 @@ class SolutionAgent(BaseAgent):
 
     def __init__(self):
         self.graph = self._create_graph()
+        
+    @property
+    def name(self) -> str:
+        return "SolutionAgent"
+
+    @property
+    def description(self) -> str:
+        return "시험문제를 인식하여 답과 풀이, 해설을 제공하는 에이전트입니다."
 
     def _create_graph(self) -> StateGraph:
         """워크플로우 그래프 생성"""

@@ -78,6 +78,24 @@ SHARED_DEFAULTS: Dict[str, Any] = {
     "retrieve_answer": "",
 }
 
+# 의도 정규화 헬퍼
+CANON_INTENTS = {"retrieve","generate","analyze","solution","score"}
+
+def normalize_intent(raw: str) -> str:
+    s = (raw or "").strip().strip('"\'' ).lower()  # 양끝 따옴표/공백 제거
+    # 흔한 별칭/오타 흡수
+    alias = {
+    "generator":"generate",
+    "problem_generation":"generate",
+    "make":"generate","create":"generate","생성":"generate","만들":"generate",
+    "analysis":"analyze","분석":"analyze",
+    "search":"retrieve","lookup":"retrieve","검색":"retrieve",
+    "solve":"solution","풀이":"solution",
+    "grade":"score","채점":"score",
+    }
+    s = alias.get(s, s)
+    return s if s in CANON_INTENTS else "retrieve"
+
 def ensure_shared(state: TeacherState) -> TeacherState:
     """shared 키 및 타입을 보정하여 이후 노드에서 안정적으로 사용 가능하게 합니다."""
     ns = deepcopy(state) if state else {}
@@ -166,19 +184,25 @@ class Orchestrator:
         return state
 
     # ── Intent & Routing ────────────────────────────────────────────────────
+
     @traceable(name="teacher.intent_classifier")
     def intent_classifier(self, state: TeacherState) -> TeacherState:
         uq = (state.get("user_query") or "").strip()
-        intent = "retrieve" if not uq else "retrieve"  # 기본값: 검색
+        raw = ""
         try:
             from teacher_nodes import user_intent
-            intent = (user_intent(uq) or intent).lower() if uq else intent
+            raw = user_intent(uq) if uq else ""
         except Exception:
             pass
-        print(f"사용자 의도 분류: {intent}")
+        intent = normalize_intent(raw or "retrieve")
+        print(f"사용자 의도 분류(정규화): {intent} (raw={raw!r})")
         return {**state, "user_query": uq, "intent": intent}
 
     def select_agent(self, state: TeacherState) -> str:
+        try:
+            intent_norm = normalize_intent(state.get("intent", ""))
+        except NameError:
+            intent_norm = (state.get("intent","") or "").strip().strip('"\'' ).lower()
         mapping = {
             "retrieve": "retrieve",
             "generate": "generator",
@@ -186,7 +210,9 @@ class Orchestrator:
             "solution": "route_solution",
             "score": "route_score",
         }
-        return mapping.get((state.get("intent") or "").lower(), "retrieve")
+        chosen = mapping.get(intent_norm, "retrieve")
+        print(f"[router] intent={intent_norm} → {chosen}")
+        return chosen
 
     # ── Router (의존성 자동 보장) ───────────────────────────────────────────
     def route_solution(self, state: TeacherState) -> str:
@@ -250,7 +276,7 @@ class Orchestrator:
             raise RuntimeError("generator_runner is not initialized (init_agents=False).")
         agent_input = {"query": state.get("user_query", "")}
         agent_result = safe_execute(agent, agent_input)
-
+        print(f"문제 생성 결과: {agent_result}")
         new_state: TeacherState = {**state}
         new_state.setdefault("generation", {})
         new_state["generation"].update(agent_result)

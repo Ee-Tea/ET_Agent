@@ -15,7 +15,7 @@ class RAGEngine:
     PDF 파일 로딩, 임베딩, 벡터 스토어 관리, 문서 검색을 담당
     """
     
-    def __init__(self, data_folder: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")):
+    def __init__(self, data_folder: str = os.path.join(os.path.dirname(__file__),"data")):
         """
         RAG 엔진 초기화
         

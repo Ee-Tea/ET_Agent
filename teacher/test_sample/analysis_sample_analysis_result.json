@@ -1,0 +1,39 @@
+{
+  "status": "success",
+  "analysis": {
+    "detailed_analysis": [
+      {
+        "problem_number": "3",
+        "subject": "소프트웨어 설계",
+        "mistake_type": "개념 이해 부족",
+        "analysis": "자료 흐름도(DFD)의 구성 요소를 제대로 이해하지 못하여 terminator를 누락하고 comment를 포함하는 등 혼동이 있음."
+      },
+      {
+        "problem_number": "4",
+        "subject": "소프트웨어 설계",
+        "mistake_type": "세부 사항 오해",
+        "analysis": "미들웨어의 역할을 이해하지 못하고, 애플리케이션과 사용자 사이에서만 분산 서비스를 제공한다고 오해함."
+      }
+    ],
+    "overall_assessment": {
+      "strengths": "학생은 소프트웨어 설계와 관련된 기본 개념을 일부 이해하고 있으며, 특히 문제 해결을 위한 선택지를 분석하는 능력에서 강점을 보임.",
+      "weaknesses": "소프트웨어 설계 과목에서 개념 이해의 부족과 세부 사항의 오해가 반복되는 패턴으로 나타나고 있음.",
+      "action_plan": {
+        "title": "소프트웨어 설계 개념 강화 및 문제 해결 전략 개선",
+        "short_term_goal": "2주 내에 소프트웨어 설계 기초 개념 완벽 이해 및 관련 문제 80% 이상 정확도 달성",
+        "long_term_goal": "소프트웨어 설계 과목에서 우수한 성적 달성 및 실제 시스템 설계 참여 능력 개발",
+        "recommended_strategies": [
+          "기본 개념 복습 및 관련 자료 흐름도, 미들웨어 상세 학습",
+          "다양한 문제 유형 풀이 연습",
+          "관련 사례 연구를 통한 개념 적용 연습"
+        ],
+        "recommended_resources": [
+          "소프트웨어 설계 교재",
+          "온라인 강의 (예: Coursera, edX)",
+          "시스템 설계 사례 연구 자료"
+        ]
+      },
+      "final_message": "학생의 잠재력을 믿습니다. 지속적인 노력과 전략적 학습을 통해 우수한 성과를 거둘 수 있을 것입니다."
+    }
+  }
+}

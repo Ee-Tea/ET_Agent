@@ -14,7 +14,7 @@ class AnalysisState(TypedDict):
     """
     messages: Annotated[List[BaseMessage], "그래프 실행 중 생성되는 대화 메시지 로그"]
     problem: List[str]  # 원문 문항 텍스트
-    problem_type: List[Dict[str, Any]]  # 계층형 개념 태그(예: 과목명/주요항목/세부항목/세세항목)
+    problem_types: List[str]  # 과목명 리스트(예: ["소프트웨어설계", "소프트웨어개발", ...])
     user_answer: List[int]  # 사용자 답
     solution_answer: List[int]  # 정답
     solution: List[str]  # 해설(선택)
@@ -111,46 +111,34 @@ class AnalysisAgent(BaseAgent):
     
     def _generate_feedback(self, state: AnalysisState) -> AnalysisState:
         """LLM 피드백 생성
-        - 입력: problem/problem_type/user_answer/solution_answer/solution/grade_result
-        - 준비: problem_type 평탄화 → items(문항 단위 구조) 생성
+        - 입력: problem/problem_types/user_answer/solution_answer/solution/grade_result
+        - 준비: 과목명(subject)만 활용하여 문항 단위 items 생성
         - 출력: detailed_analysis / overall_assessment 만 상태에 저장
         """
         problems = state["problem"]
-        problem_types = state["problem_type"]
+        subjects = state["problem_types"]
         user_answers = state["user_answer"]
         solution_answers = state["solution_answer"]
         solutions = state["solution"]
         grade_result = state["grade_result"]
-
-        # problem_type 평탄화(계층형 → '과목명 > 주요항목 > 세부항목 > 세세항목' 경로 문자열)
-        def flatten_problem_type(pt: Any) -> str:
-            if isinstance(pt, dict):
-                keys = ["과목명", "주요항목", "세부항목", "세세항목"]
-                parts = [str(pt.get(k)) for k in keys if pt.get(k)]
-                return " > ".join(parts) if parts else json.dumps(pt, ensure_ascii=False)
-            return str(pt)
-
-        flattened_types: List[str] = [flatten_problem_type(pt) for pt in problem_types]
 
         # 문항 단위(items) 데이터 구성(LLM 입력 최적화)
         items = [
             {
                 "number": i + 1,
                 "problem": problem,
-                "problem_type": p_type,
-                "problem_type_path": p_type_flat,
+                "subject": subject,  # 과목명만 유지
                 "user_answer": user_ans,
                 "solution_answer": correct_ans,
                 "is_correct": bool(is_correct),
                 "solution": solution,
             }
-            for i, (problem, p_type, p_type_flat, user_ans, correct_ans, solution, is_correct) in enumerate(
-                zip(problems, problem_types, flattened_types, user_answers, solution_answers, solutions, grade_result)
+            for i, (problem, subject, user_ans, correct_ans, solution, is_correct) in enumerate(
+                zip(problems, subjects, user_answers, solution_answers, solutions, grade_result)
             )
         ]
         mistakes = [it for it in items if not it["is_correct"]]
 
-        # LLM 입력 페이로드(간결/일관)
         analysis_data = {
             "items": items,
             "summary": {
@@ -160,7 +148,6 @@ class AnalysisAgent(BaseAgent):
             },
         }
 
-        # 오답 존재 시: 오답 분석 프롬프트
         if len(mistakes) > 0:
             completion = self.client.chat.completions.create(
                 model=self.model,
@@ -169,20 +156,18 @@ class AnalysisAgent(BaseAgent):
                         "role": "system",
                         "content": """당신은 학생의 학습 데이터를 분석하는 전문 학습 코치입니다.
 각 문항 데이터는 'items' 배열에 문항 단위 객체로 제공됩니다.
-problem_type 은 각 문항의 개념적 계층 정보를 담는 객체입니다.
-예시: {"과목명":"소프트웨어 설계","주요항목":"요구사항 확인","세부항목":"요구사항 확인","세세항목":"요구분석기법"}
-필요 시 'problem_type_path'를 사용해 '과목명 > 주요항목 > 세부항목 > 세세항목' 경로로 개념을 활용하십시오.
+subject 는 각 문항의 과목명(문자열)입니다.
 응답은 지정된 JSON 스키마만 출력하고, 불필요한 자연어 설명은 포함하지 마십시오."""
                     },
                     {
                         "role": "user",
                         "content": f"""다음 학생의 풀이 결과를 문항 단위로 제공합니다. 오답 패턴을 분석하고 맞춤 피드백을 생성하세요.
 
-                {json.dumps(analysis_data, ensure_ascii=False, indent=2)}
+{json.dumps(analysis_data, ensure_ascii=False, indent=2)}
 
 분석 지침:
-- items[*].problem_type_path를 활용해 개념 경로 기반 패턴을 도출
-- 동일/유사 경로 반복 오답은 묶어서 패턴 설명
+- items[*].subject를 활용해 과목 기반 오답 패턴을 도출
+- 동일 과목에서 반복되는 오답은 묶어서 패턴 설명
 - 실수 유형을 구체화하고 교정 전략을 제시
 
 아래 JSON 형식을 그대로 따르세요.
@@ -191,7 +176,7 @@ problem_type 은 각 문항의 개념적 계층 정보를 담는 객체입니다
   "detailed_analysis": [
     {{
       "problem_number": "틀린 문제 번호",
-      "concept_path": "문제의 개념 경로 (problem_type_path 활용)",
+      "subject": "과목명",
       "mistake_type": "실수 유형 (예: 개념 이해 부족, 계산 실수, 조건 누락)",
       "analysis": "왜 틀렸는지에 대한 구체적 원인 분석 (학생의 사고 과정 추정)"
     }}
@@ -220,19 +205,15 @@ problem_type 은 각 문항의 개념적 계층 정보를 담는 객체입니다
                 response_format={"type": "json_object"},
                 stop=None
             )
-            
-            # JSON 응답 파싱 및 저장
+
             feedback_content = completion.choices[0].message.content
             try:
                 parsed_feedback = json.loads(feedback_content)
             except json.JSONDecodeError:
                 parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
-            # LLM JSON 응답 파싱 실패 시 안전 기본값 사용
-            # 중복 저장 없음: 두 키만 보관
             state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
             state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
         else:
-            # 전부 정답: 종합 평가만 요청
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -243,31 +224,31 @@ problem_type 은 각 문항의 개념적 계층 정보를 담는 객체입니다
                     {
                         "role": "user",
                         "content": f"""학생은 모든 문제({len(grade_result)}문제)를 정답 처리했습니다.
-items 배열의 문항 단위 데이터를 활용하여 개념적 강점을 구조적으로 설명하고 다음 학습 단계를 제안하세요.
-개념 경로는 각 item의 problem_type_path를 사용하세요.
+items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 구조적으로 설명하고 다음 학습 단계를 제안하세요.
+과목명은 각 item의 subject를 사용하세요.
 
 {json.dumps(analysis_data, ensure_ascii=False, indent=2)}
 
-                피드백은 아래 JSON 형식에 맞춰, 학생의 자신감을 높이고 도전 의식을 자극하는 내용으로 작성해주세요.
-                ```json
-                {{
-                  "overall_assessment": {{
-                    "title": "완벽한 결과! 다음 도전을 위한 제안",
-                    "strengths_analysis": "문제 유형별 정답률 100%를 달성한 것을 바탕으로, 학생이 어떤 개념과 문제 해결 능력이 뛰어난지 구체적으로 분석하고 칭찬해주세요.",
-                    "deepen_learning_plan": {{
-                      "title": "실력 유지를 위한 심화 학습 계획",
-                      "recommendations": [
-                        "현재 지식을 더 깊게 만들기 위한 구체적인 학습 활동 제안 (예: '관련 심화 문제집 풀이', '유사한 개념을 다른 과목과 연결해보기')",
-                        "새로운 도전 과제 제안 (예: '경시대회 문제 맛보기', '관련 주제에 대한 프로젝트 학습')"
-                      ],
-                      "recommended_resources": ["심화 학습에 도움이 될 만한 자료나 책, 강의 링크 (있을 경우)"]
-                    }},
-                    "final_message": "학생의 성취를 축하하고, 앞으로의 성장을 응원하는 격려의 메시지."
-                  }}
-                }}
-                ```
-                모든 내용은 한국어로 작성해주세요.
-                """
+피드백은 아래 JSON 형식에 맞춰, 학생의 자신감을 높이고 도전 의식을 자극하는 내용으로 작성해주세요.
+```json
+{{
+  "overall_assessment": {{
+    "title": "완벽한 결과! 다음 도전을 위한 제안",
+    "strengths_analysis": "문항 과목별 정답률 100%를 바탕으로, 학생이 어떤 개념과 문제 해결 능력이 뛰어난지 구체적으로 분석하고 칭찬해주세요.",
+    "deepen_learning_plan": {{
+      "title": "실력 유지를 위한 심화 학습 계획",
+      "recommendations": [
+        "현재 지식을 더 깊게 만들기 위한 구체적인 학습 활동 제안 (예: '관련 심화 문제집 풀이', '유사한 개념을 다른 과목과 연결해보기')",
+        "새로운 도전 과제 제안 (예: '경시대회 문제 맛보기', '관련 주제에 대한 프로젝트 학습')"
+      ],
+      "recommended_resources": ["심화 학습에 도움이 될 만한 자료나 책, 강의 링크 (있을 경우)"]
+    }},
+    "final_message": "학생의 성취를 축하하고, 앞으로의 성장을 응원하는 격려의 메시지."
+  }}
+}}
+```
+모든 내용은 한국어로 작성해주세요.
+"""
                     }
                 ],
                 temperature=0,
@@ -277,17 +258,15 @@ items 배열의 문항 단위 데이터를 활용하여 개념적 강점을 구�
                 response_format={"type": "json_object"},
                 stop=None
             )
-            
+
             feedback_content = completion.choices[0].message.content
             try:
                 parsed_feedback = json.loads(feedback_content)
             except json.JSONDecodeError:
                 parsed_feedback = {"overall_assessment": {}}
-            # 상세 분석은 빈 배열로 유지
             state["detailed_analysis"] = []
             state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
 
-        # 실행 로그 메시지(간단 표식)
         state["messages"].append(AIMessage(content="분석 및 피드백 생성 완료"))
         return state
 
@@ -297,14 +276,10 @@ items 배열의 문항 단위 데이터를 활용하여 개념적 강점을 구�
         2) 상태 구성: grade_result는 ScoreEngine의 results([0,1]) 사용
         3) 그래프 실행: generate_feedback
         4) 반환: analysis만 포함한 최소 스키마
-        성공:
-          {"status":"success","analysis":{"detailed_analysis":[...],"overall_assessment":{...}}}
-        오류:
-          {"status":"error","error_message":"..."}
         """
         try:
             # 입력 데이터 검증
-            required_fields = ["problem", "problem_type", "user_answer", "solution_answer", "solution", "results"]
+            required_fields = ["problem", "problem_types", "user_answer", "solution_answer", "solution", "results"]
             missing_fields = [field for field in required_fields if field not in input_data]
             if missing_fields:
                 return _error(f"필수 필드가 누락되었습니다: {missing_fields}")
@@ -314,23 +289,22 @@ items 배열의 문항 단위 데이터를 활용하여 개념적 강점을 구�
             if len(set(lengths)) > 1:
                 return _error(f"모든 필드의 데이터 길이가 일치하지 않습니다: {dict(zip(required_fields, lengths))}")
 
-            # 초기 상태 설정(LLM 호출 전 준비 데이터)
+            # 초기 상태 설정
             initial_state = AnalysisState(
                 messages=[HumanMessage(content="분석을 시작합니다.")],
                 problem=input_data.get("problem", []),
-                problem_type=input_data.get("problem_type", []),
+                problem_types=input_data.get("problem_types", []),
                 user_answer=input_data.get("user_answer", []),
                 solution_answer=input_data.get("solution_answer", []),
                 solution=input_data.get("solution", []),
                 grade_result=input_data.get("results", []),
-                detailed_analysis=[],            # LLM 상세 분석(초기값)
-                overall_assessment={},           # LLM 종합 평가(초기값)
+                detailed_analysis=[],
+                overall_assessment={},
             )
 
             # 그래프 실행
             result = self.graph.invoke(initial_state)
 
-            # 최소 결과 반환: analysis만
             return _success(
                 analysis={
                     "detailed_analysis": result.get("detailed_analysis", []),
@@ -339,14 +313,13 @@ items 배열의 문항 단위 데이터를 활용하여 개념적 강점을 구�
             )
 
         except Exception as e:
-            # 기타 예외 처리(간단 메시지)
             return _error(f"분석 실행 중 오류 발생: {str(e)}")
 
 # 사용 예제(콘솔 출력용 유틸리티)
 def print_analysis_result(result):
     """분석 결과 간단 출력(현재 스키마: {"status","analysis"} 만 사용)
     - 오류: 메시지만 출력
-    - 성공: overall_assessment 요약 + detailed_analysis 요약
+    - 성공: overall_assessment 요약 + detailed_analysis 요약(subject/analysis 출력)
     """
     print("\n" + "="*20 + " 분석 결과 " + "="*20)
 
@@ -411,8 +384,15 @@ def print_analysis_result(result):
         print("\n[ ❗ 오답 상세 ]")
         for item in da:
             num = item.get("problem_number", "-")
+            subject = item.get("subject")
             mtype = item.get("mistake_type", "-")
-            rec = item.get("recommendation", "-")
-            print(f"  · 문제 {num}: {mtype} / {rec}")
+            detail = (item.get("analysis") or item.get("recommendation") or "").strip()
+            header = f"  · 문제 {num}"
+            if subject:
+                header += f" [과목: {subject}]"
+            header += f" - 실수 유형: {mtype}"
+            print(header)
+            if detail:
+                print(f"    원인 분석: {detail}")
 
     print("\n" + "="*50)

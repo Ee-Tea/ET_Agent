@@ -163,7 +163,7 @@ def split_agents(user_question, llm, embedding_model, agent_descriptions):
 # from agents.crop_recommend_agent import run as crop_recommend_run
 # from agents.crop_cultivation_agent import run as crop_cultivation_run
 # from agents.disaster_agent import run as disaster_run
-from SalesAgent import run as market_run
+from sales.SalesAgent import run as market_run
 # from agents.etc_agent import run as etc_run
 
 agent_functions = {

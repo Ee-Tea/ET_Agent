@@ -20,6 +20,7 @@ from agents.analysis.analysis_agent import AnalysisAgent, score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
 from TestGenerator.pdf_quiz_groq_class import generate_agent
 from solution.solution_agent import solution_agent
+from teacher_nodes import get_user_answer
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ========== 타입/프로토콜 ==========
@@ -40,10 +41,8 @@ class SharedState(TypedDict):
     answer: NotRequired[List[str]]
     explanation: NotRequired[List[str]]
     subject: NotRequired[List[str]]
-    wrong_question: NotRequired[List[str]]
     weak_type: NotRequired[List[str]]
     retrieve_answer: NotRequired[str]
-    notes: NotRequired[List[str]]
     user_answer: NotRequired[List[str]]  # 사용자가 실제 제출한 답
 
 class TeacherState(TypedDict):
@@ -69,7 +68,6 @@ SHARED_DEFAULTS: Dict[str, Any] = {
     "subject": [],
     "wrong_question": [],
     "weak_type": [],
-    "notes": [],
     "user_answer": [],
     "retrieve_answer": "",
 }
@@ -310,11 +308,12 @@ class Orchestrator:
         state = ensure_shared(state)
         print("채점 노드 실행")
         user_query = state.get("user_query", "")
+        user_answer = get_user_answer(user_query)
         sh = (state.get("shared") or {})
         solution_answers = sh.get("answer", []) or []
 
         agent_input = {
-            "user_query": user_query,
+            "user_answer": user_answer,
             "solution_answer": solution_answers,
         }
         agent_result = safe_execute(score_runner, agent_input)
@@ -329,9 +328,13 @@ class Orchestrator:
         state = ensure_shared(state)
         print("오답 분석 노드 실행")
         sh = (state.get("shared") or {})
+        user_query = state.get("user_query", "")
+        user_answer = get_user_answer(user_query)
+        if not user_answer:
+            user_answer = sh.get("user_answer", []) or []
         agent_input = {
             "problem": sh.get("question", []) or [],
-            "user_answer": sh.get("user_answer", []) or [],
+            "user_answer": user_answer,
             "solution_answer": sh.get("answer", []) or [],
             "solution": sh.get("explanation", []) or [],
         }
@@ -352,7 +355,6 @@ class Orchestrator:
         print("정보 검색 노드 실행")
         agent_input = {"retrieval_question": state.get("user_query", "")}
         agent_result = safe_execute(retriever_runner, agent_input)
-
         new_state: TeacherState = {**state}
         new_state.setdefault("retrieval", {})
         new_state["retrieval"].update(agent_result or {})
@@ -474,3 +476,113 @@ class Orchestrator:
         builder.add_edge("persist_state", END)
 
         return builder.compile()
+
+if __name__ == "__main__":
+    """
+    간단 테스트 런너:
+      - 콘솔에서 사용자 질의(Q>)를 입력
+      - 그래프 한 턴 실행
+      - 핵심 결과 요약 출력
+      - 'exit' / 'quit' 입력 시 종료
+    """
+    import os
+    import traceback
+
+    # 테스트용 식별자 (환경변수로 바꿔도 됩니다)
+    USER_ID  = os.getenv("TEST_USER_ID", "demo_user")
+    SERVICE  = os.getenv("TEST_SERVICE", "teacher")
+    CHAT_ID  = os.getenv("TEST_CHAT_ID", "local")
+
+    # 오케스트레이터 & 그래프 컴파일
+    orch = Orchestrator(user_id=USER_ID, service=SERVICE, chat_id=CHAT_ID)
+    app = orch.build_teacher_graph()
+
+    print("\n=== Teacher Graph 테스트 ===")
+    print("질문을 입력하세요. (종료: exit/quit)\n")
+
+    try:
+        while True:
+            try:
+                user_query = input("Q> ").strip()
+            except EOFError:
+                # 파이프 입력 등에서 EOF 들어오면 종료
+                print("\n[EOF] 종료합니다.")
+                break
+
+            if not user_query:
+                continue
+            if user_query.lower() in {"exit", "quit"}:
+                print("종료합니다.")
+                break
+
+            # 그래프 입력 상태 (intent는 분류 노드가 채웁니다)
+            init_state: Dict[str, Any] = {
+                "user_query": user_query,
+                "intent": "",
+                # 파일 테스트 시 artifacts에 id 넣어두면 preprocess 라우팅이 작동합니다.
+                # "artifacts": {"pdf_ids": ["file_123"]},
+            }
+
+            try:
+                result: Dict[str, Any] = app.invoke(init_state)
+            except Exception:
+                print("[ERROR] 그래프 실행 중 예외가 발생했습니다:")
+                traceback.print_exc()
+                continue
+
+            # ─── 결과 요약 출력 ───
+            intent = result.get("intent", "(분류실패)")
+            shared = (result.get("shared") or {})
+            generation = (result.get("generation") or {})
+            solution = (result.get("solution") or {})
+            score = (result.get("score") or {})
+            analysis = (result.get("analysis") or {})
+            retrieval = (result.get("retrieval") or {})
+
+            print("\n--- 실행 요약 ---")
+            print(f"Intent: {intent}")
+
+            # 검색 요약
+            ra = shared.get("retrieve_answer")
+            if ra:
+                print(f"[Retrieve] {str(ra)[:200]}{'...' if len(str(ra))>200 else ''}")
+
+            # 문항/보기/정답/해설 개수
+            q_cnt = len(shared.get("question", []) or [])
+            a_cnt = len(shared.get("answer", []) or [])
+            e_cnt = len(shared.get("explanation", []) or [])
+            print(f"[QA] question={q_cnt}, answer={a_cnt}, explanation={e_cnt}")
+
+            # 최근 문항 미리보기(있으면)
+            if q_cnt:
+                latest_q = shared["question"][-1]
+                latest_opts = (shared.get("options") or [[]])[-1] if shared.get("options") else []
+                print(f"[Last Q] {str(latest_q)[:180]}{'...' if len(str(latest_q))>180 else ''}")
+                if latest_opts:
+                    print("  Options:", "; ".join(latest_opts[:6]) + ("..." if len(latest_opts) > 6 else ""))
+
+            # 최근 모델 풀이/해설 미리보기(있으면)
+            if a_cnt:
+                last_ans = shared["answer"][-1]
+                print(f"[Model Answer] {str(last_ans)[:120]}{'...' if len(str(last_ans))>120 else ''}")
+            if e_cnt:
+                last_exp = shared["explanation"][-1]
+                print(f"[Explanation]  {str(last_exp)[:160]}{'...' if len(str(last_exp))>160 else ''}")
+
+            # 분석/취약유형
+            weak = shared.get("weak_type")
+            if weak:
+                if isinstance(weak, list):
+                    print(f"[Weak Types] {', '.join(map(str, weak[:6]))}{'...' if len(weak)>6 else ''}")
+                else:
+                    print(f"[Weak Types] {weak}")
+
+            # 채점 결과 덤프(간단 표시)
+            if score:
+                # 특정 키가 있다면 골라서 노출하세요 (여기선 크기만)
+                print(f"[Score] keys={list(score.keys())}")
+
+            print("-----------------\n")
+
+    except KeyboardInterrupt:
+        print("\n[Ctrl+C] 종료합니다.")

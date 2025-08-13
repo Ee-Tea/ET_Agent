@@ -40,3 +40,32 @@ def user_intent(user_question: str) -> dict:
     result = response.choices[0].message.content
     
     return result.strip().lower()
+
+def get_user_answer(user_question: str) -> str:
+    """
+    사용자 질문에서 답변을 추출합니다.
+    """
+    system_prompt = f"""다음 사용자 질문에서 답변을 추출하세요:
+    사용자 질문 : {user_question}
+    
+    답변은 다음과 같은 형식으로 출력하세요. 모든 문제는 객관식이며, 사용자가 입력한 보기의 숫자만을 리스트(list[str]) 형태로 추출해야 합니다.
+    "답변 내용"
+    
+    예시:
+    사용자 입력: "정답은 4번, 3번, 1번, 2번, 4번, 3번, 3번, 2번, 1번, 1번, 4번입니다."
+    추출할 내용: "[4, 3, 1, 2, 4, 3, 3, 2, 1, 1, 4]"
+    추출할 수 있는 내용이 없으면 빈 리스트를 반환하세요. 예시: "[]"
+    """
+
+    response = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 또는 gpt-3.5-turbo 사용 가능
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_question}
+        ],
+        temperature=0.2
+    )
+    
+    result = response.choices[0].message.content
+    
+    return result.strip()

@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, List, TypedDict, Annotated
+from typing import Dict, List, TypedDict, Annotated, Any, Literal, Union, TypeGuard
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from groq import Groq
@@ -8,19 +8,56 @@ from groq import Groq
 from ..base_agent import BaseAgent
 
 class AnalysisState(TypedDict):
-    """분석 상태를 정의하는 클래스"""
-    messages: Annotated[List[BaseMessage], "메시지 목록"]
-    problem: List[str]
-    problem_type: List[str]
-    user_answer: List[int]
-    solution_answer: List[int]
-    solution: List[str]
-    grade_result: List[int]
-    mistake_summary: str
-    final_feedback: str
+    """LangGraph 노드 간에 주고받는 분석 상태 컨테이너
+    - grade_result: 0/1 정오 배열(ScoreEngine 결과)
+    - detailed_analysis/overall_assessment: LLM이 생성한 분석 결과(분리 저장)
+    """
+    messages: Annotated[List[BaseMessage], "그래프 실행 중 생성되는 대화 메시지 로그"]
+    problem: List[str]  # 원문 문항 텍스트
+    problem_type: List[Dict[str, Any]]  # 계층형 개념 태그(예: 과목명/주요항목/세부항목/세세항목)
+    user_answer: List[int]  # 사용자 답
+    solution_answer: List[int]  # 정답
+    solution: List[str]  # 해설(선택)
+    grade_result: List[int]  # 각 문항 정오(1/0)
+    detailed_analysis: List[Dict[str, Any]]  # LLM 생성: 문항 단위 오답 분석 리스트
+    overall_assessment: Dict[str, Any]  # LLM 생성: 종합 평가/권장 학습 계획
+
+# 결과 페이로드 타입(최소 스키마)
+class AnalysisSuccessResult(TypedDict):
+    """성공 시: 분석 결과만 반환"""
+    status: Literal["success"]
+    analysis: Dict[str, Any]  # {"detailed_analysis": [...], "overall_assessment": {...}}
+
+class AnalysisErrorResult(TypedDict):
+    """오류 시: 메시지 최소 반환"""
+    status: Literal["error"]
+    error_message: str
+
+AnalysisResult = Union[AnalysisSuccessResult, AnalysisErrorResult]
+
+# 결과 생성 헬퍼
+def _success(*, analysis: Dict[str, Any]) -> AnalysisSuccessResult:
+    return {
+        "status": "success",
+        "analysis": analysis,
+    }
+
+def _error(error_message: str) -> AnalysisErrorResult:
+    return {
+        "status": "error",
+        "error_message": error_message,
+    }
+
+# 호출 측에서 타입 내로잉에 사용하는 가드
+def is_success(result: AnalysisResult) -> TypeGuard[AnalysisSuccessResult]:
+    return result.get("status") == "success"
 
 class AnalysisAgent(BaseAgent):
-    """LangGraph 기반 분석 에이전트"""
+    """분석 에이전트
+    - 입력: 문제/개념태그/사용자답/정답/해설 + grade_result(ScoreEngine의 [0,1])
+    - 처리: 문항 단위(items)로 재구성 → LLM 분석 요청 → 분석 결과를 상태에 저장
+    - 출력: analysis만 반환(detailed_analysis, overall_assessment)
+    """
     
     @property
     def name(self) -> str:
@@ -38,7 +75,11 @@ class AnalysisAgent(BaseAgent):
         self.graph = self._create_graph()
     
     def _create_graph(self) -> StateGraph:
-        """분석 워크플로우 그래프 생성"""
+        """분석 그래프 구성
+        - 단일 노드(generate_feedback)로 구성
+        - entry → generate_feedback → END
+        """
+        # 상태 정의에 기반한 그래프 생성
         workflow = StateGraph(AnalysisState)
         
         # 노드 추가 - analyze_mistakes 제거하고 직접 generate_feedback으로 연결
@@ -69,94 +110,107 @@ class AnalysisAgent(BaseAgent):
     
     
     def _generate_feedback(self, state: AnalysisState) -> AnalysisState:
-        """오답 분석과 개인화된 피드백을 함께 생성"""
+        """LLM 피드백 생성
+        - 입력: problem/problem_type/user_answer/solution_answer/solution/grade_result
+        - 준비: problem_type 평탄화 → items(문항 단위 구조) 생성
+        - 출력: detailed_analysis / overall_assessment 만 상태에 저장
+        """
         problems = state["problem"]
         problem_types = state["problem_type"]
         user_answers = state["user_answer"]
         solution_answers = state["solution_answer"]
         solutions = state["solution"]
         grade_result = state["grade_result"]
-        
-        # 오답 문제들 추출 (_analyze_mistakes 기능 통합)
-        mistakes = []
-        for i, (is_correct, problem, p_type, user_ans, correct_ans, solution) in enumerate(
-            zip(grade_result, problems, problem_types, user_answers, solution_answers, solutions)
-        ):
-            if not is_correct:
-                mistakes.append({
-                    "problem_number": i + 1,
-                    "problem": problem,
-                    "problem_type": p_type,
-                    "user_answer": user_ans,
-                    "correct_answer": correct_ans,
-                    "solution": solution
-                })
-        
-        # 분석용 데이터 구조화 (전체 문제와 오답 정보 모두 포함)
+
+        # problem_type 평탄화(계층형 → '과목명 > 주요항목 > 세부항목 > 세세항목' 경로 문자열)
+        def flatten_problem_type(pt: Any) -> str:
+            if isinstance(pt, dict):
+                keys = ["과목명", "주요항목", "세부항목", "세세항목"]
+                parts = [str(pt.get(k)) for k in keys if pt.get(k)]
+                return " > ".join(parts) if parts else json.dumps(pt, ensure_ascii=False)
+            return str(pt)
+
+        flattened_types: List[str] = [flatten_problem_type(pt) for pt in problem_types]
+
+        # 문항 단위(items) 데이터 구성(LLM 입력 최적화)
+        items = [
+            {
+                "number": i + 1,
+                "problem": problem,
+                "problem_type": p_type,
+                "problem_type_path": p_type_flat,
+                "user_answer": user_ans,
+                "solution_answer": correct_ans,
+                "is_correct": bool(is_correct),
+                "solution": solution,
+            }
+            for i, (problem, p_type, p_type_flat, user_ans, correct_ans, solution, is_correct) in enumerate(
+                zip(problems, problem_types, flattened_types, user_answers, solution_answers, solutions, grade_result)
+            )
+        ]
+        mistakes = [it for it in items if not it["is_correct"]]
+
+        # LLM 입력 페이로드(간결/일관)
         analysis_data = {
-            "all_problems": {
-                "problem": problems,
-                "problem_type": problem_types,
-                "user_answer": user_answers,
-                "solution_answer": solution_answers,
-                "solution": solutions,
-                "result": grade_result
+            "items": items,
+            "summary": {
+                "correct_count": sum(grade_result),
+                "total_count": len(grade_result),
+                "incorrect_numbers": [it["number"] for it in mistakes],
             },
-            "mistakes": mistakes,
-            "correct_count": sum(grade_result),
-            "total_count": len(grade_result)
         }
-        
-        # 통합된 분석 요청: 오답 분석과 종합 피드백을 한 번에 요청
-        if len(mistakes) > 0:  # 오답이 있는 경우
+
+        # 오답 존재 시: 오답 분석 프롬프트
+        if len(mistakes) > 0:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "system",
-                        "content": """당신은 학생의 학습 데이터를 분석하여 개인화된 피드백을 제공하는 최고의 학습 코치입니다. 학생의 성장을 돕기 위해, 긍정적이고 격려하는 어조를 사용하되, 분석은 매우 구체적이고 전문적이어야 합니다. 제공된 JSON 형식에 맞춰 답변해주세요."""
+                        "content": """당신은 학생의 학습 데이터를 분석하는 전문 학습 코치입니다.
+각 문항 데이터는 'items' 배열에 문항 단위 객체로 제공됩니다.
+problem_type 은 각 문항의 개념적 계층 정보를 담는 객체입니다.
+예시: {"과목명":"소프트웨어 설계","주요항목":"요구사항 확인","세부항목":"요구사항 확인","세세항목":"요구분석기법"}
+필요 시 'problem_type_path'를 사용해 '과목명 > 주요항목 > 세부항목 > 세세항목' 경로로 개념을 활용하십시오.
+응답은 지정된 JSON 스키마만 출력하고, 불필요한 자연어 설명은 포함하지 마십시오."""
                     },
                     {
                         "role": "user",
-                        "content": f"""다음 학생의 문제 풀이 결과를 심층적으로 분석하고, 전문가 수준의 맞춤형 피드백을 생성해주세요.
+                        "content": f"""다음 학생의 풀이 결과를 문항 단위로 제공합니다. 오답 패턴을 분석하고 맞춤 피드백을 생성하세요.
 
                 {json.dumps(analysis_data, ensure_ascii=False, indent=2)}
 
-                분석 결과는 반드시 아래 JSON 형식에 맞춰, 각 항목을 구체적이고 실행 가능한 내용으로 채워주세요.
-                ```json
-                {{
-                  "performance_summary": {{
-                    "total_problems": "전체 문항 수",
-                    "correct_count": "정답 개수",
-                    "score": "점수 (100점 만점)",
-                    "correctness_by_type": {{
-                      "유형A": "정답률 (예: 50%)"
-                    }}
-                  }},
-                  "detailed_analysis": [
-                    {{
-                      "problem_number": "틀린 문제 번호",
-                      "mistake_type": "실수 유형 (예: 개념 이해 부족, 계산 실수, 조건 누락)",
-                      "analysis": "왜 틀렸는지에 대한 구체적인 원인 분석. 학생의 풀이 과정을 추측하며 설명해주세요.",
-                      "recommendation": "해당 실수를 바로잡기 위한 명확하고 실천적인 조언. (예: 'X 개념을 다시 학습하고, 관련 예제 3개를 풀어보세요.')"
-                    }}
-                  ],
-                  "overall_assessment": {{
-                    "strengths": "학생이 보여준 강점과 잘한 점에 대한 구체적인 칭찬.",
-                    "weaknesses": "데이터를 기반으로 파악된 전반적인 취약점과 반복되는 실수 패턴.",
-                    "action_plan": {{
-                      "title": "성장을 위한 맞춤 학습 계획",
-                      "short_term_goal": "1-2주 안에 달성할 수 있는 구체적인 단기 목표.",
-                      "long_term_goal": "궁극적으로 도달해야 할 장기적인 학습 목표.",
-                      "recommended_strategies": ["오답 노트 작성법, 개념 정리법 등 구체적인 학습 전략 제안"],
-                      "recommended_resources": ["도움이 될 만한 자료나 강의 링크 (있을 경우)"]
-                    }},
-                    "final_message": "학생에게 용기를 주는 따뜻한 격려와 응원의 메시지."
-                  }}
-                }}
-                ```
-                모든 내용은 한국어로 작성해주세요.
-                """
+분석 지침:
+- items[*].problem_type_path를 활용해 개념 경로 기반 패턴을 도출
+- 동일/유사 경로 반복 오답은 묶어서 패턴 설명
+- 실수 유형을 구체화하고 교정 전략을 제시
+
+아래 JSON 형식을 그대로 따르세요.
+```json
+{{
+  "detailed_analysis": [
+    {{
+      "problem_number": "틀린 문제 번호",
+      "concept_path": "문제의 개념 경로 (problem_type_path 활용)",
+      "mistake_type": "실수 유형 (예: 개념 이해 부족, 계산 실수, 조건 누락)",
+      "analysis": "왜 틀렸는지에 대한 구체적 원인 분석 (학생의 사고 과정 추정)"
+    }}
+  ],
+  "overall_assessment": {{
+    "strengths": "학생이 잘한 점",
+    "weaknesses": "취약점과 반복 패턴",
+    "action_plan": {{
+      "title": "맞춤 학습 계획",
+      "short_term_goal": "1~2주 내 실행 목표",
+      "long_term_goal": "장기적 성장 목표",
+      "recommended_strategies": ["구체적 전략 1", "구체적 전략 2"],
+      "recommended_resources": ["자료/강의 (선택)"]
+    }},
+    "final_message": "격려 메시지"
+  }}
+}}
+```
+모든 내용은 한국어로 작성."""
                     }
                 ],
                 temperature=0,
@@ -169,13 +223,16 @@ class AnalysisAgent(BaseAgent):
             
             # JSON 응답 파싱 및 저장
             feedback_content = completion.choices[0].message.content
-            parsed_feedback = json.loads(feedback_content)
-            
-            # 오답 분석 및 피드백 저장
-            state["mistake_summary"] = json.dumps(parsed_feedback.get("detailed_analysis", {}), ensure_ascii=False, indent=2)
-            state["final_feedback"] = json.dumps(parsed_feedback, ensure_ascii=False, indent=2)
-        else:  # 모든 문제를 맞춘 경우
-            # 모든 문제를 맞춘 경우의 분석 생성
+            try:
+                parsed_feedback = json.loads(feedback_content)
+            except json.JSONDecodeError:
+                parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
+            # LLM JSON 응답 파싱 실패 시 안전 기본값 사용
+            # 중복 저장 없음: 두 키만 보관
+            state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
+            state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+        else:
+            # 전부 정답: 종합 평가만 요청
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -185,9 +242,11 @@ class AnalysisAgent(BaseAgent):
                     },
                     {
                         "role": "user",
-                        "content": f"""이 학생은 모든 문제({len(grade_result)}문제)를 완벽하게 풀었습니다. 데이터를 기반으로 학생의 강점을 분석하고, 다음 단계로 나아갈 수 있는 심화 학습 계획을 제안해주세요.
+                        "content": f"""학생은 모든 문제({len(grade_result)}문제)를 정답 처리했습니다.
+items 배열의 문항 단위 데이터를 활용하여 개념적 강점을 구조적으로 설명하고 다음 학습 단계를 제안하세요.
+개념 경로는 각 item의 problem_type_path를 사용하세요.
 
-                {json.dumps(analysis_data["all_problems"], ensure_ascii=False, indent=2)}
+{json.dumps(analysis_data, ensure_ascii=False, indent=2)}
 
                 피드백은 아래 JSON 형식에 맞춰, 학생의 자신감을 높이고 도전 의식을 자극하는 내용으로 작성해주세요.
                 ```json
@@ -220,46 +279,42 @@ class AnalysisAgent(BaseAgent):
             )
             
             feedback_content = completion.choices[0].message.content
-            state["mistake_summary"] = "모든 문제를 정답으로 해결했습니다."
-            state["final_feedback"] = feedback_content
-        
-        # 메시지 기록 추가
-        state["messages"].append(
-            AIMessage(content="오답 분석 및 개인화된 피드백 생성 완료")
-        )
-        
+            try:
+                parsed_feedback = json.loads(feedback_content)
+            except json.JSONDecodeError:
+                parsed_feedback = {"overall_assessment": {}}
+            # 상세 분석은 빈 배열로 유지
+            state["detailed_analysis"] = []
+            state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+
+        # 실행 로그 메시지(간단 표식)
+        state["messages"].append(AIMessage(content="분석 및 피드백 생성 완료"))
         return state
-    
-    def execute(self, input_data: Dict) -> Dict:
-        """메인 분석 메서드"""
+
+    def execute(self, input_data: Dict) -> AnalysisResult:
+        """메인 실행
+        1) 입력 검증: 필수 필드 유무/길이 일치 확인
+        2) 상태 구성: grade_result는 ScoreEngine의 results([0,1]) 사용
+        3) 그래프 실행: generate_feedback
+        4) 반환: analysis만 포함한 최소 스키마
+        성공:
+          {"status":"success","analysis":{"detailed_analysis":[...],"overall_assessment":{...}}}
+        오류:
+          {"status":"error","error_message":"..."}
+        """
         try:
             # 입력 데이터 검증
-            required_fields = ["problem", "problem_type", "user_answer", "solution_answer", "solution"]
+            required_fields = ["problem", "problem_type", "user_answer", "solution_answer", "solution", "results"]
             missing_fields = [field for field in required_fields if field not in input_data]
-            
             if missing_fields:
-                return {
-                    "status": "error",
-                    "error_message": f"필수 필드가 누락되었습니다: {missing_fields}",
-                    "metadata": {"total_problems": 0, "correct_count": 0, "score": 0, "has_mistakes": False},
-                    "grading": {"results": [], "details": []},
-                    "analysis": {},
-                    "raw_data": {"missing_fields": missing_fields}
-                }
-            
+                return _error(f"필수 필드가 누락되었습니다: {missing_fields}")
+
             # 데이터 길이 일치 확인
             lengths = [len(input_data[field]) for field in required_fields]
             if len(set(lengths)) > 1:
-                return {
-                    "status": "error", 
-                    "error_message": f"모든 필드의 데이터 길이가 일치하지 않습니다: {dict(zip(required_fields, lengths))}",
-                    "metadata": {"total_problems": 0, "correct_count": 0, "score": 0, "has_mistakes": False},
-                    "grading": {"results": [], "details": []},
-                    "analysis": {},
-                    "raw_data": {"field_lengths": dict(zip(required_fields, lengths))}
-                }
-                
-            # 초기 상태 설정
+                return _error(f"모든 필드의 데이터 길이가 일치하지 않습니다: {dict(zip(required_fields, lengths))}")
+
+            # 초기 상태 설정(LLM 호출 전 준비 데이터)
             initial_state = AnalysisState(
                 messages=[HumanMessage(content="분석을 시작합니다.")],
                 problem=input_data.get("problem", []),
@@ -267,231 +322,97 @@ class AnalysisAgent(BaseAgent):
                 user_answer=input_data.get("user_answer", []),
                 solution_answer=input_data.get("solution_answer", []),
                 solution=input_data.get("solution", []),
-                grade_result=[],
-                mistake_summary="",
-                final_feedback=""
+                grade_result=input_data.get("results", []),
+                detailed_analysis=[],            # LLM 상세 분석(초기값)
+                overall_assessment={},           # LLM 종합 평가(초기값)
             )
-            
+
             # 그래프 실행
             result = self.graph.invoke(initial_state)
-            
-            # 결과 정리 - 구조화된 형태로 반환
-            try:
-                # final_feedback JSON 파싱
-                feedback_data = json.loads(result["final_feedback"]) if result["final_feedback"] else {}
-                
-                # 표준화된 응답 구조 생성
-                analysis_result = {
-                    "status": "success",
-                    "metadata": {
-                        "total_problems": len(result["grade_result"]),
-                        "correct_count": sum(result["grade_result"]),
-                        "incorrect_count": len(result["grade_result"]) - sum(result["grade_result"]),
-                        "score": round((sum(result["grade_result"]) / len(result["grade_result"])) * 100, 1) if result["grade_result"] else 0,
-                        "analysis_timestamp": "generated",
-                        "has_mistakes": sum(result["grade_result"]) < len(result["grade_result"])
-                    },
-                    "grading": {
-                        "results": result["grade_result"],
-                        "details": [
-                            {
-                                "problem_number": i + 1,
-                                "is_correct": bool(grade),
-                                "user_answer": input_data.get("user_answer", [])[i] if i < len(input_data.get("user_answer", [])) else None,
-                                "correct_answer": input_data.get("solution_answer", [])[i] if i < len(input_data.get("solution_answer", [])) else None
-                            }
-                            for i, grade in enumerate(result["grade_result"])
-                        ]
-                    },
-                    "analysis": feedback_data,
-                    "raw_data": {
-                        "mistake_summary": result["mistake_summary"],
-                        "messages": [msg.content for msg in result["messages"]]
-                    }
+
+            # 최소 결과 반환: analysis만
+            return _success(
+                analysis={
+                    "detailed_analysis": result.get("detailed_analysis", []),
+                    "overall_assessment": result.get("overall_assessment", {}),
                 }
-                
-                return analysis_result
-                
-            except (json.JSONDecodeError, KeyError) as e:
-                # JSON 파싱 오류 처리
-                return {
-                    "status": "error",
-                    "error_message": f"결과 파싱 중 오류 발생: {str(e)}",
-                    "metadata": {
-                        "total_problems": len(result.get("grade_result", [])),
-                        "correct_count": sum(result.get("grade_result", [])),
-                        "score": round((sum(result.get("grade_result", [])) / len(result.get("grade_result", []))) * 100, 1) if result.get("grade_result") else 0,
-                        "has_mistakes": True if result.get("grade_result") else False
-                    },
-                    "grading": {
-                        "results": result.get("grade_result", []),
-                        "details": []
-                    },
-                    "analysis": {},
-                    "raw_data": {
-                        "mistake_summary": result.get("mistake_summary", ""),
-                        "final_feedback": result.get("final_feedback", ""),
-                        "messages": [msg.content for msg in result.get("messages", [])],
-                        "parsing_error": str(e)
-                    }
-                }
-                
+            )
+
         except Exception as e:
-            # 기타 예외 처리
-            return {
-                "status": "error",
-                "error_message": f"분석 실행 중 오류 발생: {str(e)}",
-                "metadata": {
-                    "total_problems": 0,
-                    "correct_count": 0,
-                    "score": 0,
-                    "has_mistakes": False
-                },
-                "grading": {
-                    "results": [],
-                    "details": []
-                },
-                "analysis": {},
-                "raw_data": {
-                    "error_details": str(e),
-                    "input_data_keys": list(input_data.keys()) if isinstance(input_data, dict) else "invalid_input",
-                    "error_type": type(e).__name__
-                }
-            }
+            # 기타 예외 처리(간단 메시지)
+            return _error(f"분석 실행 중 오류 발생: {str(e)}")
 
-# 사용 예제
+# 사용 예제(콘솔 출력용 유틸리티)
 def print_analysis_result(result):
-    """개선된 분석 결과 출력 함수"""
+    """분석 결과 간단 출력(현재 스키마: {"status","analysis"} 만 사용)
+    - 오류: 메시지만 출력
+    - 성공: overall_assessment 요약 + detailed_analysis 요약
+    """
     print("\n" + "="*20 + " 분석 결과 " + "="*20)
-    
-    # 상태 확인
+
+    # 오류 처리
     if result.get("status") == "error":
-        print(f"❌ 오류 발생: {result.get('error_message', '알 수 없는 오류')}")
+        print(f"❌ 오류: {result.get('error_message') or result.get('message') or '알 수 없는 오류'}")
         return
-    
-    # 메타데이터 출력
-    metadata = result.get("metadata", {})
-    print(f"\n[ 📊 종합 성취도 ]")
-    print(f"  - 점수: {metadata.get('score', 0)}점 / 100점")
-    print(f"  - 정답률: {metadata.get('correct_count', 0)} / {metadata.get('total_problems', 0)}")
-    print(f"  - 오답 개수: {metadata.get('incorrect_count', 0)}개")
-    
-    # 분석 데이터 출력
-    analysis_data = result.get("analysis", {})
-    
-    if not metadata.get("has_mistakes", False):
-        # 모든 문제를 맞춘 경우
-        if "overall_assessment" in analysis_data:
-            assessment = analysis_data.get("overall_assessment", {})
-            print(f"\n🎉 {assessment.get('title', '완벽한 결과!')}")
-            print(f"\n[ 💪 강점 분석 ]")
-            print(f"  {assessment.get('strengths_analysis', 'N/A')}")
 
-            deepen_plan = assessment.get("deepen_learning_plan", {})
-            if deepen_plan:
-                print(f"\n[ 📚 {deepen_plan.get('title', '심화 학습 계획')} ]")
-                if deepen_plan.get("recommendations"):
-                    print("  - 추천 활동:")
-                    for rec in deepen_plan["recommendations"]:
-                        print(f"    • {rec}")
-            
-            print(f"\n[ 💌 최종 메시지 ]")
-            print(f"  {assessment.get('final_message', 'N/A')}")
+    analysis = result.get("analysis", {}) or {}
+    oa = analysis.get("overall_assessment", {}) or {}
+    da = analysis.get("detailed_analysis", []) or []
+
+    # 종합 평가(전부 정답/오답 혼재 모두 대응)
+    title = oa.get("title") or "분석 요약"
+    print(f"\n[ 📋 {title} ]")
+
+    # 전부 정답 케이스(심화 계획 키 사용)
+    if "strengths_analysis" in oa:
+        print("\n[ 💪 강점 분석 ]")
+        print(f"  {oa.get('strengths_analysis', '')}".strip() or "  -")
+
+        deepen = oa.get("deepen_learning_plan", {})
+        if deepen:
+            print(f"\n[ 📚 {deepen.get('title', '심화 학습 계획')} ]")
+            for rec in deepen.get("recommendations", []):
+                print(f"  • {rec}")
+            if deepen.get("recommended_resources"):
+                print("  - 참고 자료:")
+                for res in deepen["recommended_resources"]:
+                    print(f"    • {res}")
+
+        if oa.get("final_message"):
+            print("\n[ 💌 최종 메시지 ]")
+            print(f"  {oa['final_message']}")
     else:
-        # 오답이 있는 경우
-        if "performance_summary" in analysis_data:
-            summary = analysis_data.get("performance_summary", {})
-            if summary.get("correctness_by_type"):
-                print("  - 유형별 정답률:")
-                for p_type, rate in summary["correctness_by_type"].items():
-                    print(f"    - {p_type}: {rate}")
+        # 오답 분석 케이스(강점/약점/학습 계획 키 사용)
+        if oa.get("strengths"):
+            print("\n[ 💪 강점 ]")
+            print(f"  {oa['strengths']}")
+        if oa.get("weaknesses"):
+            print("\n[ 🔧 보완점 ]")
+            print(f"  {oa['weaknesses']}")
+        action = oa.get("action_plan", {})
+        if action:
+            print(f"\n[ 📈 {action.get('title','학습 계획')} ]")
+            if action.get("short_term_goal"):
+                print(f"  - 단기 목표: {action['short_term_goal']}")
+            if action.get("long_term_goal"):
+                print(f"  - 장기 목표: {action['long_term_goal']}")
+            for strat in action.get("recommended_strategies", []):
+                print(f"  • {strat}")
+            if action.get("recommended_resources"):
+                print("  - 참고 자료:")
+                for res in action["recommended_resources"]:
+                    print(f"    • {res}")
+        if oa.get("final_message"):
+            print("\n[ 💌 최종 메시지 ]")
+            print(f"  {oa['final_message']}")
 
-            print("\n" + "-"*15 + " 🔍 오답 상세 분석 " + "-"*15)
-            detailed_analysis = analysis_data.get("detailed_analysis", [])
-            if not detailed_analysis:
-                print("  분석할 오답이 없습니다.")
-            else:
-                for analysis in detailed_analysis:
-                    print(f"\n▶ 문제 번호: {analysis.get('problem_number', 'N/A')}")
-                    print(f"  - 실수 유형: {analysis.get('mistake_type', 'N/A')}")
-                    print(f"  - 원인 분석: {analysis.get('analysis', 'N/A')}")
-                    print(f"  - 개선 제안: {analysis.get('recommendation', 'N/A')}")
-
-            assessment = analysis_data.get("overall_assessment", {})
-            print("\n" + "-"*15 + " 📋 종합 평가 및 학습 계획 " + "-"*15)
-            print(f"\n[ 💪 강점 ]")
-            print(f"  {assessment.get('strengths', 'N/A')}")
-            print(f"\n[ 🔧 보완점 ]")
-            print(f"  {assessment.get('weaknesses', 'N/A')}")
-
-            action_plan = assessment.get("action_plan", {})
-            if action_plan:
-                print(f"\n[ 📈 {action_plan.get('title', '학습 계획')} ]")
-                print(f"  - 단기 목표: {action_plan.get('short_term_goal', 'N/A')}")
-                print(f"  - 장기 목표: {action_plan.get('long_term_goal', 'N/A')}")
-                if action_plan.get("recommended_strategies"):
-                    print("  - 추천 전략:")
-                    for strategy in action_plan["recommended_strategies"]:
-                        print(f"    • {strategy}")
-            
-            print(f"\n[ 💌 최종 메시지 ]")
-            print(f"  {assessment.get('final_message', 'N/A')}")
+    # 오답 상세 요약
+    if da:
+        print("\n[ ❗ 오답 상세 ]")
+        for item in da:
+            num = item.get("problem_number", "-")
+            mtype = item.get("mistake_type", "-")
+            rec = item.get("recommendation", "-")
+            print(f"  · 문제 {num}: {mtype} / {rec}")
 
     print("\n" + "="*50)
-
-
-# if __name__ == "__main__":
-#     # .env 파일에 OPENAI_API_KEY 설정 필요
-#     agent = AnalysisAgent()
-    
-#     # 테스트 데이터 로드
-#     import json
-#     import sys
-#     from pathlib import Path
-    
-#     # 기본 input.json 경로 (현재 디렉토리)
-#     input_file = Path("input.json")
-    
-#     # 명령줄 인자로 파일 경로가 제공된 경우 사용
-#     if len(sys.argv) > 1:
-#         input_file = Path(sys.argv[1])
-    
-#     # 파일 존재 여부 확인
-#     if not input_file.exists():
-#         print(f"오류: 입력 파일을 찾을 수 없습니다. ({input_file})")
-#         sys.exit(1)
-    
-#     # 데이터 로드
-#     try:
-#         with open(input_file, 'r', encoding='utf-8') as f:
-#             input_data = json.load(f)
-        
-#         print(f"파일 '{input_file}' 로드 성공")
-        
-#         # 필수 필드 확인
-#         required_fields = ["problem", "problem_type", "user_answer", "solution_answer", "solution"]
-#         for field in required_fields:
-#             if field not in input_data:
-#                 print(f"오류: 필수 필드 '{field}'가 입력 데이터에 없습니다.")
-#                 sys.exit(1)
-    
-#         # 분석 실행
-#         print("분석 시작...")
-#         result = agent.execute(input_data)
-        
-#         # 결과 출력
-#         print_analysis_result(result)
-        
-#         # 결과 저장
-#         output_file = input_file.with_name(f"{input_file.stem}_result.json")
-#         with open(output_file, 'w', encoding='utf-8') as f:
-#             json.dump(result, f, ensure_ascii=False, indent=2)
-        
-#         print(f"\n결과가 '{output_file}'에 저장되었습니다.")
-        
-#     except json.JSONDecodeError:
-#         print(f"오류: '{input_file}'이 올바른 JSON 형식이 아닙니다.")
-#         sys.exit(1)
-#     except Exception as e:
-#         print(f"오류 발생: {str(e)}")
-#         sys.exit(1)

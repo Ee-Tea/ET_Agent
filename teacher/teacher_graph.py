@@ -23,7 +23,7 @@ from agents.analysis.analysis_agent import AnalysisAgent
 from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
 from TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
-from solution.solution_agent import solution_agent
+from agents.solution.solution_agent import SolutionAgent as solution_agent
 from teacher_nodes import get_user_answer
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -32,11 +32,13 @@ class SupportsExecute:
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
 # Stateless 가정(스레드 세이프 보장 안 되면 Orchestrator 인스턴스 멤버로 옮기세요)
-retriever_runner: SupportsExecute = retrieve_agent()
-generator_runner: SupportsExecute = generate_agent()
-solution_runner : SupportsExecute = solution_agent()
-score_runner    : SupportsExecute = score_agent()
-analyst_runner  : SupportsExecute = AnalysisAgent()
+from typing import Optional
+
+retriever_runner: Optional[SupportsExecute] = None
+generator_runner: Optional[SupportsExecute] = None
+solution_runner : Optional[SupportsExecute] = None
+score_runner    : Optional[SupportsExecute] = None
+analyst_runner  : Optional[SupportsExecute] = None
 
 # ---------- Graph State ----------
 class SharedState(TypedDict):
@@ -128,12 +130,25 @@ def has_files_to_preprocess(state: TeacherState) -> bool:
 
 # ========== Orchestrator ==========
 class Orchestrator:
-    def __init__(self, user_id: str, service: str, chat_id: str):
+    def __init__(self, user_id: str, service: str, chat_id: str, init_agents: bool = True):
         load_dotenv()
         if not os.getenv("LANGCHAIN_API_KEY"):
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
         # TTL/길이 제한은 redis_memory.py에서 설정
         self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
+                # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
+        if init_agents:
+            self.retriever_runner = retrieve_agent()
+            self.generator_runner = generate_agent()
+            self.solution_runner  = solution_agent()   # 추상클래스 구현체면 여기서 생성
+            self.score_runner     = score_agent()
+            self.analyst_runner   = AnalysisAgent()
+        else:
+            self.retriever_runner = None
+            self.generator_runner = None
+            self.solution_runner  = None
+            self.score_runner     = None
+            self.analyst_runner   = None
 
     # ── Memory IO ────────────────────────────────────────────────────────────
     def load_state(self, state: TeacherState) -> TeacherState:
@@ -230,8 +245,11 @@ class Orchestrator:
     def generator(self, state: TeacherState) -> TeacherState:
         state = ensure_shared(state)
         print("문제 생성 노드 실행")
+        agent = self.generator_runner
+        if agent is None:
+            raise RuntimeError("generator_runner is not initialized (init_agents=False).")
         agent_input = {"query": state.get("user_query", "")}
-        agent_result = safe_execute(generator_runner, agent_input)
+        agent_result = safe_execute(agent, agent_input)
 
         new_state: TeacherState = {**state}
         new_state.setdefault("generation", {})
@@ -279,6 +297,9 @@ class Orchestrator:
 
         generated_answers: List[str] = []
         generated_explanations: List[str] = []
+        agent = self.solution_runner
+        if agent is None:
+            raise RuntimeError("solution_runner is not initialized (init_agents=False).")
 
         for question, options in zip(questions, options_list):
             if isinstance(options, str):
@@ -288,7 +309,7 @@ class Orchestrator:
                 "user_problem": question,
                 "user_problem_options": options,
             }
-            agent_result = safe_execute(solution_runner, agent_input)
+            agent_result = safe_execute(agent, agent_input)
             new_state["solution"].update(agent_result or {})
 
             if agent_result:
@@ -315,12 +336,15 @@ class Orchestrator:
         user_answer = get_user_answer(user_query)
         sh = (state.get("shared") or {})
         solution_answers = sh.get("answer", []) or []
+        agent = self.score_runner
+        if agent is None:
+            raise RuntimeError("score_runner is not initialized (init_agents=False).")
 
         agent_input = {
             "user_answer": user_answer,
             "solution_answer": solution_answers,
         }
-        agent_result = safe_execute(score_runner, agent_input)
+        agent_result = safe_execute(agent, agent_input)
 
         new_state: TeacherState = {**state}
         new_state.setdefault("score", {})
@@ -336,13 +360,16 @@ class Orchestrator:
         user_answer = get_user_answer(user_query)
         if not user_answer:
             user_answer = sh.get("user_answer", []) or []
+        agent = self.analyst_runner
+        if agent is None:
+            raise RuntimeError("analyst_runner is not initialized (init_agents=False).")
         agent_input = {
             "problem": sh.get("question", []) or [],
             "user_answer": user_answer,
             "solution_answer": sh.get("answer", []) or [],
             "solution": sh.get("explanation", []) or [],
         }
-        agent_result = safe_execute(analyst_runner, agent_input)
+        agent_result = safe_execute(agent, agent_input)
 
         new_state: TeacherState = {**state}
         new_state.setdefault("analysis", {})
@@ -357,8 +384,12 @@ class Orchestrator:
     def retrieve(self, state: TeacherState) -> TeacherState:
         state = ensure_shared(state)
         print("정보 검색 노드 실행")
+        agent = self.retriever_runner
+        if agent is None:
+            raise RuntimeError("retriever_runner is not initialized (init_agents=False).")
         agent_input = {"retrieval_question": state.get("user_query", "")}
-        agent_result = safe_execute(retriever_runner, agent_input)
+        
+        agent_result = safe_execute(agent, agent_input)
         new_state: TeacherState = {**state}
         new_state.setdefault("retrieval", {})
         new_state["retrieval"].update(agent_result or {})

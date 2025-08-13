@@ -1,13 +1,14 @@
 import json
 from pathlib import Path
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, cast
 import os
 from dotenv import load_dotenv
 from langsmith import traceable
 
-from agents.analisys.analysis_agent import AnalysisAgent, print_analysis_result
+from agents.analysis.analysis_agent import AnalysisAgent, print_analysis_result
 from agents.base_agent import BaseAgent
+from agents.score.score_engine import ScoreEngine, print_score_result, ScoreResult
 
 class Orchestrator:
     """
@@ -25,8 +26,7 @@ class Orchestrator:
 
         self.agents: Dict[str, BaseAgent] = {
             "analysis": AnalysisAgent(),
-            # 다른 에이전트들을 여기에 추가할 수 있습니다.
-            # "problem_generation": ProblemGenerationAgent(), 
+            "score": ScoreEngine(),  # ScoreEngine 등록
         }
 
     def get_available_agents(self) -> Dict[str, str]:
@@ -110,6 +110,8 @@ class Orchestrator:
         # 결과 출력
         if agent_name == "analysis":
             print_analysis_result(result)
+        elif agent_name == "score":
+            print_score_result(cast(ScoreResult, result))
         else:
             # 다른 에이전트들의 결과 출력 로직
             print("\n--- 실행 결과 ---")
@@ -133,17 +135,7 @@ class Orchestrator:
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             print(f"\n💾 결과가 '{output_file}'에 저장되었습니다.")
-            
-            # 요약 정보 출력
-            if result.get("status") == "success" and result.get("metadata"):
-                metadata = result["metadata"]
-                print(f"\n📋 저장된 결과 요약:")
-                print(f"  - 상태: {result.get('status', '알 수 없음')}")
-                if agent_name == "analysis":
-                    print(f"  - 총 문제 수: {metadata.get('total_problems', 0)}")
-                    print(f"  - 정답률: {metadata.get('score', 0)}%")
-                    print(f"  - 오답 여부: {'있음' if metadata.get('has_mistakes', False) else '없음'}")
-                    
+
         except Exception as e:
             print(f"❌ 결과 저장 중 오류 발생: {e}")
             print("결과가 저장되지 않았지만, 분석은 완료되었습니다.")

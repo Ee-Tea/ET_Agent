@@ -333,16 +333,12 @@ class GraphState(dict):
 
 # LangGraph 노드 함수
 def node_input_graph(state: GraphState) -> GraphState:
-    # 오케스트레이터에서 state["query"]가 이미 전달된 경우, 추가 입력 없이 바로 사용
-    if state.get("query"):
-        state["retry_count"] = 0  # 새로운 입력 시 재분석 카운트 초기화
-        return state
     query = input("작물 및 지역 정보를 입력하세요 (종료하려면 'exit'): ")
     if query.strip().lower() == "exit":
         state["exit"] = True
     else:
         state["query"] = query
-        state["retry_count"] = 0
+        state["retry_count"] = 0 # 새로운 입력 시 재분석 카운트 초기화
     return state
 
 def node_collect_info_graph(state: GraphState) -> GraphState:
@@ -374,19 +370,15 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
     try:
         context_embedding = embedder.encode([original_context_str])[0].reshape(1, -1)
         answer_embedding = embedder.encode([pred_answer])[0].reshape(1, -1)
-        
         similarity_score = cosine_similarity(context_embedding, answer_embedding)[0][0]
-        
         ACCURACY_THRESHOLD = 0.8
         accuracy_ok = similarity_score > ACCURACY_THRESHOLD
-        
         print(f"유사도 점수: {similarity_score:.4f}, 임계값: {ACCURACY_THRESHOLD}")
     except Exception as e:
         print(f"유사도 검사 중 오류 발생: {e}")
         accuracy_ok = False
 
     state["is_recommend_ok"] = accuracy_ok
-    
     return state
 
 def node_reanalyze_graph(state: GraphState) -> GraphState:
@@ -398,10 +390,14 @@ def node_reanalyze_graph(state: GraphState) -> GraphState:
     return state
 
 def node_output_graph(state: GraphState) -> GraphState:
+    print("\n[최종 Agent 답변]")
     if state["retry_count"] >= 2 and not state["is_recommend_ok"]:
-        state["final_answer"] = "해당 작물과 지역에 대한 시세 또는 판매처 정보가 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
+        print("해당 작물과 지역에 대한 시세 또는 판매처 정보가 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?")
     else:
-        state["final_answer"] = f"{state['pred_answer']}"
+        print("\n--- Context (참고 정보) ---")
+        print(state["context_str_for_judge"])
+        print("---------------------------")
+        print(state["pred_answer"])
     return state
 
 # LangGraph 워크플로우 정의
@@ -439,25 +435,18 @@ graph.add_edge("output", END)
 graph.set_entry_point("input")
 
 # 실행 함수
-def run(state):
-    """
-    판매처 에이전트의 워크플로우를 실행합니다.
-    오케스트레이터에서 전달받은 상태를 바탕으로 LangGraph를 실행합니다.
-    """
+def run_agent_langgraph():
     app = graph.compile()
-    
-    # LangGraph가 TypedDict를 기반으로 작동하기 때문에, 일반 Dict를 TypedDict로 변환
-    if not isinstance(state, GraphState):
-        state = GraphState(**state)
-        
-    result_state = app.invoke(state)
-    return result_state
+    while True:
+        try:
+            state = app.invoke({"query": ""}) 
+            if state.get("exit"):
+                print("에이전트를 종료합니다.")
+                break
+        except Exception as e:
+            print(f"오류가 발생했습니다: {e}")
+            break
 
 if __name__ == "__main__":
-    # 판매처 에이전트 단독 실행용 코드
     collection.load()
-    print("=== 판매처 에이전트 단독 실행 모드 ===")
-    
-    # LangGraph를 컴파일하고 단독으로 실행
-    app = graph.compile()
-    app.invoke({"query": ""})
+    run_agent_langgraph()

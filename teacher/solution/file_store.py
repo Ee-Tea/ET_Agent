@@ -66,7 +66,7 @@ def load_questions_from_json(inputs):
 if __name__ == "__main__":
 
     inputs = {
-            "question_path": "./sample_pre.json",  # JSON 기출문제 모음
+            "question_path": "./x_files/x_sample_pre.json",  # JSON 기출문제 모음
             "docs": []
         }
     load_questions_from_json(inputs)

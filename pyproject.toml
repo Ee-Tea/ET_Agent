@@ -1,5 +1,5 @@
 [project]
-name = "pdf-quiz-rag"
+name = "llm-T"
 version = "0.1.0"
 description = "PDF 기반 객관식 문제 자동 출제 시스템 (RAG + LangGraph)"
 requires-python = ">=3.12"
@@ -36,6 +36,9 @@ dependencies = [
     "groq>=0.31.0",
     "langchain-groq>=0.3.7",
     "graphviz>=0.21",
+    "groq>=0.31.0",
+    "docling>=2.43.0",
+    "protobuf==5.27.2",
 ]
 
 [build-system]

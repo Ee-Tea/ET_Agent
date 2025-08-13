@@ -13,6 +13,7 @@ import re
 from collections import Counter
 import time
 from datetime import datetime
+from pathlib import Path
 
 # .env 파일 로드를 위한 임포트
 from dotenv import load_dotenv
@@ -101,9 +102,12 @@ class InfoProcessingExamAgent(BaseAgent):
         }
     }
     
-    def __init__(self, data_folder="C:\\ET_Agent\\teacher\\TestGenerator\\data", groq_api_key=None):
-        """초기화"""
-        self.data_folder = data_folder
+    def __init__(self, data_folder=None, groq_api_key=None):
+        if data_folder is None:
+            # 현재 파일 기준으로 data 폴더 설정
+            base_dir = Path(__file__).resolve().parent  # TestGenerator 폴더
+            data_folder = base_dir / "data"
+        self.data_folder = Path(data_folder)
         os.makedirs(self.data_folder, exist_ok=True)
         
         # Groq API 키 설정

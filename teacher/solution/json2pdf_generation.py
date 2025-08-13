@@ -15,9 +15,14 @@ FONT_NAME = "NanumGothic"
 pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
 
 def _extract_questions(data):
+    # data가 리스트인 경우 직접 반환
+    if isinstance(data, list):
+        return data
+    
     # all_questions 우선 사용, 없으면 subjects.*.questions 합침
     if isinstance(data, dict) and isinstance(data.get("all_questions"), list):
         return data["all_questions"]
+    
     out = []
     subs = data.get("subjects", {}) if isinstance(data, dict) else {}
     if isinstance(subs, dict):
@@ -27,12 +32,19 @@ def _extract_questions(data):
                 out.extend(arr)
     return out
 
-def build_pdf(input_json_path, output_pdf_path, limit=25):
+def build_pdf(input_json_path, output_pdf_path, limit=None):
     with open(input_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    title = (data.get("exam_title") or "문제집").strip()
-    questions = _extract_questions(data)[:limit]
+    # data가 리스트인지 딕셔너리인지 확인
+    if isinstance(data, list):
+        # data가 리스트인 경우 (예: solution_results.json)
+        title = "문제집"
+        questions = data[:limit] if limit else data
+    else:
+        # data가 딕셔너리인 경우 (예: user_problems_json.json)
+        title = (data.get("exam_title") or "문제집").strip()
+        questions = _extract_questions(data)[:limit] if limit else _extract_questions(data)
 
     # 스타일 (폰트 하나만 사용)
     title_style = ParagraphStyle(
@@ -60,11 +72,13 @@ def build_pdf(input_json_path, output_pdf_path, limit=25):
 
     for idx, q in enumerate(questions, start=1):
         question_text = (q.get("question") or "").strip()
-        story.append(Paragraph(f"{idx}. {question_text}", q_style))
+        story.append(Paragraph(f"문제 {idx}. {question_text}", q_style))
 
-        for opt in (q.get("options") or []):
-            # 옵션에 번호가 이미 있으면 그대로 출력
-            story.append(Paragraph(str(opt).strip(), opt_style))
+        for i, opt in enumerate(q.get("options") or [], start=1):
+            # 옵션에 번호 붙이기 (1, 2, 3, 4)
+            # option_text = f"{i}. {str(opt).strip()}"
+            option_text = f"{str(opt).strip()}"
+            story.append(Paragraph(option_text, opt_style))
 
         story.append(Spacer(1, 5*mm))
 
@@ -79,4 +93,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("사용법: python make_booklet_simple.py input.json output.pdf")
         sys.exit(1)
-    build_pdf(sys.argv[1], sys.argv[2], limit=25)
+    
+    # limit 파라미터가 있으면 사용, 없으면 모든 문제 생성
+    limit = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    build_pdf(sys.argv[1], sys.argv[2], limit=limit)

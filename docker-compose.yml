@@ -60,6 +60,15 @@ services:
       - "etcd"
       - "minio"
 
+  redis:
+    image: redis:7.2
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - ./data/redis:/data
+
+
 networks:
   default:
     name: milvus

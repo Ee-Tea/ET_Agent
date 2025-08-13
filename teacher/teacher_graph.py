@@ -1,4 +1,5 @@
 # teacher_graph.py
+# uv run teacher/teacher_graph_visual.py
 from __future__ import annotations
 
 import os

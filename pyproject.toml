@@ -1,5 +1,5 @@
 [project]
-name = "pdf-quiz-rag"
+name = "llm-T"
 version = "0.1.0"
 description = "PDF 기반 객관식 문제 자동 출제 시스템 (RAG + LangGraph)"
 requires-python = ">=3.12"
@@ -31,9 +31,15 @@ dependencies = [
     "transformers>=4.35.0",
     "torch>=2.0.0",
     "numpy>=1.21.0",
-    "requests>=2.28.0"
+    "requests>=2.28.0",
+    "groq>=0.31.0",
+    "docling>=2.43.0",
+    "protobuf==5.27.2",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["common", "farmer", "teacher"]

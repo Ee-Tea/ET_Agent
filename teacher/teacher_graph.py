@@ -14,11 +14,15 @@ from typing_extensions import TypedDict, NotRequired
 # ──────────────────────────────────────────────────────────────────────────────
 # 경로는 실제 프로젝트 구조에 맞게 하나만 활성화하세요.
 # from ...common.short_term.redis_memory import RedisLangGraphMemory   # 상대 임포트(패키지 실행 전제)
-from ..common.short_term.redis_memory import RedisLangGraphMemory   # 절대 임포트(권장)
+# from ..common.short_term.redis_memory import RedisLangGraphMemory   # 절대 임포트(권장)
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+from common.short_term.redis_memory import RedisLangGraphMemory
 
-from agents.analysis.analysis_agent import AnalysisAgent, score_agent
+from agents.analysis.analysis_agent import AnalysisAgent
+from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
-from TestGenerator.pdf_quiz_groq_class import generate_agent
+from TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from solution.solution_agent import solution_agent
 from teacher_nodes import get_user_answer
 # ──────────────────────────────────────────────────────────────────────────────

@@ -10,12 +10,10 @@ import json, re
 from langchain_openai import ChatOpenAI
 from teacher.base_agent import BaseAgent
 from docling.document_converter import DocumentConverter
+from datetime import datetime
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-
-
 
 # ✅ 상태 정의
 class SolutionState(TypedDict):
@@ -37,12 +35,14 @@ class SolutionState(TypedDict):
     generated_explanation: str   # 풀이
     results: List[Dict]
     validated: bool
+    retry_count: int             # 검증 실패 시 재시도 횟수
 
     exam_title: str
     difficulty: str
     subject: str
 
     chat_history: List[str]
+    
 class SolutionAgent(BaseAgent):
     """문제 해답/풀이 생성 에이전트"""
 
@@ -70,9 +70,10 @@ class SolutionAgent(BaseAgent):
         graph.add_node("next_problem", self._next_problem)
 
         graph.set_entry_point("route")
-        graph.add_conditional_edges("route", lambda s: s["source_type"],
-                                {"internal": "load_from_short_term_memory",
-                                "external": "load_from_external_docs"})
+        graph.add_conditional_edges(
+            "route", 
+            lambda s: s["source_type"],
+            {"internal": "load_from_short_term_memory", "external": "load_from_external_docs"})
         graph.add_edge("load_from_short_term_memory", "next_problem")
         graph.add_edge("load_from_external_docs", "next_problem")
 
@@ -82,8 +83,8 @@ class SolutionAgent(BaseAgent):
 
         graph.add_conditional_edges(
             "validate", 
-            lambda s: "ok" if s["validated"] else "stop",
-            {"ok": "store", "stop": END}
+            lambda s: "ok" if s["validated"] else ("back" if s.get("retry_count", 0) < 5 else "fail"),
+            {"ok": "store", "back": "generate_solution", "fail": "next_problem"}
         )
 
         # 저장 후 남은 문제가 있으면 next_problem로 루프
@@ -110,7 +111,7 @@ class SolutionAgent(BaseAgent):
         )
         user_prompt = (
             "다음 텍스트에서 문항을 최대한 정확히 추출해 JSON 배열로 만들어줘.\n"
-            "요구 스키마: [{\"문제\":\"...\",\"옵션\":[\"...\",\"...\"]}]\n"
+            "요구 스키마: [{\"question\":\"...\",\"options\":[\"...\",\"...\"]}]\n"
             "규칙:\n"
             "- 질문 본문에서 번호(예: '1.', '(1)', '①', '가.' 등)와 불필요한 머리글은 제거.\n"
             "- 옵션에서도 마찬가지로 번호/불릿 제거 후 순수 텍스트만 남김.\n"
@@ -189,7 +190,7 @@ class SolutionAgent(BaseAgent):
 
             # 페이지 단위로 텍스트 추출 (가능하면 페이지 경계 보존)
             if hasattr(doc, "export_to_markdown"):
-                raw = doc.export_to_markdown(strict_text=True)
+                raw = doc.export_to_markdown()
             elif hasattr(doc, "export_to_text"):
                 raw = doc.export_to_text()
             else:
@@ -203,7 +204,7 @@ class SolutionAgent(BaseAgent):
                     continue
 
                 # 1차: 자동 패턴 파서
-                blocks = self._split_by_questions_auto(page_text)
+                blocks = self._split_by_questions(page_text)
 
                 # 문항 수가 너무 적거나(예: 0~1개) 옵션 없는 항목이 많으면 LLM으로 재시도
                 need_llm = (len(blocks) <= 1) or (sum(1 for q, opts in blocks if opts) <= 0)
@@ -220,7 +221,7 @@ class SolutionAgent(BaseAgent):
                         continue
                     if opts and not (2 <= len(opts) <= 6):
                         opts = opts[:6]
-                    extracted_pairs.append({"문제": qtext.strip(), "옵션": [o.strip() for o in opts]})
+                    extracted_pairs.append({"question": qtext.strip(), "options": [o.strip() for o in opts]})
 
         if not extracted_pairs:
             raise ValueError("문서에서 문제/보기를 추출하지 못했습니다. PDF 포맷을 확인하세요.")
@@ -229,14 +230,17 @@ class SolutionAgent(BaseAgent):
         seen = set()
         deduped = []
         for it in extracted_pairs:
-            key = it["문제"]
+            key = it["question"]
             if key in seen:
                 continue
             seen.add(key)
             deduped.append(it)
 
-        state["user_problems"] = [{"question": it["문제"], "options": it["옵션"]} for it in deduped]
+        state["user_problems"] = [{"question": it["question"], "options": it["options"]} for it in deduped]
         print(f"✅ 추출된 문항 수: {len(state['user_problems'])}")
+        
+        saved_file = self.save_user_problems_to_json(state["user_problems"], "user_problems_json.json")
+        print(f"저장된 파일: {saved_file}")
         return state
     
     # 간단한 문제/보기 파서 (문서 포맷에 맞게 조정 가능)
@@ -298,7 +302,7 @@ class SolutionAgent(BaseAgent):
         )
 
         similar_problems = state.get("similar_questions_text", "")
-        print("유사 문제들:\n", similar_problems)
+        print("유사 문제들:\n", similar_problems[:100])
 
         prompt = f"""
             사용자가 입력한 질문:
@@ -345,11 +349,13 @@ class SolutionAgent(BaseAgent):
         validation_prompt = f"""
         사용자 요구사항: {state['user_question']}
 
-        질문: {state['user_problem']}
-        정답: {state['generated_answer']}
-        풀이: {state['generated_explanation']}
+        문제 질문: {state['user_problem']}
+        문제 보기: {state['user_problem_options']}
 
-        위 해답과 풀이가 문제 사용자 요구사항에 맞고, 논리적 오류나 잘못된 정보가 없습니까?
+        생성된 정답: {state['generated_answer']}
+        생성된 풀이: {state['generated_explanation']}
+
+        생성된 해답과 풀이가 문제와 사용자 요구사항에 맞고, 논리적 오류나 잘못된 정보가 없습니까?
         적절하다면 '네', 그렇지 않다면 '아니오'로만 답변하세요.
         """
 
@@ -359,7 +365,13 @@ class SolutionAgent(BaseAgent):
         # ✅ '네'가 포함된 응답일 경우에만 유효한 풀이로 판단
         print("📌 검증 응답:", result_text)
         state["validated"] = "네" in result_text
-        print(f"✅ 검증 결과: {'통과' if state['validated'] else '불통과'}")
+        
+        if not state["validated"]:
+            state["retry_count"] = state.get("retry_count", 0) + 1
+            print(f"⚠️ 검증 실패 (재시도 {state['retry_count']}/5)")
+        else:
+            print("✅ 검증 결과: 통과")
+            
         return state
 
 
@@ -367,29 +379,26 @@ class SolutionAgent(BaseAgent):
     def _store_to_vector_db(self, state: SolutionState) -> SolutionState:  
         print("\n🧩 [4단계] 임베딩 및 벡터 DB 저장 시작")
 
+        # 벡터 DB 저장 (외부인 경우)
         if state["source_type"] == "external":
-
             vectorstore = state["vectorstore"] 
 
             # 중복 문제 확인
             similar = vectorstore.similarity_search(state["user_problem"], k=1)
             if similar and state["user_problem"].strip() in similar[0].page_content:
                 print("⚠️ 동일한 문제가 존재하여 저장 생략")
-                return state
-
-            # 문제, 해답, 풀이를 각각 metadata로 저장
-            doc = Document(
-                page_content=state["user_problem"],
-                metadata={
-                    "options": json.dumps(state.get("user_problem_options", [])), 
-                    "answer": state["generated_answer"],
-                    "explanation": state["generated_explanation"]
-                }
-            )
-            vectorstore.add_documents([doc])
-            print("✅ 문제+해답+풀이 저장 완료")
-
-            return state
+            else:
+                # 문제, 해답, 풀이를 각각 metadata로 저장
+                doc = Document(
+                    page_content=state["user_problem"],
+                    metadata={
+                        "options": json.dumps(state.get("user_problem_options", [])), 
+                        "answer": state["generated_answer"],
+                        "explanation": state["generated_explanation"]
+                    }
+                )
+                vectorstore.add_documents([doc])
+                print("✅ 문제+해답+풀이 저장 완료")
         else:
             print("⚠️ 내부 저장소는 벡터 DB 저장을 지원하지 않습니다. 내부 문제로만 저장합니다.")
             # 내부: 요구 스키마(JSON)로 파일 누적 저장
@@ -431,25 +440,40 @@ class SolutionAgent(BaseAgent):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             print(f"✅ 내부 문제 저장(JSON 스키마) 완료 → {store_path}")
 
+        # 결과를 state에 저장 (항상 실행)
+        print(f"\n📝 결과 저장 시작:")
+        print(f"   - 현재 문제: {state['user_problem'][:50]}...")
+        print(f"   - 생성된 정답: {state['generated_answer'][:30]}...")
+        print(f"   - 검증 상태: {state['validated']}")
+        
         item = {
             "question": state["user_problem"],
             "options": state["user_problem_options"],
             "generated_answer": state["generated_answer"],
             "generated_explanation": state["generated_explanation"],
             "validated": state["validated"],
-            "chat_history": state.get("chat_history", []),
+            "chat_history": state.get("chat_history", [])
         }
-        state.setdefault("results", []).append(item)
+        
+        
+        state["results"].append(item)
+        print(f"✅ 결과 저장 완료: {len(state['results'])}개")
+        
         return state
     
     def _next_problem(self, state: SolutionState) -> SolutionState:
         queue = state.get("user_problems", [])
         if not queue:
             raise ValueError("처리할 문제가 없습니다. user_problems가 비어있어요.")
+        
         current = queue.pop(0)
         state["user_problem"] = current.get("question", "")
         state["user_problem_options"] = current.get("options", [])
         state["user_problems"] = queue
+        
+        print(f"📝 다음 문제 처리: {state['user_problem'][:50]}...")
+        print(f"   - 남은 문제 수: {len(queue)}")
+        
         return state
 
     def execute(
@@ -500,6 +524,7 @@ class SolutionAgent(BaseAgent):
             "generated_answer": "",
             "generated_explanation": "",
             "validated": False,
+            "retry_count": 0,
             "results": [],
             
             "exam_title": exam_title,
@@ -510,7 +535,58 @@ class SolutionAgent(BaseAgent):
         }
         
         final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
-        return final_state["results"]
+        
+        # 결과 확인 및 디버깅
+        results = final_state.get("results", [])
+        print(f"\n🎯 최종 실행 결과:")
+        print(f"   - 총 결과 수: {len(results)}")
+        print(f"   - 결과 키 존재: {'results' in final_state}")
+        print(f"   - 상태 키들: {list(final_state.keys())}")
+        
+        if results:
+            for i, result in enumerate(results):
+                print(f"   - 결과 {i+1}: {result.get('question', '')[:30]}...")
+        else:
+            print("   ⚠️ results가 비어있습니다!")
+            print(f"   - final_state 내용: {final_state}")
+        
+        return results
+
+    def save_user_problems_to_json(self, user_problems: List[Dict], filename: str = None) -> str:
+        """
+        user_problems를 JSON 파일로 저장합니다.
+        
+        Args:
+            user_problems: 저장할 문제 데이터 리스트
+            filename: 저장할 파일명 (None이면 자동 생성)
+            
+        Returns:
+            저장된 파일 경로
+        """
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"user_problems_{timestamp}.json"
+        
+        # 파일 경로가 상대 경로인 경우 현재 디렉토리에 저장
+        if not os.path.isabs(filename):
+            filename = os.path.join(os.getcwd(), filename)
+        
+        # 디렉토리가 없으면 생성
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        # JSON 데이터 준비
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "total_problems": len(user_problems),
+            "problems": user_problems
+        }
+        
+        # JSON 파일로 저장
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ user_problems가 JSON 파일로 저장되었습니다: {filename}")
+        return filename
 
 if __name__ == "__main__":
     # ✅ Milvus 연결 및 벡터스토어 생성
@@ -526,32 +602,35 @@ if __name__ == "__main__":
     vectorstore = Milvus(
         embedding_function=embedding_model,
         collection_name="problems",
-        connection_args={"host": "localhost", "port": "19530"}
+        connection_args={"host": "localhost", "port":"19530"}
     )
 
-    # ✅ JSON 파일 로딩
-    with open("./sample_user.json", "r", encoding="utf-8") as f:
-        user_problems = json.load(f)
-
-    # ✅ 사용자 질문 입력
-    user_question = input("\n❓ 사용자 질문을 입력하세요 : ").strip()
-
     agent = SolutionAgent()
-    results = agent.execute(user_question, user_problems, vectorstore)
 
     # 그래프 시각화
     try:
         graph_image_path = "agent_workflow.png"
         with open(graph_image_path, "wb") as f:
-            f.write(agent.get_graph().draw_mermaid_png())
+            f.write(agent.graph.get_graph().draw_mermaid_png())
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     except Exception as e:
         print(f"그래프 시각화 중 오류 발생: {e}")
-   
-    for i, result in enumerate(results):
-        print(f"\n==== 문제 {i + 1} ====")
-        print("Q:", result["question"])
-        print("A:", result["generated_answer"])
-        print("E:", result["generated_explanation"])
-        print("검증:", "통과" if result["validated"] else "불통과")
-        print("히스토리:", result["chat_history"])
+        print("워크플로우는 정상적으로 작동합니다.")
+
+    # ✅ 사용자 질문 입력
+    user_question = input("\n❓ 사용자 질문을 입력하세요 : ").strip()
+    
+    results = agent.execute(user_question, "external", vectorstore, external_file_paths=["./user_problems.pdf"])
+
+    # 결과를 JSON 파일로 저장
+    results_data = {
+        "timestamp": datetime.now().isoformat(),
+        "user_question": user_question,
+        "total_results": len(results),
+        "results": results
+    }
+    
+    results_filename = f"solution_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(results_filename, "w", encoding="utf-8") as f:
+        json.dump(results_data, f, ensure_ascii=False, indent=2)
+    print(f"✅ 해답 결과가 JSON 파일로 저장되었습니다: {results_filename}")

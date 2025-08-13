@@ -13,7 +13,7 @@ from langchain_milvus import Milvus
 from pymilvus import connections
 
 # PDF 생성 유틸 (정답/풀이 포함 출력)
-from pdf_generation import generate_pdf
+from result2pdf_generation import generate_pdf
 
 load_dotenv()
 st.set_page_config(layout="wide")
@@ -68,6 +68,7 @@ run_col1, run_col2 = st.columns([1, 3])
 with run_col1:
     run = st.button("🧠 해답 생성 시작", type="primary", use_container_width=True)
 
+# 결과 저장용 변수 초기화
 all_results = []
 
 if run:
@@ -84,21 +85,34 @@ if run:
                     temp_paths.append(tmp.name)
 
             agent = SolutionAgent()
+            
+            # 디버깅 정보 표시
+            st.info(f"📁 업로드된 PDF 파일: {len(temp_paths)}개")
+            for i, path in enumerate(temp_paths):
+                st.info(f"   {i+1}. {os.path.basename(path)}")
+            
             with st.spinner("🧠 문서에서 문제 추출 및 해답 생성 중..."):
-                results = agent.execute(
-                    user_question=user_question,
-                    source_type="external",          # PDF → Docling → 외부 분기
-                    vectorstore=vectorstore,
-                    external_file_paths=temp_paths,  # 방금 저장한 임시 경로들
-                    exam_title=exam_title,
-                    difficulty=difficulty,
-                    subject=subject,
-                )
+                try:
+                    results = agent.execute(
+                        user_question=user_question,
+                        source_type="external",          # PDF → Docling → 외부 분기
+                        vectorstore=vectorstore,
+                        external_file_paths=temp_paths,  # 방금 저장한 임시 경로들
+                        exam_title=exam_title,
+                        difficulty=difficulty,
+                        subject=subject,
+                    )
+                    st.success("✅ 에이전트 실행 완료!")
+                except Exception as e:
+                    st.error(f"❌ 에이전트 실행 중 오류: {str(e)}")
+                    st.error("🔍 PDF 파일 형식이나 내용을 확인해 주세요.")
+                    results = []
 
-            if not results:
+            if not results or len(results) == 0:
                 st.info("문제를 추출하지 못했습니다. PDF 포맷을 확인해 주세요.")
             else:
                 st.success(f"총 {len(results)}개 문항 처리 완료!")
+                st.info(f"처리 통계: 검증 통과 {sum(1 for r in results if r.get('validated'))}개, 실패 {sum(1 for r in results if not r.get('validated'))}개")
 
                 # 문항 렌더링
                 for i, result in enumerate(results, start=1):
@@ -119,7 +133,12 @@ if run:
                         explanation = result.get("generated_explanation", "")
                         st.markdown(f"**✅ 정답:** {answer_text or '(생성되지 않음)'}")
                         st.markdown(f"**📖 풀이:**\n{explanation or '(생성되지 않음)'}")
-                        st.markdown(f"**🔍 검증:** {'통과' if result.get('validated') else '불통과'}")
+                        # 수정 필요: 재시도 횟수 정보도 표시
+                        validation_status = "통과" if result.get('validated') else "불통과"
+                        retry_count = result.get('retry_count', 0)
+                        st.markdown(f"**🔍 검증:** {validation_status}")
+                        if retry_count > 0:
+                            st.markdown(f"**⚠️ 재시도:** {retry_count}회")
 
                         # 히스토리(있을 경우)
                         history = result.get("chat_history", [])
@@ -134,7 +153,9 @@ if run:
                         "question": result.get("question", ""),
                         "options": opts,
                         "answer": result.get("generated_answer", ""),
-                        "explanation": result.get("generated_explanation", "")
+                        "explanation": result.get("generated_explanation", ""),
+                        "validated": result.get("validated", False),
+                        "retry_count": result.get("retry_count", 0)
                     })
 
         except Exception as e:
@@ -153,10 +174,14 @@ if run:
 if all_results:
     st.markdown("---")
     st.subheader("📄 전체 결과 PDF 다운로드")
-    pdf_buffer = generate_pdf(all_results)  # 정답/풀이 포함 PDF
-    st.download_button(
-        label="📥 PDF 다운로드",
-        data=pdf_buffer,
-        file_name="generated_solutions.pdf",
-        mime="application/pdf",
-    )
+    try:
+        pdf_buffer = generate_pdf(all_results)  # 정답/풀이 포함 PDF
+        st.download_button(
+            label="📥 PDF 다운로드",
+            data=pdf_buffer,
+            file_name="generated_solutions.pdf",
+            mime="application/pdf",
+        )
+    except Exception as e:
+        st.error(f"❌ PDF 생성 중 오류: {str(e)}")
+        st.info("📋 결과는 여전히 화면에서 확인할 수 있습니다.")

@@ -22,7 +22,7 @@ from common.short_term.redis_memory import RedisLangGraphMemory
 from agents.analysis.analysis_agent import AnalysisAgent
 from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
-from TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
+from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from agents.solution.solution_agent import SolutionAgent as solution_agent
 from teacher_nodes import get_user_answer
 # ──────────────────────────────────────────────────────────────────────────────

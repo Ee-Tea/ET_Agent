@@ -71,3 +71,39 @@ def get_user_answer(user_question: str) -> str:
     result = response.choices[0].message.content
     
     return result.strip()
+
+def parse_generator_input(user_question: str) -> dict:
+    """
+    사용자 질문에서 과목/문항수/난이도 파싱
+    """
+    system_prompt = f"""다음 사용자 질문에서 과목/문항수/난이도를 파싱하세요:
+    사용자 질문 : {user_question}
+    
+    과목은 5가지 중 하나로 분류하세요.
+    문항 수는 과목별 최대 20문제로 분류하세요.
+    난이도는 초급, 중급, 고급 중 하나로 분류하세요.
+    
+    과목 예시 : 소프트웨어설계, 소프트웨어개발, 데이터베이스구축, 프로그래밍언어활용, 정보시스템구축관리
+    문항 수 예시 : 10, 15, 20
+    난이도 예시 : 초급, 중급, 고급
+    
+    파싱 결과는 다음과 같은 형식으로 출력하세요.
+    {
+        "subject": "과목",  
+        "count": "문항 수",
+        "difficulty": "난이도"
+    }
+    """
+
+    response = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 또는 gpt-3.5-turbo 사용 가능
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_question}
+        ],
+        temperature=0.2
+    )
+    
+    result = response.choices[0].message.content
+    
+    return result.strip()

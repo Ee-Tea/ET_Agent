@@ -25,7 +25,7 @@ from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
 from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from agents.solution.solution_agent import SolutionAgent as solution_agent
-from teacher_nodes import get_user_answer
+from teacher_nodes import get_user_answer, parse_generator_input
 from file_path_mapper import FilePathMapper
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -303,91 +303,40 @@ class Orchestrator:
             raise RuntimeError("generator_runner is not initialized (init_agents=False).")
         user_query = state.get("user_query", "")
 
-        # 사용자 입력에서 과목/문항수/난이도 파싱
-        def _parse_count(text: str) -> int | None:
-            import re
-            # 예: "10문제", "10문항", "10개"
-            m = re.search(r"(\d+)\s*(?:문제|문항|개)", text)
-            if m:
-                try:
-                    return int(m.group(1))
-                except ValueError:
-                    return None
-            # 숫자만 있는 경우 가장 처음 숫자를 문항수로 가정
-            m2 = re.search(r"(\d+)", text)
-            if m2:
-                try:
-                    return int(m2.group(1))
-                except ValueError:
-                    return None
-            return None
-
-        def _parse_difficulty(text: str) -> str | None:
-            if not text:
-                return None
-            text = text.strip()
-            for d in ("초급", "중급", "고급"):
-                if d in text:
-                    return d
-            return None
-
-        def _parse_subject(text: str, subject_candidates: list[str]) -> str | None:
-            if not text:
-                return None
-            import re
-            from difflib import SequenceMatcher
-
-            def _norm(s: str) -> str:
-                s = s or ""
-                return re.sub(r"\s+", "", s)
-
-            text_norm = _norm(text)
-
-            # 동의어/약칭 매핑으로 우선 매칭
-            alias_map: dict[str, list[str]] = {
-                "소프트웨어설계": ["소프트웨어설계", "소프트웨어 설계", "소프트웨어구조", "소프트웨어 구조", "SW설계", "SW 설계", "설계"],
-                "소프트웨어개발": ["소프트웨어개발", "소프트웨어 개발", "SW개발", "SW 개발", "개발"],
-                "데이터베이스구축": [
-                    "데이터베이스구축", "데이터베이스 구축", "데이터베이스구조", "데이터베이스 구조",
-                    "데이터베이스", "DB", "디비", "DB구축", "DB 구축", "DB구조", "DB 구조"
-                ],
-                "프로그래밍언어활용": ["프로그래밍언어활용", "프로그래밍 언어", "언어", "코딩", "프로그래밍"],
-                "정보시스템구축관리": ["정보시스템구축관리", "정보시스템 구축 관리", "정보시스템", "시스템구축", "시스템 관리"]
-            }
-
-            alias_hits: list[tuple[str, int]] = []  # (subject, matched_alias_len)
-            for subject, aliases in alias_map.items():
-                for al in aliases:
-                    if _norm(al) and _norm(al) in text_norm:
-                        alias_hits.append((subject, len(_norm(al))))
-                        break
-            if alias_hits:
-                # 가장 구체적인(길이가 긴) 별칭이 매칭된 과목을 우선 선택
-                alias_hits.sort(key=lambda x: x[1], reverse=True)
-                return alias_hits[0][0]
-
-            # 후보 과목명 직접 포함 매칭
-            ordered = sorted(subject_candidates or [], key=len, reverse=True)
-            for name in ordered:
-                if name and _norm(name) in text_norm:
-                    return name
-
-            # 유사도 기반(완화된 임계치)
-            best_name, best_score = None, 0.0
-            for name in ordered:
-                if not name:
-                    continue
-                score = SequenceMatcher(None, _norm(name), text_norm).ratio()
-                if score > best_score:
-                    best_name, best_score = name, score
-            if best_score >= 0.68:
-                return best_name
-            return None
-
+        # 사용자 입력 파싱을 nodes.parse_generator_input으로 대체
+        import json as _json
         subject_candidates = list(getattr(agent, "SUBJECT_AREAS", {}).keys()) if agent else []
-        parsed_subject = _parse_subject(user_query, subject_candidates)
-        parsed_count = _parse_count(user_query)
-        parsed_difficulty = _parse_difficulty(user_query) or "중급"
+        parsed_subject: Optional[str] = None
+        parsed_count: Optional[int] = None
+        parsed_difficulty: str = "중급"
+
+        try:
+            parsed_raw = parse_generator_input(user_query)  # nodes 함수 (LLM 기반)
+            if isinstance(parsed_raw, str):
+                try:
+                    parsed_obj = _json.loads(parsed_raw)
+                except Exception:
+                    parsed_obj = {}
+            elif isinstance(parsed_raw, dict):
+                parsed_obj = parsed_raw
+            else:
+                parsed_obj = {}
+
+            subj = (parsed_obj.get("subject") if isinstance(parsed_obj, dict) else None) or None
+            cnt = parsed_obj.get("count") if isinstance(parsed_obj, dict) else None
+            diff = (parsed_obj.get("difficulty") if isinstance(parsed_obj, dict) else None) or None
+
+            if isinstance(subj, str) and subj.strip():
+                parsed_subject = subj.strip()
+            if isinstance(cnt, str) and cnt.isdigit():
+                parsed_count = int(cnt)
+            elif isinstance(cnt, (int, float)):
+                parsed_count = int(cnt)
+            if isinstance(diff, str) and diff.strip():
+                parsed_difficulty = diff.strip()
+        except Exception:
+            # 파싱 실패 시 기본값 유지
+            pass
 
         # 에이전트 입력 구성: 과목을 지정하면 subject_quiz, 아니면 full_exam
         if parsed_subject:
@@ -658,6 +607,63 @@ class Orchestrator:
             new_state["shared"]["weak_type"] = agent_result["mistake_summary"]
         return new_state
 
+    @traceable(name="teacher.generate_pdfs")
+    def generate_pdfs(self, state: TeacherState) -> TeacherState:
+        """문제/풀이 결과를 PDF로 저장하고 파일 경로를 artifacts에 기록합니다."""
+        state = ensure_shared(state)
+        sh = state.get("shared") or {}
+
+        questions: List[str] = sh.get("question", []) or []
+        options_list: List[List[str]] = sh.get("options", []) or []
+        answers: List[str] = sh.get("answer", []) or []
+        explanations: List[str] = sh.get("explanation", []) or []
+
+        if not questions or not options_list:
+            print("[PDF] 생성할 문제가 없어 PDF 생성을 건너뜁니다.")
+            return state
+
+        problems: List[Dict[str, Any]] = []
+        count = min(len(questions), len(options_list))
+        for i in range(count):
+            q = questions[i] if i < len(questions) else ""
+            opts = options_list[i] if i < len(options_list) else []
+            if isinstance(opts, str):
+                opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+            ans = answers[i] if i < len(answers) else ""
+            exp = explanations[i] if i < len(explanations) else ""
+            problems.append({
+                "question": q,
+                "options": opts,
+                "generated_answer": ans,
+                "generated_explanation": exp,
+            })
+
+        # 출력 디렉토리
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+        os.makedirs(base_dir, exist_ok=True)
+
+        uq = (state.get("user_query") or "exam").strip()
+        safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+        base_filename = os.path.join(base_dir, f"{safe_uq}")
+
+        try:
+            # 지연 임포트: 그래프 시각화 등에서 모듈 임포트 부작용 방지
+            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            generator = ComprehensivePDFGenerator()
+            files = generator.generate_all_pdfs(problems, base_filename)
+        except Exception as e:
+            print(f"[PDF] 생성 중 오류: {e}")
+            return state
+
+        ns = {**state}
+        arts = ns.setdefault("artifacts", {})
+        generated_list = arts.setdefault("generated_pdfs", [])
+        for k in ("problem_pdf", "answer_pdf", "analysis_pdf"):
+            if files.get(k):
+                generated_list.append(files[k])
+        print(f"[PDF] 생성 완료 → {generated_list}")
+        return ns
+
     @traceable(name="teacher.retrieve")
     def retrieve(self, state: TeacherState) -> TeacherState:
         state = ensure_shared(state)
@@ -763,7 +769,7 @@ class Orchestrator:
             self.post_generator_route,
             {
                 "solution": "solution",
-                "persist_state": "persist_state",
+                "persist_state": "generate_pdfs",
             },
         )
         builder.add_conditional_edges(
@@ -771,7 +777,7 @@ class Orchestrator:
             self.post_solution_route,
             {
                 "score": "score",
-                "persist_state": "persist_state",
+                "persist_state": "generate_pdfs",
             },
         )
         builder.add_conditional_edges(
@@ -783,9 +789,13 @@ class Orchestrator:
             },
         )
 
-        # retrieve/analysis → persist → END
+        # PDF 생성 노드 추가 및 연결
+        builder.add_node("generate_pdfs", RunnableLambda(self.generate_pdfs))
+
+        # retrieve → persist, analysis → generate_pdfs → persist → END
         builder.add_edge("retrieve", "persist_state")
-        builder.add_edge("analysis", "persist_state")
+        builder.add_edge("analysis", "generate_pdfs")
+        builder.add_edge("generate_pdfs", "persist_state")
         builder.add_edge("persist_state", END)
 
         return builder.compile()

@@ -6,7 +6,9 @@ import re
 from dotenv import load_dotenv
 load_dotenv()
 
-groq_api_key = os.getenv("GROQAI_API_KEY")
+groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQAI_API_KEY")
+if not groq_api_key:
+  raise ValueError("GROQ_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
 client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
 
 def parse_llama_json(result: str) -> dict:

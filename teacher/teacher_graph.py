@@ -1,5 +1,5 @@
 # teacher_graph.py
-# uv run teacher/teacher_graph_visual.py
+# uv run teacher/teacher_graph.py
 from __future__ import annotations
 
 import os
@@ -26,6 +26,7 @@ from agents.retrieve.retrieve_agent import retrieve_agent
 from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from agents.solution.solution_agent import SolutionAgent as solution_agent
 from teacher_nodes import get_user_answer
+from file_path_mapper import FilePathMapper
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ========== 타입/프로토콜 ==========
@@ -328,15 +329,101 @@ class Orchestrator:
         if agent is None:
             raise RuntimeError("solution_runner is not initialized (init_agents=False).")
 
+        # 파일 경로 정보 추출 (artifacts에서)
+        artifacts = state.get("artifacts", {})
+        
+        # FilePathMapper를 사용하여 파일 경로 추출
+        file_mapper = FilePathMapper()
+        external_file_paths = file_mapper.map_artifacts_to_paths(artifacts)
+        
+        print(f"🔍 발견된 파일 경로: {external_file_paths}")
+        if external_file_paths:
+            print(f"   - PDF: {[f for f in external_file_paths if f.endswith('.pdf')]}")
+            print(f"   - 이미지: {[f for f in external_file_paths if f.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp'))]}")
+        else:
+            print("   ⚠️ 파일을 찾을 수 없습니다. artifacts를 확인해주세요.")
+            print(f"   - artifacts: {artifacts}")
+
         for question, options in zip(questions, options_list):
             if isinstance(options, str):
                 options = [x.strip() for x in options.splitlines() if x.strip()] or [options.strip()]
-            agent_input = {
-                "user_question": state.get("user_query", ""),
-                "user_problem": question,
-                "user_problem_options": options,
-            }
-            agent_result = safe_execute(agent, agent_input)
+            
+            # 파일이 있는 경우와 없는 경우를 구분하여 처리
+            if external_file_paths:
+                # 외부 파일이 있는 경우: external 모드로 실행
+                agent_input = {
+                    "user_question": state.get("user_query", ""),
+                    "user_problem": question,
+                    "user_problem_options": options,
+                    "source_type": "external",
+                    "external_file_paths": external_file_paths,
+                    "short_term_memory": [],
+                    "vectorstore": None,  # solution_agent에서 필요시 생성
+                    "retrieved_docs": [],
+                    "similar_questions_text": "",
+                    "generated_answer": "",
+                    "generated_explanation": "",
+                    "results": [],
+                    "validated": False,
+                    "retry_count": 0,
+                    "exam_title": "",
+                    "difficulty": "",
+                    "subject": "",
+                    "chat_history": []
+                }
+            else:
+                # 외부 파일이 없는 경우: internal 모드로 실행 (기존 방식)
+                agent_input = {
+                    "user_question": state.get("user_query", ""),
+                    "user_problem": question,
+                    "user_problem_options": options,
+                    "source_type": "internal",
+                    "external_file_paths": [],
+                    "short_term_memory": [{"question": question, "options": options}],
+                    "vectorstore": None,
+                    "retrieved_docs": [],
+                    "similar_questions_text": "",
+                    "generated_answer": "",
+                    "generated_explanation": "",
+                    "results": [],
+                    "validated": False,
+                    "retry_count": 0,
+                    "exam_title": "",
+                    "difficulty": "",
+                    "subject": "",
+                    "chat_history": []
+                }
+            
+            # solution_agent의 execute 메서드는 특별한 시그니처를 가짐
+            if hasattr(agent, 'execute') and callable(getattr(agent, 'execute')):
+                try:
+                    # solution_agent의 execute 메서드 호출
+                    agent_result = agent.execute(
+                        user_question=agent_input["user_question"],
+                        source_type=agent_input["source_type"],
+                        vectorstore=agent_input.get("vectorstore"),
+                        short_term_memory=agent_input.get("short_term_memory"),
+                        external_file_paths=agent_input.get("external_file_paths"),
+                        exam_title="정보처리기사 모의고사",
+                        difficulty="중급",
+                        subject="기타"
+                    )
+                    # 결과를 기존 형식에 맞게 변환
+                    if isinstance(agent_result, list) and len(agent_result) > 0:
+                        # 첫 번째 결과에서 답과 해설 추출
+                        first_result = agent_result[0]
+                        if "generated_answer" in first_result:
+                            agent_result = {"generated_answer": first_result["generated_answer"]}
+                        if "generated_explanation" in first_result:
+                            agent_result["generated_explanation"] = first_result["generated_explanation"]
+                    elif not isinstance(agent_result, dict):
+                        agent_result = {}
+                except Exception as e:
+                    print(f"[WARN] solution_agent execute failed: {e}")
+                    agent_result = {}
+            else:
+                # 기존 safe_execute 방식 사용
+                agent_result = safe_execute(agent, agent_input)
             new_state["solution"].update(agent_result or {})
 
             if agent_result:
@@ -583,6 +670,13 @@ if __name__ == "__main__":
                 "intent": "",
                 # 파일 테스트 시 artifacts에 id 넣어두면 preprocess 라우팅이 작동합니다.
                 # "artifacts": {"pdf_ids": ["file_123"]},
+                # PDF 파일 테스트를 위한 예시 (실제 파일명으로 수정 필요)
+                "artifacts": {"pdf_ids": ["2024년3회_정보처리기사필기기출문제.pdf"]},
+                # 여러 파일 타입을 동시에 테스트할 수도 있습니다:
+                # "artifacts": {
+                #     "pdf_ids": ["2024년3회_정보처리기사필기기출문제.pdf", "정보처리기사"],
+                #     "image_ids": ["diagram", "chart"]
+                # },
             }
 
             try:

@@ -344,8 +344,21 @@ class SolutionAgent(BaseAgent):
 
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
         print("\n🔍 [1단계] 유사 문제 검색 시작")
-        results = state["vectorstore"].similarity_search(state["user_problem"], k=3)
-
+        
+        vectorstore = state.get("vectorstore")
+        if vectorstore is None:
+            print("⚠️ 벡터스토어가 없어 유사 문제 검색을 건너뜁니다.")
+            state["retrieved_docs"] = []
+            state["similar_questions_text"] = ""
+            print("🔍 [1단계] 유사 문제 검색 함수 종료 (건너뜀)")
+            return state
+        
+        try:
+            results = vectorstore.similarity_search(state["user_problem"], k=3)
+        except Exception as e:
+            print(f"⚠️ 유사 문제 검색 실패: {e}")
+            results = []
+        
         similar_questions = []
         for i, doc in enumerate(results):
             metadata = doc.metadata
@@ -570,21 +583,26 @@ class SolutionAgent(BaseAgent):
 
         # ✅ Milvus 연결 및 벡터스토어 생성
         if vectorstore is None:
+            try:
+                embedding_model = HuggingFaceEmbeddings(
+                    model_name="jhgan/ko-sroberta-multitask",
+                    model_kwargs={"device": "cpu"}
+                )
 
-            embedding_model = HuggingFaceEmbeddings(
-                model_name="jhgan/ko-sroberta-multitask",
-                model_kwargs={"device": "cpu"}
-            )
+                if "default" in connections.list_connections():
+                    connections.disconnect("default")
+                connections.connect(alias="default", host="localhost", port="19530")
 
-            if "default" in connections.list_connections():
-                connections.disconnect("default")
-            connections.connect(alias="default", host="localhost", port="19530")
-
-            vectorstore = Milvus(
-                embedding_function=embedding_model,
-                collection_name="problems",
-                connection_args={"host": "localhost", "port": "19530"}
-            )
+                vectorstore = Milvus(
+                    embedding_function=embedding_model,
+                    collection_name="problems",
+                    connection_args={"host": "localhost", "port": "19530"}
+                )
+                print("✅ Milvus 벡터스토어 연결 성공")
+            except Exception as e:
+                print(f"⚠️ Milvus 연결 실패: {e}")
+                print("   - 벡터스토어 없이 실행을 계속합니다.")
+                vectorstore = None
         
         initial_state: SolutionState = {
             "user_question": user_question,

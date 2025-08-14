@@ -152,6 +152,8 @@ class Orchestrator:
         load_dotenv()
         if not os.getenv("LANGCHAIN_API_KEY"):
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
+        # 최대 허용 문제 수 (환경변수로 조정 가능)
+        self.max_request_count: int = int(os.getenv("MAX_REQUEST_COUNT", "100"))
         # TTL/길이 제한은 redis_memory.py에서 설정
         self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
                 # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
@@ -391,6 +393,10 @@ class Orchestrator:
         if parsed_subject:
             # 과목 문제 생성 모드 - 사용자가 요청한 수만큼만 생성
             target_count = parsed_count if parsed_count and parsed_count > 0 else 5
+            # 전역 상한 적용
+            if target_count > getattr(self, "max_request_count", 100):
+                print(f"[Generator] 요청 {target_count}개가 상한을 초과하여 {self.max_request_count}개로 제한합니다.")
+                target_count = self.max_request_count
             agent_input = {
                 "mode": "subject_quiz",
                 "subject_area": parsed_subject,

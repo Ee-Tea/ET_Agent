@@ -4,7 +4,7 @@ from typing import List, Dict, Any, TypedDict
 from abc import ABC, abstractmethod
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Milvus
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langgraph.graph import StateGraph, END
@@ -268,8 +268,30 @@ class InfoProcessingExamAgent(BaseAgent):
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(all_documents)
-        
-        self.vectorstore = FAISS.from_documents(splits, self.embeddings_model)
+
+        # Milvus 연결 설정 (docker-compose 기본값 기준)
+        milvus_host = os.getenv("MILVUS_HOST", "127.0.0.1")
+        milvus_port = os.getenv("MILVUS_PORT", "19530")
+        collection_name = os.getenv("MILVUS_COLLECTION", "info_exam_vectors")
+
+        # 기존 컬렉션 재사용(있으면) or 생성
+        try:
+            self.vectorstore = Milvus(
+                embedding_function=self.embeddings_model,
+                connection_args={"host": milvus_host, "port": milvus_port},
+                collection_name=collection_name,
+                auto_id=True
+            )
+            # 업서트
+            self.vectorstore.add_documents(splits)
+        except Exception:
+            # 초기 생성 경로
+            self.vectorstore = Milvus.from_documents(
+                documents=splits,
+                embedding=self.embeddings_model,
+                connection_args={"host": milvus_host, "port": milvus_port},
+                collection_name=collection_name,
+            )
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 15})
         
         self.files_in_vectorstore = pdf_files
@@ -352,6 +374,9 @@ class InfoProcessingExamAgent(BaseAgent):
                     "generation_attempts": state.get("generation_attempts", 0) + 1,
                     "error": "유효한 문제를 생성하지 못했습니다."
                 }
+
+            # 과생성 방지: 이번 턴 필요 개수만 유지
+            new_questions = new_questions[:needed_count]
             
             return {
                 **state,
@@ -517,7 +542,9 @@ Your JSON response:"""
         
         all_validated_questions = []
         
-        max_rounds = 10
+        # 타깃 개수에 따라 동적 라운드 제한 (큰 요청도 처리 가능)
+        # 기본 3라운드 + (요청/10) 보정, 최대 15라운드
+        max_rounds = min(15, 3 + (target_count // 10))
         current_round = 0
         
         while len(all_validated_questions) < target_count and current_round < max_rounds:

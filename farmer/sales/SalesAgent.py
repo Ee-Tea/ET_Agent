@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
 
 # Milvus 연결 설정
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, list_collections
+from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, list_collections, utility
 import requests
 from dotenv import load_dotenv
 import os
@@ -31,19 +31,48 @@ milvus_port = os.getenv("MILVUS_PORT", "19530")
 connections.connect("default", host=milvus_host, port=milvus_port)
 
 collection_name = "market_price_docs"
-if collection_name not in list_collections():
+
+# CSV 파일 임베딩 및 Milvus에 저장
+def embed_and_store_csv(csv_path="data/info_20240812.csv"):
+    df = pd.read_csv(csv_path, encoding="euc-kr")
+    df['품목'] = df['품목'].fillna("정보 없음")
+    docs = []
+    for _, row in df.iterrows():
+        doc = f"{row['판매장 이름']} ({row['주소']} / 주요 품목: {row['품목']})"
+        docs.append(doc)
+    if docs:
+        embeddings = embedder.encode(docs)
+        collection.insert([embeddings.tolist(), docs], fields=["embedding", "text"])
+
+# 컬렉션 있는지 검사
+if collection_name in utility.list_collections():
+    collection = Collection(collection_name)  # 이미 있으면 기존 컬렉션 사용
+    print(f"컬렉션 '{collection_name}'이 이미 존재합니다. 기존 컬렉션을 사용합니다.")
+else:
     fields = [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
-        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512)
+        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512),
     ]
     schema = CollectionSchema(fields, "시장 가격 문서 컬렉션")
     collection = Collection(collection_name, schema)
-else:
-    collection = Collection(collection_name)
+    print(f"컬렉션 '{collection_name}'을 새로 생성했습니다.")
+    embed_and_store_csv()
 
-# api 요청 후 DB에 저장
-def fetch_and_store_api_data():
+# 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
+if not collection.has_index():
+    index_params = {
+        "metric_type": "IP",
+        "index_type": "IVF_FLAT",
+        "params": {"nlist": 128}
+    }
+    collection.create_index(
+        field_name="embedding",
+        index_params=index_params
+    )
+
+# api 요청
+def fetch_api_data(query=None):
     url = "http://www.kamis.or.kr/service/price/xml.do?action=dailySalesList"
     params = {
         "p_cert_key": api_key,
@@ -51,6 +80,7 @@ def fetch_and_store_api_data():
         "p_returntype": "json"
     }
     response = requests.get(url, params=params)
+    docs = []
     if response.status_code == 200:
         data = response.json()
         items = []
@@ -67,14 +97,43 @@ def fetch_and_store_api_data():
                 return val[0] if val else ""
             return val if val is not None else ""
 
-        docs = []
+        # 쿼리 기반 필터링
+        keywords = extract_keywords(query)
+        filtered_items = []
         for item in items:
+            item_name_full = safe_val(item.get('item_name', ''))
+            item_name_parts = item_name_full.split('/')
+            item_names = [part.strip() for part in item_name_parts]
+            match_count = sum([q == name for q in keywords for name in item_names])
+            partial_count = sum([q in name for q in keywords for name in item_names])
+            included_keywords = [q for q in keywords if any(q in name for name in item_names)]
+            score = 0
+            if keywords:
+                if match_count > 0:
+                    score = 3 + len(included_keywords)  # 완전 일치 + 키워드 개수
+                elif partial_count > 0:
+                    score = 2 + len(included_keywords)  # 부분 일치 + 키워드 개수
+                else:
+                    score = len(included_keywords)      # 키워드 일부만 포함
+            else:
+                score = 0
+            filtered_items.append((score, item))
+
+        filtered_items.sort(key=lambda x: x[0], reverse=True)
+        filtered_items = [item for _, item in filtered_items]
+
+        for item in filtered_items:
             category = safe_val(item.get('category_name', ''))
             if category not in ['수산물', '축산물'] and safe_val(item.get('product_cls_name', '')) != '소매':
                 direction_raw = safe_val(item.get('direction', ''))
                 value_raw = safe_val(item.get('value', ''))
                 dpr1 = safe_val(item.get('dpr1', ''))
                 dpr2 = safe_val(item.get('dpr2', ''))
+                day3 = safe_val(item.get('day3', ''))
+                dpr3 = safe_val(item.get('dpr3', ''))
+                day4 = safe_val(item.get('day4', ''))
+                dpr4 = safe_val(item.get('dpr4', ''))
+
                 try:
                     dpr1_val = int(str(dpr1).replace(',', '').replace(' ', '') or '0')
                     dpr2_val = int(str(dpr2).replace(',', '').replace(' ', '') or '0')
@@ -82,125 +141,112 @@ def fetch_and_store_api_data():
                 except (ValueError, TypeError):
                     diff = 0
                 
-                change_str = "변동 없음"
+                change_str = "변동 없는"
                 if str(direction_raw) == "0":
-                    change_str = f"{value_raw}%({diff}원) 감소"
+                    change_str = f"{value_raw}%({diff}원) 감소한"
                 elif str(direction_raw) == "1":
-                    change_str = f"{value_raw}%({diff}원) 증가"
+                    change_str = f"{value_raw}%({diff}원) 증가한"
                 
                 doc = (
-                    f"{safe_val(item.get('item_name', ''))} ({safe_val(item.get('unit', ''))}) = "
-                    f"{change_str}, "
-                    f"{safe_val(item.get('day1', ''))}: {dpr1}원, "
-                    f"{safe_val(item.get('day3', ''))}: {safe_val(item.get('dpr3', ''))}원, "
-                    f"{safe_val(item.get('day4', ''))}: {safe_val(item.get('dpr4', ''))}원"
+                    f"{safe_val(item.get('item_name', ''))} ({safe_val(item.get('unit', ''))})의 가격은 어제보다 "
+                    f"{change_str} {dpr1}원 입니다."
                 )
+                if dpr3 and str(dpr3).strip() != "" and str(dpr3).strip() != "원":
+                    doc += f"{day3}에는 {dpr3}원, "
+                if dpr4 and str(dpr4).strip() != "" and str(dpr4).strip() != "원":
+                    doc += f"{day4}에는 {dpr4}원 이었습니다."
                 docs.append(doc)
-
-        if docs:
-            embeddings = embedder.encode(docs)
-            collection.insert([embeddings.tolist(), docs], fields=["embedding", "text"])
-            if not collection.has_index():
-                index_params = {
-                    "metric_type": "IP",
-                    "index_type": "IVF_FLAT",
-                    "params": {"nlist": 128}
-                }
-                collection.create_index(field_name="embedding", index_params=index_params)
     else:
         print("API 호출 실패:", response.status_code)
         print(response.text)
-
-# CSV 파일에서 정보 검색
-def search_csv(query, csv_path="data/info_20240812.csv", top_k=3):
-    try:
-        df = pd.read_csv(csv_path, encoding="euc-kr")
-        df['품목'] = df['품목'].fillna("정보 없음")
-        okt = Okt()
-        keywords = set(okt.nouns(query))
-        location_keywords = [kw for kw in keywords if any(kw in str(addr) for addr in df['주소'])]
-        if location_keywords:
-            location_mask = df['주소'].str.contains('|'.join(location_keywords), na=False)
-            results = df[location_mask].copy()
-        else:
-            return ["해당 지역에 판매점 정보가 없습니다."]
-        if not results.empty and len(keywords) > 0:
-            results['점수'] = 0
-            for kw in keywords:
-                results['점수'] += results['품목'].str.contains(kw, na=False).astype(int) * 2
-                results['점수'] += results['주소'].str.contains(kw, na=False).astype(int) * 1
-            results = results.sort_values(by='점수', ascending=False, kind='stable')
-        if not results.empty:
-            return [
-                f"판매장 이름: {row['판매장 이름']}, 주소: {row['주소']}, 주요 품목: {row['품목']}"
-                for _, row in results.head(top_k).iterrows()
-            ]
-        else:
-            return []
-    except Exception as e:
-        print("CSV 검색 오류:", e)
-        return ["CSV 검색 오류가 발생했습니다."]
+    if docs and any(any(k in doc for k in extract_keywords(query)) for doc in docs):
+        return docs
+    else:
+        return ["해당 작물에 대한 정보는 현재 없습니다."]
 
 # Milvus에서 문서 검색
-def search_market_docs(query, top_k=1):
-    queries = [q.strip() for q in query.split('/')] if '/' in query else [query]
+def search_market_docs(query, top_k=3):
+    # 전체 쿼리로 한 번만 검색
     all_results = []
-    for q in queries:
-        query_vec = embedder.encode([q])[0]
-        results = collection.search(
-            data=[query_vec],
+
+    query_nouns = extract_keywords(query)
+
+    # 미리 정의된 지역명 리스트와 명사 키워드를 비교하여 지역명만 추출
+    predefined_locations = ['함평','서산','대전', '춘천','광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산광역', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
+    locations = [kw for kw in query_nouns if kw in predefined_locations or any(suffix in kw for suffix in ['시', '군', '구', '도'])]
+
+    # 1. 지역 키워드 임베딩 검색
+    if locations:
+        region_query = " ".join(locations)
+        region_vec = embedder.encode([region_query])[0]
+        region_results = collection.search(
+            data=[region_vec],
             anns_field="embedding",
             param={"metric_type": "IP", "params": {"nprobe": 20}},
-            limit=top_k * 200,
-            output_fields=["text"]
+            limit=200,
+            output_fields=["text"],
         )
-        if results and results[0]:
-            all_results.extend([hit.entity.get("text") for hit in results[0]])
+        if region_results and region_results[0]:
+            all_results.extend([hit.entity.get("text") for hit in region_results[0]])
+
+    # 2. 전체 쿼리 임베딩 검색
+    query_vec = embedder.encode([query])[0]
+    query_results = collection.search(
+        data=[query_vec],
+        anns_field="embedding",
+        param={"metric_type": "IP", "params": {"nprobe": 20}},
+        limit=200,
+        output_fields=["text"],
+    )
+    if query_results and query_results[0]:
+        all_results.extend([hit.entity.get("text") for hit in query_results[0]])
+
+    # 중복 제거
     all_results = list(dict.fromkeys(all_results))
-    def overlap_score(result_text):
-        item_part = result_text.split('(')[0].strip()
-        item_names = [x.strip() for x in item_part.split('/')]
-        okt = Okt()
-        query_strip = query.strip()
-        query_nouns = set(okt.nouns(query_strip))
-        current_score = 0
-        if query_strip in item_names:
-            current_score += 10000
-        for name in item_names:
-            name_nouns = set(okt.nouns(name))
-            if query_nouns.issubset(name_nouns):
-                current_score += 1000
-            current_score += len(query_nouns.intersection(name_nouns)) * 100
-        for name in item_names:
-            if any(qn in name for qn in query_nouns):
-                if not any(qn in okt.nouns(name) for qn in query_nouns):
-                    current_score += 1
-        return current_score
-    all_results.sort(key=overlap_score, reverse=True)
-    keywords = extract_keywords(query)
-    found = False
+
+    found_results = []
     for result_text in all_results:
-        item_part = result_text.split('(')[0].strip()
-        if any(kw in item_part for kw in keywords):
-            found = True
-            break
-    if not all_results or not found:
-        return ["해당 작물에 대한 정보는 현재 없습니다."]
+        if any(loc in result_text for loc in locations):
+            found_results.append(result_text)
+
+    if not found_results:
+        return ["해당 지역에 위치한 판매점 정보가 없습니다."]
     else:
-        return all_results[:top_k]
+        def overlap_score(result_text):
+            item_part = result_text.split('(')[0].strip() if '주요 품목:' in result_text else result_text
+            item_names = [x.strip() for x in re.split(r'[/,]', item_part)]
+            query_strip = query.strip()
+            query_nouns_set = set(extract_keywords(query_strip))
+            current_score = 0
+            if query_strip in item_names:
+                current_score += 10000
+            for name in item_names:
+                name_nouns_set = set(extract_keywords(name))
+                if query_nouns_set.issubset(name_nouns_set):
+                    current_score += 1000
+                current_score += len(query_nouns_set.intersection(name_nouns_set)) * 100
+            for name in item_names:
+                if any(qn in name for qn in query_nouns_set):
+                    if not any(qn in extract_keywords(name) for qn in query_nouns_set):
+                        current_score += 1
+            return current_score
+        
+        found_results.sort(key=overlap_score, reverse=True)
+        return found_results[:top_k]
 
 # 키워드 추출
 def extract_keywords(query):
     okt = Okt()
     return okt.nouns(query)
 
+
 # 하이브리드 검색
 def hybrid_search(query, top_k=3):
-    milvus_results = search_market_docs(query, 1)
-    csv_results = search_csv(query, top_k=top_k)
+    kamis_results = fetch_api_data(query)  # 쿼리 기반 필터링된 결과 반환
+    sales_info_results = search_market_docs(query, top_k=top_k)
     return {
-        "실시간시세": milvus_results,
-        "판매처": csv_results
+        "실시간시세": kamis_results[:1],
+        "판매처": sales_info_results
     }
 
 # Groq LLM
@@ -251,15 +297,21 @@ def make_prompt(context, query):
         [지시]
         - 반드시 [정보]에 나온 단위와 가격을 그대로 사용하세요.
         - [정보]에 없는 내용은 포함하지 마세요.
-        - 실시간 시세 정보가 없으면 '해당 작물에 대한 정보는 현재 없습니다.'라고 답변하세요.
         - 답변은 한국어로, 간결하게 작성하세요.
         - 아래 순서대로 답변하세요:
-            1. 품목(단위)의 가격 등락율 (없으면 '변동 없음')
-            2. 당일, 1개월전, 1년전 가격 (정보 없으면 생략)
-            3. 지역 매장 정보 및 주요 품목 ([질문]에서 물어본 주소와 일치하는 매장만 소개)
+            1. **품목과 등락율** (시세 정보가 없으면 "해당 작물에 대한 정보는 현재 없습니다."라고 답변 후 3번으로 넘어감)
+            2. 당일, 1개월전, 1년전 가격 (정보 없으면 "해당 일자의 시세 정보가 없습니다."라고 작성)
+            3. **해당 지역의 판매처 정보를 안내** (만약 판매처 정보가 없으면 "해당 지역에 위치한 판매점 정보가 없습니다."라고 답변)
+            4. **정보 출처** (정보가 있는 경우에만 작성)
 
         [예시]
-        감자(20kg)의 가격은 어제보다 2.8%(1060원) 증가한 39,660원입니다. 1개월전에는 33,260원, 1년전에는 31,576원이었습니다. 해당 지역의 판매처는 충남 태안군 태안 로컬푸드 판매장(충남 태안군 남면 안면대로 1641 / 주요 품목: 채소, 과일, 서류) 등이 있습니다.
+        감자(20kg)의 가격은 어제보다 2.8%(1,060원) 증가한 39,660원입니다.
+        1개월전에는 33,260원, 1년전에는 31,576원이었습니다.
+        
+        해당 지역의 판매처는 충남 태안군 태안 로컬푸드 판매장(충남 태안군 남면 안면대로 1641 / 주요 품목: 채소, 과일, 서류) 등이 있습니다.
+        
+        시세 정보 출처: https://www.kamis.or.kr/customer/main/main.do
+        판매처 정보 출처: https://www.data.go.kr/data/15025997/fileData.do
         """
     )
 
@@ -281,12 +333,16 @@ class GraphState(dict):
 
 # LangGraph 노드 함수
 def node_input_graph(state: GraphState) -> GraphState:
+    # 오케스트레이터에서 state["query"]가 이미 전달된 경우, 추가 입력 없이 바로 사용
+    if state.get("query"):
+        state["retry_count"] = 0  # 새로운 입력 시 재분석 카운트 초기화
+        return state
     query = input("작물 및 지역 정보를 입력하세요 (종료하려면 'exit'): ")
     if query.strip().lower() == "exit":
         state["exit"] = True
     else:
         state["query"] = query
-        state["retry_count"] = 0 # 새로운 입력 시 재분석 카운트 초기화
+        state["retry_count"] = 0
     return state
 
 def node_collect_info_graph(state: GraphState) -> GraphState:
@@ -329,11 +385,7 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
         print(f"유사도 검사 중 오류 발생: {e}")
         accuracy_ok = False
 
-    no_info_keywords = ["해당 작물에 대한 정보는 현재 없습니다.", "해당 지역에 판매점 정보가 없습니다."]
-    if not accuracy_ok or any(kw in pred_answer for kw in no_info_keywords):
-        state["is_recommend_ok"] = False
-    else:
-        state["is_recommend_ok"] = True
+    state["is_recommend_ok"] = accuracy_ok
     
     return state
 
@@ -346,14 +398,10 @@ def node_reanalyze_graph(state: GraphState) -> GraphState:
     return state
 
 def node_output_graph(state: GraphState) -> GraphState:
-    print("\n[최종 Agent 답변]")
     if state["retry_count"] >= 2 and not state["is_recommend_ok"]:
-        print("현재 정보로는 답변을 생성하기 어렵습니다. 지역과 작물명을 다시 작성해서 질문해주시겠어요?")
+        state["final_answer"] = "해당 작물과 지역에 대한 시세 또는 판매처 정보가 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
     else:
-        print("\n--- Context (참고 정보) ---")
-        print(state["context_str_for_judge"])
-        print("---------------------------")
-        print(state["pred_answer"])
+        state["final_answer"] = f"{state['pred_answer']}"
     return state
 
 # LangGraph 워크플로우 정의
@@ -391,19 +439,25 @@ graph.add_edge("output", END)
 graph.set_entry_point("input")
 
 # 실행 함수
-def run_agent_langgraph():
+def run(state):
+    """
+    판매처 에이전트의 워크플로우를 실행합니다.
+    오케스트레이터에서 전달받은 상태를 바탕으로 LangGraph를 실행합니다.
+    """
     app = graph.compile()
-    while True:
-        try:
-            state = app.invoke({"query": ""}) 
-            if state.get("exit"):
-                print("에이전트를 종료합니다.")
-                break
-        except Exception as e:
-            print(f"오류가 발생했습니다: {e}")
-            break
+    
+    # LangGraph가 TypedDict를 기반으로 작동하기 때문에, 일반 Dict를 TypedDict로 변환
+    if not isinstance(state, GraphState):
+        state = GraphState(**state)
+        
+    result_state = app.invoke(state)
+    return result_state
 
 if __name__ == "__main__":
-    fetch_and_store_api_data()
+    # 판매처 에이전트 단독 실행용 코드
     collection.load()
-    run_agent_langgraph()
+    print("=== 판매처 에이전트 단독 실행 모드 ===")
+    
+    # LangGraph를 컴파일하고 단독으로 실행
+    app = graph.compile()
+    app.invoke({"query": ""})

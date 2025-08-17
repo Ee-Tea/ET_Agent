@@ -244,6 +244,8 @@ def extract_keywords(query):
 def hybrid_search(query, top_k=3):
     kamis_results = fetch_api_data(query)  # 쿼리 기반 필터링된 결과 반환
     sales_info_results = search_market_docs(query, top_k=top_k)
+    print("실시간시세 : ", kamis_results[:1],)
+    print("판매처 : ", sales_info_results)
     return {
         "실시간시세": kamis_results[:1],
         "판매처": sales_info_results
@@ -285,7 +287,7 @@ class GroqLLM:
         return f"LLM 호출 실패"
 
 # 프롬프트 생성
-def make_prompt(context, query):
+def make_prompt(context, query, validation_feedback=""):
     return (
         f"""
         [정보]
@@ -293,6 +295,8 @@ def make_prompt(context, query):
         
         [질문]
         {query}
+
+        {validation_feedback}
         
         [지시]
         - 반드시 [정보]에 나온 단위와 가격을 그대로 사용하세요.
@@ -360,7 +364,17 @@ def node_llm_summarize_graph(state: GraphState) -> GraphState:
         f"판매처 정보: {context.get('판매처', [])}"
     )
 
-    llm_prompt = make_prompt(context_str, query)
+    # 이전 검증 실패 정보가 있으면 프롬프트에 포함
+    validation_feedback = ""
+    if state.get("validation_details") and state.get("retry_count", 0) > 0:
+        validation_feedback = f"""
+            [이전 검증 실패 정보]
+            {chr(10).join([f"• {issue}" for issue in state.get("validation_details", {}).get("issues", [])])}
+
+            위의 문제점들을 해결하여 다시 답변을 생성해주세요.
+        """
+
+    llm_prompt = make_prompt(context_str, query, validation_feedback)
     pred_answer = ask_llm_groq(llm_prompt)
     
     state["pred_answer"] = pred_answer
@@ -369,30 +383,273 @@ def node_llm_summarize_graph(state: GraphState) -> GraphState:
 
 def node_judge_recommendation_graph(state: GraphState) -> GraphState:
     pred_answer = state["pred_answer"]
-    original_context_str = state["context_str_for_judge"]
+    original_context = state["context"]
     
-    try:
-        context_embedding = embedder.encode([original_context_str])[0].reshape(1, -1)
-        answer_embedding = embedder.encode([pred_answer])[0].reshape(1, -1)
-        
-        similarity_score = cosine_similarity(context_embedding, answer_embedding)[0][0]
-        
-        ACCURACY_THRESHOLD = 0.8
-        accuracy_ok = similarity_score > ACCURACY_THRESHOLD
-        
-        print(f"유사도 점수: {similarity_score:.4f}, 임계값: {ACCURACY_THRESHOLD}")
-    except Exception as e:
-        print(f"유사도 검사 중 오류 발생: {e}")
-        accuracy_ok = False
-
-    state["is_recommend_ok"] = accuracy_ok
+    # 1. 가격 정보 정확성 검증
+    def price_validation():
+        try:
+            # 원본 컨텍스트에서 가격 값 추출 (중복 제거하지 않음)
+            context_prices = []
+            
+            for doc in original_context.get('실시간시세', []):
+                # 가격 정보 추출 (콤마가 포함된 숫자 + '원' 패턴)
+                price_matches = re.findall(r'(\d{1,3}(?:,\d{3})*)원', doc)
+                context_prices.extend(price_matches)
+                
+                # 콤마가 없는 숫자 + '원' 패턴 (4자리 이상만)
+                simple_price_matches = re.findall(r'(\d{4,})원', doc)
+                context_prices.extend(simple_price_matches)
+            
+            # 중복 제거하지 않고 순서대로 유지
+            print(f"원본 컨텍스트에서 추출된 가격 (순서 유지): {context_prices}")
+            
+            # LLM 답변에서 가격 정보 추출 (동일한 패턴 적용)
+            answer_prices = []
+            answer_price_matches = re.findall(r'(\d{1,3}(?:,\d{3})*)원', pred_answer)
+            answer_prices.extend(answer_price_matches)
+            
+            simple_answer_matches = re.findall(r'(\d{4,})원', pred_answer)
+            answer_prices.extend(simple_answer_matches)
+            
+            # 중복 제거하지 않고 순서대로 유지
+            print(f"LLM 답변에서 추출된 가격 (순서 유지): {answer_prices}")
+            
+            # 가격 매칭 검증 (1:1 매칭, 순서 고려, 중복 제한)
+            if not context_prices:
+                print("원본 컨텍스트에 가격 정보가 없습니다.")
+                return False, ['원본 컨텍스트에 가격 정보 없음'], 0, 2
+            
+            # 원본 가격의 출현 횟수 계산
+            context_price_count = {}
+            for price in context_prices:
+                context_price_count[price] = context_price_count.get(price, 0) + 1
+            
+            print(f"원본 가격 출현 횟수: {context_price_count}")
+            
+            # 1:1 매칭 검증 (순서대로, 정확한 매칭만, 중복 제한)
+            matched_prices = []
+            missing_prices = []
+            hallucination_prices = []
+            used_answer_indices = set()  # 이미 사용된 답변 인덱스
+            matched_price_count = {}  # 매칭된 가격의 횟수 추적
+            
+            # 원본 가격을 순서대로 확인
+            for i, context_price in enumerate(context_prices):
+                matched = False
+                
+                # 답변에서 정확히 일치하는 가격 찾기
+                for j, answer_price in enumerate(answer_prices):
+                    if j in used_answer_indices:
+                        continue
+                    
+                    # 이미 해당 가격을 최대 허용 횟수만큼 매칭했다면 건너뛰기
+                    if context_price in matched_price_count:
+                        current_count = matched_price_count[context_price]
+                        max_allowed = context_price_count[context_price]
+                        print(f"  중복 체크: {context_price} (현재 {current_count}/{max_allowed})")
+                        if current_count >= max_allowed:
+                            print(f"  중복 제한으로 건너뛰기: {context_price}")
+                            continue
+                    
+                    # 정확한 매칭만 허용
+                    if context_price == answer_price:
+                        matched_prices.append(context_price)
+                        used_answer_indices.add(j)
+                        matched_price_count[context_price] = matched_price_count.get(context_price, 0) + 1
+                        matched = True
+                        print(f"정확한 매칭: {context_price} ← {answer_price} (매칭 횟수: {matched_price_count[context_price]})")
+                        break
+                
+                if not matched:
+                    missing_prices.append(context_price)
+            
+            # 할루시네이션 가격이 있는지 확인 (LLM 답변에 원본에 없는 가격이 있는지)
+            for j, answer_price in enumerate(answer_prices):
+                if j not in used_answer_indices:
+                    # 원본에 없는 가격인지 확인 (정확한 매칭만)
+                    is_original = False
+                    for context_price in context_prices:
+                        if answer_price == context_price:
+                            is_original = True
+                            break
+                    
+                    if not is_original:
+                        hallucination_prices.append(f"원본에 없는 가격: {answer_price}")
+            
+            # 중복 매칭 문제 확인 (LLM 답변에서 원본보다 많이 나오는 가격)
+            answer_price_count = {}
+            for price in answer_prices:
+                answer_price_count[price] = answer_price_count.get(price, 0) + 1
+            
+            print(f"LLM 답변 가격 출현 횟수: {answer_price_count}")
+            
+            for price, answer_count in answer_price_count.items():
+                context_count = context_price_count.get(price, 0)
+                if answer_count > context_count:
+                    hallucination_prices.append(f"가격 중복 할루시네이션: {price} (원본 {context_count}회, 답변 {answer_count}회)")
+            
+            # 가격 매칭 점수 계산 (100% 매칭되어야만 점수 부여)
+            price_match_score = len(matched_prices) / len(context_prices)
+            is_perfect_match = price_match_score == 1.0
+            
+            print(f"가격 매칭 점수: {len(matched_prices)}/{len(context_prices)} = {price_match_score:.2f}")
+            print(f"완벽한 매칭: {'✅' if is_perfect_match else '❌'}")
+            print(f"매칭된 가격 횟수: {matched_price_count}")
+            
+            # 검증 로직
+            issues = []
+            
+            # 1. 가격 정보 매칭 - 100% 매칭되어야만 통과
+            if is_perfect_match and not hallucination_prices:  # 할루시네이션이 없어야 함
+                print("✅ 가격 정보 완벽 매칭 - 통과")
+                price_valid = True
+            else:
+                print("❌ 가격 정보 매칭 실패 - 불통과")
+                price_valid = False
+                
+                if hallucination_prices:
+                    issues.append(f'할루시네이션 감지로 인한 가격 매칭 실패')
+                else:
+                    issues.append(f'가격 정보 불완전 매칭: {len(matched_prices)}/{len(context_prices)}')
+                
+                if missing_prices:
+                    issues.append(f'누락된 가격: {missing_prices}')
+                if hallucination_prices:
+                    issues.append(f'할루시네이션 가격: {hallucination_prices}')
+            
+            # 상세한 검증 정보 출력
+            print(f"\n=== 상세 검증 결과 ===")
+            if matched_prices:
+                print(f"✅ 매칭된 가격: {matched_prices}")
+            if missing_prices:
+                print(f"❌ 누락된 가격: {missing_prices}")
+            if hallucination_prices:
+                print(f" 할루시네이션 가격: {hallucination_prices}")
+            
+            return price_valid, issues
+            
+        except Exception as e:
+            print(f"가격 검증 중 오류: {e}")
+            return False, [f'검증 오류: {e}'], 0, 2
+    
+    # 2. 구조적 완성도 검증 (임베딩 유사도 사용)
+    def structural_validation():
+        try:
+            # 원본 컨텍스트와 LLM 답변의 임베딩 유사도 계산
+            context_embedding = embedder.encode([state["context_str_for_judge"]])[0].reshape(1, -1)
+            answer_embedding = embedder.encode([pred_answer])[0].reshape(1, -1)
+            
+            similarity_score = cosine_similarity(context_embedding, answer_embedding)[0][0]
+            
+            # 임계값 설정 (기존과 동일)
+            ACCURACY_THRESHOLD = 0.8
+            is_valid = similarity_score > ACCURACY_THRESHOLD
+            
+            print(f"구조적 완성도 (임베딩 유사도): {similarity_score:.4f}, 임계값: {ACCURACY_THRESHOLD}")
+            print(f"구조적 완성도 검증: {'✅' if is_valid else '❌'}")
+            
+            return is_valid
+            
+        except Exception as e:
+            print(f"구조적 검증 중 오류: {e}")
+            return False
+    
+    # 3. 판매점 정보 할루시네이션 검증
+    def vendor_hallucination_validation():
+        try:
+            # 판매점 정보 부족을 나타내는 키워드
+            no_vendor_keywords = [
+                '판매점 정보가 없습니다',
+                '판매점이 없습니다',
+                '판매처 정보가 없습니다',
+                '판매처가 없습니다',
+                '해당 지역에 위치한 판매점 정보가 없습니다',
+                '판매점을 찾을 수 없습니다',
+                '판매 정보가 없습니다'
+            ]
+            
+            # 원본 컨텍스트에 판매점 정보가 있는지 확인
+            context_has_vendors = False
+            if '판매처' in original_context:
+                vendor_info = original_context['판매처']
+                if vendor_info and len(vendor_info) > 0:
+                    # 실제 판매점 정보가 있는지 확인 (빈 문자열이나 "정보 없음"이 아닌 경우)
+                    for vendor in vendor_info:
+                        if vendor and vendor != "해당 지역에 위치한 판매점 정보가 없습니다." and len(vendor.strip()) > 0:
+                            context_has_vendors = True
+                            break
+            
+            # LLM 답변에 판매점 정보 부족 키워드가 있는지 확인
+            answer_has_no_vendor = any(keyword in pred_answer for keyword in no_vendor_keywords)
+            
+            # 할루시네이션 판단
+            hallucination_detected = False
+            hallucination_issues = []
+            
+            if context_has_vendors and answer_has_no_vendor:
+                # 원본에 판매점 정보가 있는데 LLM이 "없습니다"라고 답변
+                hallucination_detected = True
+                hallucination_issues.append("판매점 정보 할루시네이션: 원본에 판매점 정보가 있음에도 '없습니다'라고 표시")
+                print("❌ 판매점 정보 할루시네이션 감지: 원본에 판매점 정보가 있음에도 '없습니다'라고 표시")
+            
+            elif not context_has_vendors and not answer_has_no_vendor:
+                # 원본에 판매점 정보가 없는데 LLM이 "있습니다"라고 답변
+                hallucination_detected = True
+                hallucination_issues.append("판매점 정보 할루시네이션: 원본에 판매점 정보가 없음에도 '있습니다'라고 표시")
+                print("❌ 판매점 정보 할루시네이션 감지: 원본에 판매점 정보가 없음에도 '있습니다'라고 표시")
+            
+            else:
+                print("✅ 판매점 정보 할루시네이션 검증 통과")
+            
+            return not hallucination_detected, hallucination_issues
+            
+        except Exception as e:
+            print(f"판매점 정보 할루시네이션 검증 중 오류: {e}")
+            return False, [f'검증 오류: {e}']
+    
+    # 종합 검증
+    price_valid, price_issues = price_validation()
+    structural_valid = structural_validation()
+    vendor_valid, vendor_hallucination_issues = vendor_hallucination_validation()
+    
+    validation_results = {
+        'price_accuracy': price_valid,
+        'structural': structural_valid,
+        'vendor_hallucination': vendor_valid,
+        'issues': price_issues + vendor_hallucination_issues
+    }
+    
+    # 검증 결과 출력
+    print(f"검증 결과:")
+    print(f"  - 가격 정확성: {'✅' if price_valid else '❌'}")
+    print(f"  - 구조적 완성도: {'✅' if structural_valid else '❌'}")
+    print(f"  - 판매점 정보 할루시네이션: {'✅' if vendor_valid else '❌'}")
+    
+    if validation_results['issues']:
+        print(f"  - 발견된 문제점:")
+        for issue in validation_results['issues']:
+            print(f"    • {issue}")
+    
+    # 모든 검증을 통과해야 함
+    overall_validation = price_valid and structural_valid and vendor_valid
+    
+    state["is_recommend_ok"] = overall_validation
+    state["validation_details"] = validation_results
+    state["needs_web_search"] = not price_valid or not vendor_valid  # 가격 검증 또는 판매점 검증 실패 시 웹 검색 필요
     
     return state
 
 def node_reanalyze_graph(state: GraphState) -> GraphState:
     state["retry_count"] += 1
     query = state["query"]
-    print(f"재분석 {state['retry_count']}회차: 정보를 보완하여 재분석합니다.")
+    
+    # 이전 검증 실패 정보 출력
+    if state.get("validation_details"):
+        print(f"재분석 {state['retry_count']}회차: 이전 검증에서 발견된 문제점:")
+        for issue in state.get("validation_details", {}).get("issues", []):
+            print(f"  - {issue}")
+        print("위 문제점들을 해결하여 재분석합니다.")
+    
     results = hybrid_search(query, top_k=5)
     state["context"] = results
     return state

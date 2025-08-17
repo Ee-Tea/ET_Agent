@@ -274,15 +274,19 @@ class Orchestrator:
 
     def post_generator_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_generator") or "").strip()
-        return nxt if nxt else "persist_state"
+        return nxt if nxt else "generate_problem_pdf"  # 기본적으로 문제집 PDF 생성
 
     def post_solution_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_solution") or "").strip()
-        return nxt if nxt else "persist_state"
+        return nxt if nxt else "generate_answer_pdf"  # 기본적으로 답안집 PDF 생성
 
     def post_score_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_score") or "").strip()
-        return nxt if nxt else "persist_state"
+        return nxt if nxt else "analysis"  # 기본적으로 분석 진행
+
+    def post_analysis_route(self, state: TeacherState) -> str:
+        nxt = ((state.get("routing") or {}).get("after_analysis") or "").strip()
+        return nxt if nxt else "generate_analysis_pdf"  # 기본적으로 분석 리포트 PDF 생성
 
     # ── Nodes ───────────────────────────────────────────────────────────────
     @traceable(name="teacher.preprocess")
@@ -456,6 +460,109 @@ class Orchestrator:
             _append_items_into_shared(new_state, items_to_append, mode)
 
         validate_qas(new_state["shared"])
+        
+        # 문제 생성 후 상태 확인
+        print(f"[DEBUG] === 문제 생성 후 상태 확인 ===")
+        print(f"[DEBUG] shared 전체: {new_state.get('shared', {})}")
+        print(f"[DEBUG] question 키 존재: {'question' in new_state.get('shared', {})}")
+        print(f"[DEBUG] options 키 존재: {'options' in new_state.get('shared', {})}")
+        print(f"[DEBUG] question 값: {new_state['shared'].get('question', [])}")
+        print(f"[DEBUG] options 값: {new_state['shared'].get('options', [])}")
+        print(f"[DEBUG] question 길이: {len(new_state['shared'].get('question', []))}")
+        print(f"[DEBUG] options 길이: {len(new_state['shared'].get('options', []))}")
+        
+        # 문제 생성 후 자동으로 문제집 PDF 생성
+        if new_state["shared"].get("question") and new_state["shared"].get("options"):
+            print("[AUTO-PDF] 문제 생성 완료 → 문제집 PDF 자동 생성 시작")
+            print(f"[DEBUG] 문제 수: {len(new_state['shared']['question'])}")
+            print(f"[DEBUG] 보기 수: {len(new_state['shared']['options'])}")
+            
+            try:
+                # 문제집 PDF 자동 생성
+                print("[DEBUG] ComprehensivePDFGenerator 임포트 시도...")
+                from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+                print("[DEBUG] ComprehensivePDFGenerator 임포트 성공")
+                
+                generator = ComprehensivePDFGenerator()
+                print("[DEBUG] PDF 생성기 초기화 완료")
+                
+                problems = []
+                questions = new_state["shared"]["question"]
+                options_list = new_state["shared"]["options"]
+                count = min(len(questions), len(options_list))
+                
+                print(f"[DEBUG] 처리할 문제 수: {count}")
+                
+                for i in range(count):
+                    q = questions[i] if i < len(questions) else ""
+                    opts = options_list[i] if i < len(options_list) else []
+                    if isinstance(opts, str):
+                        opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+                    
+                    print(f"[DEBUG] 문제 {i+1}: {str(q)[:50]}...")
+                    print(f"[DEBUG] 보기 {i+1}: {opts}")
+                    
+                    problems.append({
+                        "question": q,
+                        "options": opts,
+                        "generated_answer": "",  # 문제집에는 정답 미포함
+                        "generated_explanation": "",  # 문제집에는 풀이 미포함
+                    })
+                
+                print(f"[DEBUG] problems 배열 생성 완료: {len(problems)}개")
+                
+                # 출력 디렉토리
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+                print(f"[DEBUG] 출력 디렉토리: {base_dir}")
+                
+                os.makedirs(base_dir, exist_ok=True)
+                print(f"[DEBUG] 디렉토리 생성/확인 완료")
+                
+                uq = (state.get("user_query") or "exam").strip()
+                safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+                base_filename = os.path.join(base_dir, f"{safe_uq}_문제집")
+                
+                print(f"[DEBUG] 파일명: {base_filename}")
+                print(f"[DEBUG] 전체 경로: {base_filename}.pdf")
+                
+                # 문제집 PDF 생성
+                print("[DEBUG] generate_problem_booklet 호출 시작...")
+                problem_pdf = generator.generate_problem_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 문제집")
+                print(f"[AUTO-PDF] 문제집 PDF 자동 생성 완료 → {problem_pdf}")
+                
+                # 파일 존재 확인
+                if os.path.exists(f"{base_filename}.pdf"):
+                    file_size = os.path.getsize(f"{base_filename}.pdf")
+                    print(f"[DEBUG] PDF 파일 생성 확인: {f'{base_filename}.pdf'} (크기: {file_size:,} bytes)")
+                else:
+                    print(f"[WARNING] PDF 파일이 생성되지 않음: {f'{base_filename}.pdf'}")
+                
+                # artifacts에 기록
+                arts = new_state.setdefault("artifacts", {})
+                generated_list = arts.setdefault("generated_pdfs", [])
+                generated_list.append(f"{base_filename}.pdf")
+                print(f"[DEBUG] artifacts에 PDF 경로 추가: {f'{base_filename}.pdf'}")
+                
+            except ImportError as e:
+                print(f"[ERROR] 모듈 임포트 실패: {e}")
+                print(f"[DEBUG] 현재 작업 디렉토리: {os.getcwd()}")
+                print(f"[DEBUG] Python 경로: {sys.path}")
+            except Exception as e:
+                print(f"[AUTO-PDF] 문제집 PDF 자동 생성 중 오류: {e}")
+                print(f"[DEBUG] 오류 타입: {type(e).__name__}")
+                import traceback
+                print(f"[DEBUG] 상세 오류: {traceback.format_exc()}")
+        else:
+            print(f"[DEBUG] PDF 생성 조건 불충족:")
+            print(f"[DEBUG] - question 존재: {bool(new_state['shared'].get('question'))}")
+            print(f"[DEBUG] - options 존재: {bool(new_state['shared'].get('options'))}")
+            print(f"[DEBUG] - question 내용: {new_state['shared'].get('question', [])}")
+            print(f"[DEBUG] - options 내용: {new_state['shared'].get('options', [])}")
+            print(f"[DEBUG] - question 길이: {len(new_state['shared'].get('question', []))}")
+            print(f"[DEBUG] - options 길이: {len(new_state['shared'].get('options', []))}")
+            print(f"[DEBUG] - question 타입: {type(new_state['shared'].get('question'))}")
+            print(f"[DEBUG] - options 타입: {type(new_state['shared'].get('options'))}")
+        
         return new_state
 
     @traceable(name="teacher.solution")
@@ -586,6 +693,56 @@ class Orchestrator:
             sh["explanation"].extend(generated_explanations)
 
         validate_qas(sh)
+        
+        # 풀이 생성 후 자동으로 답안집 PDF 생성
+        if sh.get("question") and sh.get("options") and sh.get("answer") and sh.get("explanation"):
+            print("[AUTO-PDF] 풀이 생성 완료 → 답안집 PDF 자동 생성 시작")
+            try:
+                # 답안집 PDF 자동 생성
+                from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+                generator = ComprehensivePDFGenerator()
+                
+                problems = []
+                questions = sh["question"]
+                options_list = sh["options"]
+                answers = sh["answer"]
+                explanations = sh["explanation"]
+                count = min(len(questions), len(options_list))
+                
+                for i in range(count):
+                    q = questions[i] if i < len(questions) else ""
+                    opts = options_list[i] if i < len(options_list) else []
+                    if isinstance(opts, str):
+                        opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+                    ans = answers[i] if i < len(answers) else ""
+                    exp = explanations[i] if i < len(explanations) else ""
+                    problems.append({
+                        "question": q,
+                        "options": opts,
+                        "generated_answer": ans,
+                        "generated_explanation": exp,
+                    })
+                
+                # 출력 디렉토리
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+                os.makedirs(base_dir, exist_ok=True)
+                
+                uq = (state.get("user_query") or "exam").strip()
+                safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+                base_filename = os.path.join(base_dir, f"{safe_uq}_답안집")
+                
+                # 답안집 PDF 생성
+                answer_pdf = generator.generate_answer_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 답안집")
+                print(f"[AUTO-PDF] 답안집 PDF 자동 생성 완료 → {answer_pdf}")
+                
+                # artifacts에 기록
+                arts = new_state.setdefault("artifacts", {})
+                generated_list = arts.setdefault("generated_pdfs", [])
+                generated_list.append(f"{base_filename}.pdf")
+                
+            except Exception as e:
+                print(f"[AUTO-PDF] 답안집 PDF 자동 생성 중 오류: {e}")
+        
         return new_state
 
     @traceable(name="teacher.score")
@@ -638,7 +795,223 @@ class Orchestrator:
         if agent_result and "mistake_summary" in agent_result:
             new_state.setdefault("shared", {})
             new_state["shared"]["weak_type"] = agent_result["mistake_summary"]
+        
+        # 분석 완료 후 자동으로 분석 리포트 PDF 생성
+        if sh.get("question") and sh.get("options") and sh.get("answer") and sh.get("explanation"):
+            print("[AUTO-PDF] 분석 완료 → 분석 리포트 PDF 자동 생성 시작")
+            try:
+                # 분석 리포트 PDF 자동 생성
+                from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+                generator = ComprehensivePDFGenerator()
+                
+                problems = []
+                questions = sh["question"]
+                options_list = sh["options"]
+                answers = sh["answer"]
+                explanations = sh["explanation"]
+                weak_types = sh.get("weak_type", [])
+                count = min(len(questions), len(options_list))
+                
+                for i in range(count):
+                    q = questions[i] if i < len(questions) else ""
+                    opts = options_list[i] if i < len(options_list) else []
+                    if isinstance(opts, str):
+                        opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+                    ans = answers[i] if i < len(answers) else ""
+                    exp = explanations[i] if i < len(explanations) else ""
+                    problems.append({
+                        "question": q,
+                        "options": opts,
+                        "generated_answer": ans,
+                        "generated_explanation": exp,
+                    })
+                
+                # 출력 디렉토리
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+                os.makedirs(base_dir, exist_ok=True)
+                
+                uq = (state.get("user_query") or "exam").strip()
+                safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+                base_filename = os.path.join(base_dir, f"{safe_uq}_분석리포트")
+                
+                # 분석 리포트 PDF 생성
+                analysis_pdf = generator.generate_analysis_report(problems, f"{base_filename}.pdf", f"{safe_uq} 분석 리포트")
+                print(f"[AUTO-PDF] 분석 리포트 PDF 자동 생성 완료 → {analysis_pdf}")
+                
+                # artifacts에 기록
+                arts = new_state.setdefault("artifacts", {})
+                generated_list = arts.setdefault("generated_pdfs", [])
+                generated_list.append(f"{base_filename}.pdf")
+                
+            except Exception as e:
+                print(f"[AUTO-PDF] 분석 리포트 PDF 자동 생성 중 오류: {e}")
+        
         return new_state
+
+    @traceable(name="teacher.generate_problem_pdf")
+    def generate_problem_pdf(self, state: TeacherState) -> TeacherState:
+        """문제 생성 후 문제집 PDF만 생성 (질문 + 보기)"""
+        state = ensure_shared(state)
+        sh = state.get("shared") or {}
+
+        questions: List[str] = sh.get("question", []) or []
+        options_list: List[List[str]] = sh.get("options", []) or []
+
+        if not questions or not options_list:
+            print("[PDF] 생성할 문제가 없어 문제집 PDF 생성을 건너뜁니다.")
+            return state
+
+        problems: List[Dict[str, Any]] = []
+        count = min(len(questions), len(options_list))
+        for i in range(count):
+            q = questions[i] if i < len(questions) else ""
+            opts = options_list[i] if i < len(options_list) else []
+            if isinstance(opts, str):
+                opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+            problems.append({
+                "question": q,
+                "options": opts,
+                "generated_answer": "",  # 문제집에는 정답 미포함
+                "generated_explanation": "",  # 문제집에는 풀이 미포함
+            })
+
+        # 출력 디렉토리
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+        os.makedirs(base_dir, exist_ok=True)
+
+        uq = (state.get("user_query") or "exam").strip()
+        safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+        base_filename = os.path.join(base_dir, f"{safe_uq}_문제집")
+
+        try:
+            # 지연 임포트: 그래프 시각화 등에서 모듈 임포트 부작용 방지
+            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            generator = ComprehensivePDFGenerator()
+            # 문제집만 생성
+            problem_pdf = generator.generate_problem_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 문제집")
+            print(f"[PDF] 문제집 생성 완료 → {problem_pdf}")
+        except Exception as e:
+            print(f"[PDF] 문제집 생성 중 오류: {e}")
+            return state
+
+        ns = {**state}
+        arts = ns.setdefault("artifacts", {})
+        generated_list = arts.setdefault("generated_pdfs", [])
+        generated_list.append(f"{base_filename}.pdf")
+        return ns
+
+    @traceable(name="teacher.generate_answer_pdf")
+    def generate_answer_pdf(self, state: TeacherState) -> TeacherState:
+        """풀이 생성 후 답안집 PDF 생성 (질문 + 보기 + 정답 + 풀이)"""
+        state = ensure_shared(state)
+        sh = state.get("shared") or {}
+
+        questions: List[str] = sh.get("question", []) or []
+        options_list: List[List[str]] = sh.get("options", []) or []
+        answers: List[str] = sh.get("answer", []) or []
+        explanations: List[str] = sh.get("explanation", []) or []
+
+        if not questions or not options_list:
+            print("[PDF] 생성할 문제가 없어 답안집 PDF 생성을 건너뜁니다.")
+            return state
+
+        problems: List[Dict[str, Any]] = []
+        count = min(len(questions), len(options_list))
+        for i in range(count):
+            q = questions[i] if i < len(questions) else ""
+            opts = options_list[i] if i < len(options_list) else []
+            if isinstance(opts, str):
+                opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+            ans = answers[i] if i < len(answers) else ""
+            exp = explanations[i] if i < len(explanations) else ""
+            problems.append({
+                "question": q,
+                "options": opts,
+                "generated_answer": ans,
+                "generated_explanation": exp,
+            })
+
+        # 출력 디렉토리
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+        os.makedirs(base_dir, exist_ok=True)
+
+        uq = (state.get("user_query") or "exam").strip()
+        safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+        base_filename = os.path.join(base_dir, f"{safe_uq}_답안집")
+
+        try:
+            # 지연 임포트: 그래프 시각화 등에서 모듈 임포트 부작용 방지
+            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            generator = ComprehensivePDFGenerator()
+            # 답안집만 생성
+            answer_pdf = generator.generate_answer_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 답안집")
+            print(f"[PDF] 답안집 생성 완료 → {answer_pdf}")
+        except Exception as e:
+            print(f"[PDF] 답안집 생성 중 오류: {e}")
+            return state
+
+        ns = {**state}
+        arts = ns.setdefault("artifacts", {})
+        generated_list = arts.setdefault("generated_pdfs", [])
+        generated_list.append(f"{base_filename}.pdf")
+        return ns
+
+    @traceable(name="teacher.generate_analysis_pdf")
+    def generate_analysis_pdf(self, state: TeacherState) -> TeacherState:
+        """분석 후 분석 리포트 PDF 생성"""
+        state = ensure_shared(state)
+        sh = state.get("shared") or {}
+
+        questions: List[str] = sh.get("question", []) or []
+        options_list: List[List[str]] = sh.get("options", []) or []
+        answers: List[str] = sh.get("answer", []) or []
+        explanations: List[str] = sh.get("explanation", []) or []
+        weak_types: List[str] = sh.get("weak_type", []) or []
+
+        if not questions or not options_list:
+            print("[PDF] 생성할 문제가 없어 분석 리포트 PDF 생성을 건너뜁니다.")
+            return state
+
+        problems: List[Dict[str, Any]] = []
+        count = min(len(questions), len(options_list))
+        for i in range(count):
+            q = questions[i] if i < len(questions) else ""
+            opts = options_list[i] if i < len(options_list) else []
+            if isinstance(opts, str):
+                opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+            ans = answers[i] if i < len(answers) else ""
+            exp = explanations[i] if i < len(explanations) else ""
+            problems.append({
+                "question": q,
+                "options": opts,
+                "generated_answer": ans,
+                "generated_explanation": exp,
+            })
+
+        # 출력 디렉토리
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+        os.makedirs(base_dir, exist_ok=True)
+
+        uq = (state.get("user_query") or "exam").strip()
+        safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
+        base_filename = os.path.join(base_dir, f"{safe_uq}_분석리포트")
+
+        try:
+            # 지연 임포트: 그래프 시각화 등에서 모듈 임포트 부작용 방지
+            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            generator = ComprehensivePDFGenerator()
+            # 분석 리포트 생성
+            analysis_pdf = generator.generate_analysis_report(problems, f"{base_filename}.pdf", f"{safe_uq} 분석 리포트")
+            print(f"[PDF] 분석 리포트 생성 완료 → {analysis_pdf}")
+        except Exception as e:
+            print(f"[PDF] 분석 리포트 생성 중 오류: {e}")
+            return state
+
+        ns = {**state}
+        arts = ns.setdefault("artifacts", {})
+        generated_list = arts.setdefault("generated_pdfs", [])
+        generated_list.append(f"{base_filename}.pdf")
+        return ns
 
     @traceable(name="teacher.generate_pdfs")
     def generate_pdfs(self, state: TeacherState) -> TeacherState:
@@ -796,13 +1169,13 @@ class Orchestrator:
         )
         builder.add_edge("mark_after_score_analysis", "score")
 
-        # post dependencies
+        # post dependencies - 자동 PDF 생성 강화
         builder.add_conditional_edges(
             "generator",
             self.post_generator_route,
             {
                 "solution": "solution",
-                "persist_state": "generate_pdfs",
+                "generate_problem_pdf": "generate_problem_pdf",
             },
         )
         builder.add_conditional_edges(
@@ -810,7 +1183,7 @@ class Orchestrator:
             self.post_solution_route,
             {
                 "score": "score",
-                "persist_state": "generate_pdfs",
+                "generate_answer_pdf": "generate_answer_pdf",
             },
         )
         builder.add_conditional_edges(
@@ -818,17 +1191,30 @@ class Orchestrator:
             self.post_score_route,
             {
                 "analysis": "analysis",
+                "generate_answer_pdf": "generate_answer_pdf",  # 채점 후 답안집 PDF 생성
+            },
+        )
+        builder.add_conditional_edges(
+            "analysis",
+            self.post_analysis_route,
+            {
+                "generate_analysis_pdf": "generate_analysis_pdf",
                 "persist_state": "persist_state",
             },
         )
 
         # PDF 생성 노드 추가 및 연결
         builder.add_node("generate_pdfs", RunnableLambda(self.generate_pdfs))
+        builder.add_node("generate_problem_pdf", RunnableLambda(self.generate_problem_pdf))
+        builder.add_node("generate_answer_pdf", RunnableLambda(self.generate_answer_pdf))
+        builder.add_node("generate_analysis_pdf", RunnableLambda(self.generate_analysis_pdf))
 
-        # retrieve → persist, analysis → generate_pdfs → persist → END
+        # retrieve → persist, analysis → generate_analysis_pdf → persist → END
         builder.add_edge("retrieve", "persist_state")
-        builder.add_edge("analysis", "generate_pdfs")
-        builder.add_edge("generate_pdfs", "persist_state")
+        builder.add_edge("analysis", "generate_analysis_pdf")
+        builder.add_edge("generate_analysis_pdf", "persist_state")
+        builder.add_edge("generate_problem_pdf", "persist_state")
+        builder.add_edge("generate_answer_pdf", "persist_state")
         builder.add_edge("persist_state", END)
 
         return builder.compile()

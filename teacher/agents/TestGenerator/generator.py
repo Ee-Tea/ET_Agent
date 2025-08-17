@@ -720,6 +720,13 @@ class InfoProcessingExamAgent(BaseAgent):
         from concurrent.futures import ThreadPoolExecutor, as_completed
         start_time = time.time()
 
+        self._generate_workflow_diagram("partial_exam", {
+            "selected_subjects": selected_subjects,
+            "questions_per_subject": questions_per_subject,
+            "difficulty": difficulty,
+            "parallel_agents": parallel_agents
+        })
+
         partial_exam_result = {
             "exam_title": f"정보처리기사 선택과목 모의고사 ({len(selected_subjects)}과목)",
             "total_questions": 0,
@@ -815,3 +822,115 @@ class InfoProcessingExamAgent(BaseAgent):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(exam_result, f, ensure_ascii=False, indent=2)
         return filename
+
+    def _save_to_json(self, exam_result: Dict[str, Any], filename: str = None) -> str:
+        """시험 결과를 JSON 파일로 저장"""
+        if not filename:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"정보처리기사_문제생성_{timestamp}.json"
+        
+        filepath = os.path.join(os.path.dirname(__file__), "test", filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(exam_result, f, ensure_ascii=False, indent=2)
+        return filename
+
+    def _generate_workflow_diagram(self, mode: str, params: Dict[str, Any]) -> None:
+        """Graphviz를 사용하여 문제 생성 워크플로우 다이어그램을 생성합니다."""
+        try:
+            from graphviz import Digraph
+            import time
+            
+            # 다이어그램 생성
+            dot = Digraph(comment=f'정보처리기사 문제 생성 워크플로우 - {mode}')
+            dot.attr(rankdir='TB', size='12,8')
+            
+            # 노드 스타일 정의
+            dot.attr('node', shape='box', style='rounded,filled', fontname='Arial', fontsize='10')
+            
+            # 시작 노드
+            dot.node('start', '사용자 입력', fillcolor='lightgreen')
+            
+            # 입력 파싱 노드들
+            dot.node('parse', 'LLM 기반\n입력 파싱', fillcolor='lightblue')
+            dot.node('validate', '파라미터 검증\n(과목/문제수/난이도)', fillcolor='lightyellow')
+            
+            # 모드별 분기
+            if mode == "partial_exam":
+                dot.node('mode', 'PARTIAL_EXAM\n(선택과목 모드)', fillcolor='orange')
+                dot.node('parallel', '병렬 처리\n(ThreadPoolExecutor)', fillcolor='lightcoral')
+                dot.node('merge', '결과 통합\n(과목별 결과 병합)', fillcolor='lightcoral')
+            elif mode == "single_subject":
+                dot.node('mode', 'SINGLE_SUBJECT\n(단일 과목 모드)', fillcolor='orange')
+                dot.node('single', '단일 에이전트\n(직렬 처리)', fillcolor='lightcoral')
+            else:
+                dot.node('mode', 'FULL_EXAM\n(전체 과목 모드)', fillcolor='orange')
+                dot.node('full_parallel', '전체 병렬\n(5과목 동시)', fillcolor='lightcoral')
+            
+            # 에이전트 실행
+            dot.node('agent', 'TestGenerator\n.execute()', fillcolor='lightpink')
+            dot.node('result', '결과 처리\n(모드별 결과 추출)', fillcolor='lightcyan')
+            
+            # 데이터 변환
+            dot.node('transform', '데이터 변환\n(QA 형식)', fillcolor='lightcyan')
+            dot.node('output', '출력\n(JSON/PDF)', fillcolor='lightgreen')
+            
+            # 엣지 연결
+            dot.edge('start', 'parse')
+            dot.edge('parse', 'validate')
+            dot.edge('validate', 'mode')
+            
+            if mode == "partial_exam":
+                dot.edge('mode', 'parallel')
+                dot.edge('parallel', 'agent')
+                dot.edge('agent', 'merge')
+                dot.edge('merge', 'result')
+            elif mode == "single_subject":
+                dot.edge('mode', 'single')
+                dot.edge('single', 'agent')
+                dot.edge('agent', 'result')
+            else:
+                dot.edge('mode', 'full_parallel')
+                dot.edge('full_parallel', 'agent')
+                dot.edge('agent', 'result')
+            
+            dot.edge('result', 'transform')
+            dot.edge('transform', 'output')
+            
+            # 서브그래프로 과목별 처리 구조 표시
+            if mode == "partial_exam":
+                with dot.subgraph(name='cluster_subjects') as c:
+                    c.attr(label='과목별 병렬 처리', style='filled', fillcolor='lightgray')
+                    subjects = params.get("selected_subjects", [])
+                    count_per_subject = params.get("questions_per_subject", 10)
+                    for i, subject in enumerate(subjects):
+                        c.node(f'subject_{i}', f'{subject}\n({count_per_subject}문제)')
+                        if i > 0:
+                            c.edge(f'subject_{i-1}', f'subject_{i}', style='dashed')
+            
+            # 파일 저장
+            output_dir = os.path.join(os.path.dirname(__file__), "workflow_diagrams")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"generation_workflow_{mode}_{timestamp}"
+            filepath = os.path.join(output_dir, filename)
+            
+            dot.render(filepath, format='png', cleanup=True)
+            print(f"\n 워크플로우 다이어그램 생성 완료: {filepath}.png")
+            
+            # 간단한 텍스트 요약도 출력
+            print(f"\n📊 워크플로우 요약:")
+            print(f"   ┌─ 모드: {mode.upper()}")
+            if mode == "partial_exam":
+                subjects = params.get("selected_subjects", [])
+                count_per_subject = params.get("questions_per_subject", 10)
+                print(f"   ├─ 선택된 과목: {', '.join(subjects)}")
+                print(f"   ├─ 과목당 문제 수: {count_per_subject}개")
+                print(f"   └─ 병렬 에이전트: {params.get('parallel_agents', 2)}개")
+            
+        except ImportError:
+            print("\n⚠️  Graphviz가 설치되지 않았습니다. pip install graphviz로 설치하세요.")
+        except Exception as e:
+            print(f"\n❌ 다이어그램 생성 실패: {e}")

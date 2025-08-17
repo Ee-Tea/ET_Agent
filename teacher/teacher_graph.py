@@ -23,7 +23,8 @@ from common.short_term.redis_memory import RedisLangGraphMemory
 from agents.analysis.analysis_agent import AnalysisAgent
 from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
-from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
+# from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
+from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
 from agents.solution.solution_agent import SolutionAgent as solution_agent
 from teacher_nodes import get_user_answer, parse_generator_input
 from file_path_mapper import FilePathMapper
@@ -312,6 +313,7 @@ class Orchestrator:
 
         try:
             parsed_raw = parse_generator_input(user_query)  # nodes 함수 (LLM 기반)
+            print(f"parsed_raw: {parsed_raw}")
             if isinstance(parsed_raw, str):
                 try:
                     parsed_obj = _json.loads(parsed_raw)
@@ -338,21 +340,43 @@ class Orchestrator:
             # 파싱 실패 시 기본값 유지
             pass
 
-        # 에이전트 입력 구성: 과목을 지정하면 subject_quiz, 아니면 full_exam
-        if parsed_subject:
-            # 과목 문제 생성 모드 - 사용자가 요청한 수만큼만 생성
+        # 에이전트 입력 구성: 새로운 모드 지원
+        mode = parsed_obj.get("mode", "full_exam")
+        
+        if mode == "partial_exam":
+            # 선택된 과목들에 대해 지정된 문제 수만큼 생성
+            subjects = parsed_obj.get("subjects", [])
+            count_per_subject = parsed_obj.get("count_per_subject", 10)
+            
+            if subjects and isinstance(subjects, list):
+                agent_input = {
+                    "mode": "partial_exam",
+                    "selected_subjects": subjects,
+                    "questions_per_subject": count_per_subject,
+                    "difficulty": parsed_difficulty,
+                    "save_to_file": False,
+                }
+                print(f"[Generator] 선택과목 {subjects} 각 {count_per_subject}문제 생성 요청")
+            else:
+                # fallback to full_exam
+                agent_input = {
+                    "mode": "full_exam",
+                    "difficulty": parsed_difficulty,
+                    "save_to_file": False,
+                }
+        elif mode == "single_subject" and parsed_subject:
+            # 단일 과목 문제 생성 모드
             target_count = parsed_count if parsed_count and parsed_count > 0 else 5
             agent_input = {
                 "mode": "subject_quiz",
                 "subject_area": parsed_subject,
-                "target_count": target_count,  # 사용자 요청 수 사용
+                "target_count": target_count,
                 "difficulty": parsed_difficulty,
                 "save_to_file": False,
-                "strict_count": True,  # 정확한 수만큼만 생성하도록 플래그 추가
             }
             print(f"[Generator] {parsed_subject} 과목 {target_count}문제 생성 요청")
         else:
-            # 전체 모드. 문항수만 명시된 경우는 현재 구조상 25문 고정이라 무시됨
+            # 전체 모드 (기본값)
             agent_input = {
                 "mode": "full_exam",
                 "difficulty": parsed_difficulty,
@@ -365,7 +389,7 @@ class Orchestrator:
         new_state["generation"].update(agent_result)
 
         # 공유부 누적(Append)
-        def _append_items_into_shared(target_state: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
+        def _append_items_into_shared(target_state: Dict[str, Any], items: List[Dict[str, Any]], current_mode: str = "") -> None:
             sh = target_state.setdefault("shared", {})
             sh.setdefault("question", [])
             sh.setdefault("options", [])
@@ -401,8 +425,12 @@ class Orchestrator:
             # 2) InfoProcessingExamAgent.execute 포맷 처리
             result_payload = agent_result.get("result") if isinstance(agent_result, dict) else None
             if isinstance(result_payload, dict):
+                # partial_exam 모드: all_questions 필드 우선 사용
+                if mode == "partial_exam" and isinstance(result_payload.get("all_questions"), list):
+                    items_to_append = result_payload.get("all_questions", [])
+                    print(f"[Generator] partial_exam 모드: {len(items_to_append)}개 문제 추출")
                 # subject_quiz 모드: questions 필드 (사용자 요청 수만큼만)
-                if isinstance(result_payload.get("questions"), list):
+                elif isinstance(result_payload.get("questions"), list):
                     target_count = parsed_count if parsed_count and parsed_count > 0 else 5
                     questions = result_payload.get("questions", [])
                     items_to_append = questions[:target_count]  # 요청한 수만큼만 추출
@@ -410,17 +438,22 @@ class Orchestrator:
                 # full_exam 모드: all_questions가 있으면 우선 사용
                 elif isinstance(result_payload.get("all_questions"), list):
                     items_to_append = result_payload.get("all_questions", [])
-                # 없으면 subjects.*.questions 합치기
+                # subjects.*.questions 합치기 (full_exam 모드에서 실패한 과목들 처리)
                 elif isinstance(result_payload.get("subjects"), dict):
                     aggregated: List[Dict[str, Any]] = []
-                    for v in result_payload.get("subjects", {}).values():
-                        qs = v.get("questions") if isinstance(v, dict) else None
-                        if isinstance(qs, list):
-                            aggregated.extend(qs)
+                    for subject_name, subject_data in result_payload.get("subjects", {}).items():
+                        if isinstance(subject_data, dict):
+                            qs = subject_data.get("questions") if isinstance(subject_data, dict) else None
+                            if isinstance(qs, list) and qs:  # questions가 있고 비어있지 않은 경우만
+                                aggregated.extend(qs)
+                                print(f"[Generator] {subject_name}에서 {len(qs)}개 문제 추출")
+                            elif subject_data.get("status") == "FAILED":
+                                print(f"[Generator] {subject_name} 과목 생성 실패: {subject_data.get('error', '알 수 없는 오류')}")
                     items_to_append = aggregated
+                    print(f"[Generator] 총 {len(aggregated)}개 문제를 subjects에서 추출")
 
         if items_to_append:
-            _append_items_into_shared(new_state, items_to_append)
+            _append_items_into_shared(new_state, items_to_append, mode)
 
         validate_qas(new_state["shared"])
         return new_state

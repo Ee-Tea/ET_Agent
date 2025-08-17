@@ -21,9 +21,27 @@ from reportlab.lib.colors import black, white, red, blue, green, gray
 
 # 한글 폰트 등록
 _HERE = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.abspath(os.path.join(_HERE, "..", "fonts", "NanumGothic.ttf"))
+FONT_PATH = os.path.abspath(os.path.join(_HERE, "..", "..", "fonts", "NanumGothic.ttf"))
 FONT_NAME = "NanumGothic"
-pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
+
+# 폰트 파일 존재 확인 및 경로 출력
+print(f"[DEBUG] 폰트 경로: {FONT_PATH}")
+print(f"[DEBUG] 폰트 파일 존재: {os.path.exists(FONT_PATH)}")
+
+if os.path.exists(FONT_PATH):
+    pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
+    print(f"[DEBUG] 폰트 등록 성공: {FONT_NAME}")
+else:
+    print(f"[WARNING] 폰트 파일을 찾을 수 없음: {FONT_PATH}")
+    # 대체 폰트 시도
+    try:
+        # 기본 폰트 사용
+        pdfmetrics.registerFont(TTFont("Helvetica", "Helvetica"))
+        FONT_NAME = "Helvetica"
+        print(f"[DEBUG] 대체 폰트 사용: {FONT_NAME}")
+    except Exception as e:
+        print(f"[ERROR] 대체 폰트 등록 실패: {e}")
+        FONT_NAME = "Helvetica"  # 기본값
 
 class ComprehensivePDFGenerator:
     """종합 시험 PDF 생성기"""
@@ -96,42 +114,80 @@ class ComprehensivePDFGenerator:
     
     def generate_problem_booklet(self, problems, output_path, title="시험 문제집"):
         """문제집 생성 (문제 + 보기만)"""
-        doc = SimpleDocTemplate(
-            output_path, 
-            pagesize=A4,
-            leftMargin=15*mm, 
-            rightMargin=15*mm,
-            topMargin=15*mm, 
-            bottomMargin=15*mm
-        )
+        print(f"[DEBUG] generate_problem_booklet 시작")
+        print(f"[DEBUG] problems 개수: {len(problems)}")
+        print(f"[DEBUG] output_path: {output_path}")
+        print(f"[DEBUG] title: {title}")
         
-        story = []
-        
-        # 헤더
-        story.append(Paragraph(f"{title}", self.styles["title"]))
-        story.append(Paragraph(f"생성일: {datetime.now().strftime('%Y-%m-%d')}", self.styles["header"]))
-        story.append(Paragraph(f"총 문항 수: {len(problems)}개", self.styles["header"]))
-        story.append(Spacer(1, 8*mm))
-        
-        # 문제들
-        for idx, problem in enumerate(problems, 1):
-            question_text = problem.get("question", "").strip()
-            story.append(Paragraph(f"문제 {idx}. {question_text}", self.styles["question"]))
+        try:
+            # 문제 데이터 검증
+            if not problems:
+                print("[ERROR] problems가 비어있음")
+                return None
             
-            # 보기
-            options = problem.get("options", [])
-            for i, option in enumerate(options, 1):
-                option_text = f"{i}. {str(option).strip()}"
-                story.append(Paragraph(option_text, self.styles["option"]))
+            print(f"[DEBUG] 첫 번째 문제 샘플: {problems[0] if problems else 'None'}")
             
-            story.append(Spacer(1, 5*mm))
+            doc = SimpleDocTemplate(
+                output_path, 
+                pagesize=A4,
+                leftMargin=15*mm, 
+                rightMargin=15*mm,
+                topMargin=15*mm, 
+                bottomMargin=15*mm
+            )
+            print(f"[DEBUG] SimpleDocTemplate 생성 완료")
             
-            # 10문항마다 페이지 나눔
-            if idx % 10 == 0 and idx != len(problems):
-                story.append(PageBreak())
-        
-        doc.build(story)
-        print(f"✅ 문제집 생성 완료: {output_path}")
+            story = []
+            
+            # 헤더
+            story.append(Paragraph(f"{title}", self.styles["title"]))
+            story.append(Paragraph(f"생성일: {datetime.now().strftime('%Y-%m-%d')}", self.styles["header"]))
+            story.append(Paragraph(f"총 문항 수: {len(problems)}개", self.styles["header"]))
+            story.append(Spacer(1, 8*mm))
+            print(f"[DEBUG] 헤더 추가 완료")
+            
+            # 문제들
+            for idx, problem in enumerate(problems, 1):
+                question_text = problem.get("question", "").strip()
+                print(f"[DEBUG] 문제 {idx} 처리: {question_text[:50]}...")
+                
+                story.append(Paragraph(f"문제 {idx}. {question_text}", self.styles["question"]))
+                
+                # 보기
+                options = problem.get("options", [])
+                print(f"[DEBUG] 보기 {idx}: {options}")
+                
+                for i, option in enumerate(options, 1):
+                    option_text = f"{i}. {str(option).strip()}"
+                    story.append(Paragraph(option_text, self.styles["option"]))
+                
+                story.append(Spacer(1, 5*mm))
+                
+                # 10문항마다 페이지 나눔
+                if idx % 10 == 0 and idx != len(problems):
+                    story.append(PageBreak())
+                    print(f"[DEBUG] 페이지 나눔 추가 (문제 {idx})")
+            
+            print(f"[DEBUG] story 구성 완료, 총 {len(story)}개 요소")
+            print(f"[DEBUG] PDF 빌드 시작...")
+            
+            doc.build(story)
+            print(f"✅ 문제집 생성 완료: {output_path}")
+            
+            # 파일 생성 확인
+            if os.path.exists(output_path):
+                file_size = os.path.getsize(output_path)
+                print(f"[DEBUG] PDF 파일 생성 확인: {output_path} (크기: {file_size:,} bytes)")
+                return output_path
+            else:
+                print(f"[ERROR] PDF 파일이 생성되지 않음: {output_path}")
+                return None
+                
+        except Exception as e:
+            print(f"[ERROR] generate_problem_booklet 실행 중 오류: {e}")
+            import traceback
+            print(f"[DEBUG] 상세 오류: {traceback.format_exc()}")
+            return None
     
     def generate_answer_booklet(self, problems, output_path, title="시험 답안집"):
         """답안집 생성 (문제 + 보기 + 정답 + 풀이)"""

@@ -76,7 +76,7 @@ def fact_check_with_context(question:str, context: str, answer: str) -> dict:
     try:
         # LLM 호출
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",  # 모델명은 실제 환경에 따라 수정
+            model="moonshotai/kimi-k2-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5,
         )

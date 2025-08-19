@@ -71,7 +71,7 @@ class AnalysisAgent(BaseAgent):
     
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "meta-llama/llama-4-scout-17b-16e-instruct"  # 또는 "meta-llama/llama-3.1-8b-instant"
+        self.model = "moonshotai/kimi-k2-instruct"
         self.graph = self._create_graph()
     
     def _create_graph(self) -> StateGraph:

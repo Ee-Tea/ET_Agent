@@ -19,9 +19,9 @@ class FilePathMapper:
                       예: {"pdf": "agents/TestGenerator/data", "image": "temp_images"}
         """
         self.base_dirs = base_dirs or {
-            "pdf": "agents\\TestGenerator\\data",
-            "image": "..\\temp_images",
-            "document": "..\\data"
+            "pdf": "agents/solution/pdf_outputs",  # 실제 PDF가 있는 위치
+            "image": "../temp_images",
+            "document": "../data"
         }
         
         # 현재 스크립트 위치 기준으로 상대 경로를 절대 경로로 변환
@@ -69,34 +69,86 @@ class FilePathMapper:
         Returns:
             파일 경로 또는 None (찾지 못한 경우)
         """
-        base_dir = self.base_dirs.get(file_type)
-        if not base_dir or not os.path.exists(base_dir):
-            return None
+        # PDF 타입인 경우 여러 디렉토리에서 검색
+        if file_type == "pdf":
+            search_dirs = [
+                self.base_dirs.get("pdf"),  # 기본 디렉토리
+                "agents/solution/pdf_outputs",  # solution 출력
+                "agents/TestGenerator/data",    # TestGenerator 데이터
+                "../temp_images",              # 임시 이미지들
+            ]
+        else:
+            search_dirs = [self.base_dirs.get(file_type)]
         
-        # 파일 타입별 확장자
-        extensions = {
-            "pdf": [".pdf"],
-            "image": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"],
-            "document": [".pdf", ".doc", ".docx", ".txt", ".md"]
-        }
-        
-        ext_list = extensions.get(file_type, [".*"])
-        
-        # 파일 검색
-        for ext in ext_list:
-            if ext == ".*":
-                # 모든 파일 검색
-                pattern = os.path.join(base_dir, "*")
-                files = glob.glob(pattern)
-            else:
-                # 특정 확장자만 검색
-                pattern = os.path.join(base_dir, f"*{ext}")
-                files = glob.glob(pattern)
+        for base_dir in search_dirs:
+            if not base_dir:
+                continue
+                
+            # 상대 경로를 절대 경로로 변환
+            if not os.path.isabs(base_dir):
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                base_dir = os.path.normpath(os.path.join(script_dir, base_dir))
             
-            for file_path in files:
-                if os.path.isfile(file_path) and file_id.lower() in os.path.basename(file_path).lower():
-                    return file_path
+            if not os.path.exists(base_dir):
+                print(f"   - 디렉토리가 존재하지 않음: {base_dir}")
+                continue
+                
+            print(f"   - 검색 중: {base_dir}")
+            
+            # 파일 타입별 확장자
+            extensions = {
+                "pdf": [".pdf"],
+                "image": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"],
+                "document": [".pdf", ".doc", ".docx", ".txt", ".md"]
+            }
+            
+            ext_list = extensions.get(file_type, [".*"])
+            
+            # 파일 검색
+            for ext in ext_list:
+                if ext == ".*":
+                    # 모든 파일 검색
+                    pattern = os.path.join(base_dir, "*")
+                    files = glob.glob(pattern)
+                else:
+                    # 특정 확장자만 검색
+                    pattern = os.path.join(base_dir, f"*{ext}")
+                    files = glob.glob(pattern)
+                
+                print(f"     → 패턴 {pattern}으로 {len(files)}개 파일 발견")
+                
+                # 정확한 매칭을 우선하고, 그 다음 부분 매칭
+                exact_matches = []
+                partial_matches = []
+                
+                for file_path in files:
+                    if not os.path.isfile(file_path):
+                        continue
+                        
+                    filename = os.path.basename(file_path)
+                    filename_lower = filename.lower()
+                    file_id_lower = file_id.lower()
+                    
+                    # 정확한 파일명 매치 (확장자 제외)
+                    name_without_ext = os.path.splitext(filename)[0].lower()
+                    id_without_ext = os.path.splitext(file_id)[0].lower()
+                    
+                    if name_without_ext == id_without_ext:
+                        exact_matches.append(file_path)
+                        print(f"     ✅ 정확한 매치: {filename}")
+                    elif file_id_lower in filename_lower:
+                        partial_matches.append(file_path)
+                        print(f"     📝 부분 매치: {filename}")
+                
+                # 정확한 매치가 있으면 우선 반환
+                if exact_matches:
+                    print(f"     🎯 선택된 파일: {exact_matches[0]}")
+                    return exact_matches[0]
+                elif partial_matches:
+                    print(f"     🎯 선택된 파일: {partial_matches[0]}")
+                    return partial_matches[0]
         
+        print(f"   ❌ '{file_id}' 파일을 찾을 수 없음")
         return None
     
     def find_files_by_ids(self, file_ids: List[str], file_type: str = "pdf") -> List[str]:

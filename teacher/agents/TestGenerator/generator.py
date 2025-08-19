@@ -26,7 +26,7 @@ from base_agent import BaseAgent
 
 # Groq 관련 임포트
 from langchain_groq import ChatGroq
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # .env 파일 로드
 load_dotenv()
@@ -225,7 +225,7 @@ class InfoProcessingExamAgent(BaseAgent):
                 encode_kwargs={'normalize_embeddings': True}
             )
             self.llm = ChatGroq(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="moonshotai/kimi-k2-instruct",
                 temperature=0.0,
                 max_tokens=2048,
                 timeout=120,

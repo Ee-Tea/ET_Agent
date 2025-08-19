@@ -22,7 +22,7 @@ except ImportError:
     OpenAI = None  # openai 패키지가 없으면 None 처리
 
 # 상수 정의
-DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+DEFAULT_MODEL = "moonshotai/kimi-k2-instruct"
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_TIMEOUT = 120

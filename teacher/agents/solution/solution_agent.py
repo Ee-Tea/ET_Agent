@@ -309,12 +309,8 @@ class SolutionAgent(BaseAgent):
         
         print(f"✅ user_problems가 JSON 파일로 저장되었습니다: {filename}")
         return filename
-   
-
-
     #----------------------------------------nodes------------------------------------------------------
 
-    
     # --------- 분기 ----------
     def _route(self, state: SolutionState) -> SolutionState:
         print(f"🧭 분기: input_kind={state.get('input_kind')} | source_type={state.get('source_type')}")

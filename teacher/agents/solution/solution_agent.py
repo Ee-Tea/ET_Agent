@@ -148,7 +148,7 @@ class SolutionAgent(BaseAgent):
         return ChatOpenAI(
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="moonshotai/kimi-k2-instruct",  # ✅ 통일된 모델
             temperature=temperature,
         )
 
@@ -196,13 +196,6 @@ class SolutionAgent(BaseAgent):
         except Exception:
             return []
 
-    @staticmethod
-    def _split_problem_blocks(raw: str) -> List[str]:
-        """
-        개선된 문제 블록 분할 알고리즘 (정적 메서드 버전)
-        """
-        return SolutionAgent.split_problem_blocks_without_keyword_static(raw)
-    
     @staticmethod
     def normalize_docling_markdown_static(md: str) -> str:
         """Docling 마크다운 정규화 (정적 메서드)"""
@@ -447,110 +440,30 @@ class SolutionAgent(BaseAgent):
         print(f"✅ [내부] 최종 로드된 문제: {len(user_problems)}개")
         return state
     
-    def _filter_problems_by_range(self, problems: List[Dict], problem_range: Dict) -> List[Dict]:
-        """문제 범위에 따라 문제들을 필터링"""
-        if not problem_range:
-            return problems
-        
-        range_type = problem_range.get("type")
-        
-        if range_type == "single":
-            # 단일 번호
-            target_num = problem_range.get("number")
-            return [p for p in problems if p.get("index") == target_num]
-        
-        elif range_type == "range":
-            # 범위
-            start = problem_range.get("start")
-            end = problem_range.get("end")
-            return [p for p in problems if start <= p.get("index", 0) <= end]
-        
-        elif range_type == "specific":
-            # 특정 번호들
-            target_numbers = problem_range.get("numbers", [])
-            return [p for p in problems if p.get("index") in target_numbers]
-        
-        else:
-            print(f"⚠️ 알 수 없는 범위 타입: {range_type}")
-            return problems
-    
     # --------- 외부: shared state에서 전처리된 문제 로드 ----------
     def _load_from_external(self, state: SolutionState) -> SolutionState:
-        """
-        전처리 노드에서 추출된 문제들을 적절한 소스에서 가져와서 user_problems에 설정
-        """
+        """전처리 노드에서 추출된 문제들을 로드"""
         print("📄 [외부] 문제 로드 시작")
         
-        # artifacts에서 문제 소스와 범위 정보 가져오기
-        artifacts = state.get("artifacts", {})
-        problem_source = artifacts.get("problem_source")
-        problem_range = artifacts.get("problem_range")
-        
-        print(f"📚 문제 소스: {problem_source}")
-        print(f"🔢 문제 범위: {problem_range}")
-        
-        # 문제 소스 결정 (우선순위: PDF 존재 여부 > 명시적 지정 > shared)
+        # pdf_extracted에서 문제 로드 (teacher_graph.py에서 이미 처리됨)
         pdf_data = state.get("pdf_extracted", {})
-        pdf_questions = pdf_data.get("question", []) or []
-        
-        if pdf_questions:
-            # PDF 데이터가 있으면 무조건 PDF 우선
-            questions = pdf_questions
-            options_list = pdf_data.get("options", []) or []
-            print("📄 PDF 전처리 state에서 문제 로드 (PDF 데이터 존재)")
-        elif problem_source == "shared":
-            questions = state.get("question", []) or []
-            options_list = state.get("options", []) or []
-            print("📊 shared state에서 문제 로드")
-        elif problem_source == "pdf_extracted" or artifacts.get("pdf_ids"):
-            questions = pdf_questions  # 빈 리스트
-            options_list = pdf_data.get("options", []) or []
-            print("📄 PDF 전처리 state에서 문제 로드 (명시적 지정)")
-        else:
-            # 기본: shared state 사용
-            questions = state.get("question", []) or []
-            options_list = state.get("options", []) or []
-            print("📊 shared state에서 문제 로드 (기본값)")
-            
-        # 디버그 정보
-        print(f"🔍 [디버그] 최종 선택된 소스의 문제 수: {len(questions)}")
-        print(f"🔍 [디버그] 전체 state 키들: {list(state.keys())}")
-        print(f"🔍 [디버그] pdf_extracted 존재: {'pdf_extracted' in state}")
-        if 'pdf_extracted' in state:
-            pdf_debug = state['pdf_extracted']
-            print(f"🔍 [디버그] pdf_extracted 문제 수: {len(pdf_debug.get('question', []))}")
+        questions = pdf_data.get("question", []) or []
+        options_list = pdf_data.get("options", []) or []
         
         if not questions:
-            print("⚠️ 선택된 소스에 문제가 없습니다.")
+            print("⚠️ pdf_extracted에 문제가 없습니다.")
             state["user_problems"] = []
             return state
         
         # user_problems 형태로 변환
-        all_problems = []
+        user_problems = []
         for i, question in enumerate(questions):
             options = options_list[i] if i < len(options_list) else []
             if question and options:
-                all_problems.append({
+                user_problems.append({
                     "question": question,
-                    "options": options,
-                    "index": i + 1  # 1-based 번호
+                    "options": options
                 })
-        
-        # 문제 범위 필터링
-        if problem_range:
-            filtered_problems = self._filter_problems_by_range(all_problems, problem_range)
-            print(f"🎯 범위 필터링: {len(all_problems)}개 → {len(filtered_problems)}개")
-        else:
-            filtered_problems = all_problems
-            print(f"📝 전체 문제 로드: {len(filtered_problems)}개")
-        
-        # index 제거 (solution_agent 내부에서는 필요 없음)
-        user_problems = []
-        for problem in filtered_problems:
-            user_problems.append({
-                "question": problem["question"],
-                "options": problem["options"]
-            })
         
         state["user_problems"] = user_problems
         print(f"✅ 최종 로드된 문제: {len(user_problems)}개")
@@ -561,143 +474,6 @@ class SolutionAgent(BaseAgent):
         
         return state
     
-    # --------- 기존 PDF 추출 로직 (백업용) ----------
-    def _load_from_external_OLD_BACKUP(self, state: SolutionState) -> SolutionState:
-        """
-        PDF/문서 → 텍스트 → [문제 블록 분할] → (블록 단위) LLM 파싱 → '문항+보기4'만 저장
-        """
-        print("📄 [외부] 첨부 문서 로드 → 텍스트 변환 → 블록 단위 LLM 파싱 시작")
-        paths = state.get("external_file_paths", [])
-        if not paths:
-            raise ValueError("external_file_paths 가 비어있습니다. 외부 분기에서는 파일 경로가 필요합니다.")
-
-        # 환경변수 설정으로 권한 문제 해결
-        import os
-        os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
-        os.environ['HF_HOME'] = 'C:\\temp\\huggingface_cache'
-        
-        # cv2 setNumThreads 문제 해결
-        try:
-            import cv2
-            if not hasattr(cv2, 'setNumThreads'):
-                # setNumThreads가 없으면 더미 함수 추가
-                cv2.setNumThreads = lambda x: None
-        except ImportError:
-            pass
-        
-        converter = DocumentConverter()
-
-
-        # LLM (엄격한 구조화 전용)
-        llm = self._llm(0)
-
-        # ----- 블록 1개를 LLM으로 파싱하는 내부 함수 -----
-        def parse_block_with_llm(block_text: str) -> Optional[Dict[str, object]]:
-            # 노이즈 제거 (정답/해설 라인)
-            cleaned = []
-            for ln in block_text.splitlines():
-                if re.search(r"(정답|해설|답안|풀이|answer|solution)\s*[:：]", ln, re.I):
-                    continue
-                cleaned.append(ln)
-            cleaned_text = "\n".join(cleaned).strip()
-
-            if len(cleaned_text) < 5:
-                return None
-
-            sys_prompt = (
-                "너는 시험 블록 텍스트를 정확히 구조화하는 도우미다. "
-                "입력 블록에는 '한 문제'가 들어있다. "
-                "출력은 반드시 JSON 하나의 객체로만 하며, 다음 스키마를 지켜라:\n"
-                '{"question": "<질문 본문(번호/머리글 제거)>", "options": ["<보기1>","<보기2>","<보기3>","<보기4>"]}\n'
-                "주의사항:\n"
-                "- 반드시 options는 정확히 4개여야 한다.\n"
-                "- 입력 블록에 있는 보기 텍스트만 사용하고 새로 만들지 마라.\n"
-                "- 불필요한 설명/정답/해설/코드블록/문자열은 출력하지 마라. JSON만 출력하라."
-            )
-            user_prompt = f"다음 블록을 구조화하라:\n```\n{cleaned_text}\n```"
-
-            try:
-                resp = llm.invoke([
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_prompt}
-                ])
-                content = (resp.content or "").strip()
-                m = re.search(r"\{.*\}", content, re.S)  # JSON 객체만 추출
-                if not m:
-                    return None
-                obj = json.loads(m.group(0))
-
-                q = (obj.get("question") or "").strip()
-                opts = [str(o).strip() for o in (obj.get("options") or []) if str(o).strip()]
-                if not q or len(opts) != 4:
-                    return None
-
-                # 번호/머리글 정리
-                q = re.sub(r"^\s*(?:문제\s*)?\d{1,3}\s*[\).:]\s*", "", q).strip()
-                norm_opts = []
-                for o in opts:
-                    o = re.sub(r"^\s*(?:\(?[①-④1-4A-Da-d가-라]\)?[\).．\.]?)\s*", "", o).strip()
-                    norm_opts.append(o)
-
-                return {"question": q, "options": norm_opts}
-
-            except Exception as e:
-                print(f"⚠️ LLM 파싱 실패: {e}")
-                return None
-    
-
-        extracted: List[Dict[str, object]] = []
-
-        for p in paths:
-            try:
-                result = converter.convert(p)
-                doc = result.document
-            except Exception as e:
-                print(f"⚠️ 변환 실패: {p} - {e}")
-                continue
-
-            # 문서 전체 텍스트 추출
-            raw = ""
-            if hasattr(doc, "export_to_markdown"):
-                raw = doc.export_to_markdown()
-            elif hasattr(doc, "export_to_text"):
-                raw = doc.export_to_text()
-            raw = (raw or "").replace("\r\n", "\n")
-
-            # ✅ 문제 블록 분할 (빈 줄 2개 이상 기준 + 일부 헤더 제거)
-            blocks = self._split_problem_blocks(raw)
-            print(f"📦 {p} | 추정 문제 블록 수: {len(blocks)}")
-
-            for idx, block in enumerate(blocks, 1):
-                item = self._parse_block_with_llm(block, llm)
-                if item:
-                    extracted.append({
-                        "question": item["question"],
-                        "options": item["options"],
-                        "source": p,
-                        "block_index": idx
-                    })
-
-        if not extracted:
-            raise ValueError("문서에서 '문항 + 보기4'를 추출하지 못했습니다. LLM 파싱 규칙 또는 블록 분할 기준을 조정하세요.")
-
-        # ✅ 질문 텍스트 기준 중복 제거
-        seen, deduped = set(), []
-        for it in extracted:
-            key = re.sub(r"\s+", " ", it["question"]).strip()
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(it)
-
-        state["user_problems"] = [{"question": it["question"], "options": it["options"]} for it in deduped]
-        print(f"✅ 최종 추출 문항 수(보기 4개): {len(state['user_problems'])}")
-
-        saved_file = self.save_user_problems_to_json(state["user_problems"], "./teacher/agents/solution/user_problems_json.json")
-        print(f"💾 저장된 파일: {saved_file}")
-        
-        return state
-
     def _load_from_text(self, state: SolutionState) -> SolutionState:
         print("📝 [외부] 텍스트 입력 → 문항 파싱 시작")
         raw = (state.get("user_input_txt") or "").strip()
@@ -870,7 +646,8 @@ class SolutionAgent(BaseAgent):
                     metadata={
                         "options": json.dumps(state.get("user_problem_options", [])), 
                         "answer": state["generated_answer"],
-                        "explanation": state["generated_explanation"]
+                        "explanation": state["generated_explanation"],
+                        "subject": state["subject"],
                     }
                 )
                 vectorstore.add_documents([doc])

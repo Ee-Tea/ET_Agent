@@ -18,6 +18,9 @@ def load_questions_from_json(inputs):
         options = q.get("options", [])
         answer = q.get("answer", None)
         explanation = q.get("explanation", "")
+        subject = q.get("subject", "정보처리기사")  # 기본 과목 설정
+
+
 
         # 문장은 본문만 저장, 옵션은 metadata에 따로
         doc = Document(
@@ -25,7 +28,8 @@ def load_questions_from_json(inputs):
             metadata={
                 "options": json.dumps(options),
                 "answer": str(answer) if answer is not None else "",
-                "explanation": explanation.strip()
+                "explanation": explanation.strip(),
+                "subject": subject,
             }
         )
         docs.append(doc)

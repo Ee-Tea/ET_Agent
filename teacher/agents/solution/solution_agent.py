@@ -37,6 +37,8 @@ class SolutionState(TypedDict):
 
     generated_answer: str         # 해답
     generated_explanation: str   # 풀이
+    subject: str
+
     results: List[Dict]
     validated: bool
     retry_count: int             # 검증 실패 시 재시도 횟수
@@ -431,6 +433,7 @@ class SolutionAgent(BaseAgent):
             options = json.loads(metadata.get("options", "[]"))
             answer = metadata.get("answer", "")
             explanation = metadata.get("explanation", "")
+            subject = metadata.get("subject", "기타")
 
             formatted = f"""[유사문제 {i+1}]
                 문제: {doc.page_content}
@@ -438,6 +441,7 @@ class SolutionAgent(BaseAgent):
                 """ + "\n".join([f"{idx + 1}. {opt}" for idx, opt in enumerate(options)]) + f"""
                 정답: {answer}
                 풀이: {explanation}
+                과목: {subject}
                 """
             similar_questions.append(formatted)
         
@@ -469,10 +473,12 @@ class SolutionAgent(BaseAgent):
 
             1. 이 문제의 **정답**만 간결하게 한 문장으로 먼저 작성해 주세요.
             2. 이어서 그 정답인 근거를 담은 **풀이 과정**을 상세히 설명해 주세요.
+            3. 이 문제의 과목을 정보처리기사 과목 5개 중에서 가장 적합한 것으로 지정해 주세요. [소프트웨어 설계, 소프트웨어 개발, 데이터베이스 구축, 프로그래밍 언어 활용, 정보시스템 구축 관리]
 
             출력 형식:
             정답: ...
             풀이: ...
+            과목: ...
         """
 
         response = llm_gen.invoke(prompt)
@@ -481,8 +487,10 @@ class SolutionAgent(BaseAgent):
 
         answer_match = re.search(r"정답:\s*(.+)", result)
         explanation_match = re.search(r"풀이:\s*(.+)", result, re.DOTALL)
+        subject_match = re.search(r"과목:\s*(.+)", result)
         state["generated_answer"] = answer_match.group(1).strip() if answer_match else ""
         state["generated_explanation"] = explanation_match.group(1).strip() if explanation_match else ""
+        state["subject"] = subject_match.group(1).strip() if subject_match else "기타"
         state["chat_history"].append(f"Q: {state['user_input_txt']}\nP: {state['user_problem']}\nA: {state['generated_answer']}\nE: {state['generated_explanation']}")
 
         return state
@@ -502,8 +510,9 @@ class SolutionAgent(BaseAgent):
 
         생성된 정답: {state['generated_answer']}
         생성된 풀이: {state['generated_explanation']}
+        생성된 과목: {state['subject']}
 
-        생성된 해답과 풀이가 문제와 사용자 요구사항에 맞고, 논리적 오류나 잘못된 정보가 없습니까?
+        생성된 해답과 풀이, 과목이 문제와 사용자 요구사항에 맞고, 논리적 오류나 잘못된 정보가 없습니까?
         적절하다면 '네', 그렇지 않다면 '아니오'로만 답변하세요.
         """
 
@@ -599,6 +608,7 @@ class SolutionAgent(BaseAgent):
             "options": state["user_problem_options"],
             "generated_answer": state["generated_answer"],
             "generated_explanation": state["generated_explanation"],
+            "subject": state["subject"],
             "validated": state["validated"],
             "chat_history": state.get("chat_history", [])
         }
@@ -691,6 +701,7 @@ class SolutionAgent(BaseAgent):
 
             "generated_answer": "",
             "generated_explanation": "",
+            "subject": "",
             "validated": False,
             "retry_count": 0,
             "results": [],

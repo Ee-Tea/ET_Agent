@@ -1,0 +1,9 @@
+{
+  "mode": "partial_exam",
+  "difficulty": "중급",
+  "selected_subjects": ["소프트웨어설계", "데이터베이스구축", "프로그래밍언어활용"],
+  "questions_per_subject": 10,
+  "parallel_agents": 2,
+  "save_to_file": true,
+  "filename": "선택과목_30문제_테스트"
+}

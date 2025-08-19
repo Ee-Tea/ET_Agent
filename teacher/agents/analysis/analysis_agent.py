@@ -70,7 +70,7 @@ class AnalysisAgent(BaseAgent):
         return "학습자 답안을 분석하고 개인화된 피드백을 생성합니다"
     
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY=REDACTED = "meta-llama/llama-4-scout-17b-16e-instruct"  # 또는 "meta-llama/llama-3.1-8b-instant"
+        self.client = Groq(api_key=os.getenv("GROQ_API_KEY=REDACTED = "moonshotai/kimi-k2-instruct"
         self.graph = self._create_graph()
     
     def _create_graph(self) -> StateGraph:

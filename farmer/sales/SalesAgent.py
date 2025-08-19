@@ -352,11 +352,6 @@ def execute_milvus_search(query: str) -> list[str]:
         print(f"❌ Milvus 연결 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
 
-# 하이브리드 검색
-def hybrid_search(query, top_k=3):
-    """질문 분류에 따라 적절한 도구를 선택하여 검색을 수행합니다."""
-    return select_and_execute_tools(query)
-
 # Groq LLM
 class GroqLLM:
     def __init__(self, model="openai/gpt-oss-20b", api_key=None):
@@ -817,9 +812,8 @@ def node_reanalyze_graph(state: GraphState) -> GraphState:
             print(f"  - {issue}")
         print("위 문제점들을 해결하여 재분석합니다.")
     
-    results = hybrid_search(query, top_k=3)
-    state["context"] = results
-    return state
+    # node_collect_info_graph와 동일한 로직 사용
+    return node_collect_info_graph(state)
 
 def node_output_graph(state: GraphState) -> GraphState:
     if state["retry_count"] >= 2 and not state["is_recommend_ok"]:
@@ -901,7 +895,7 @@ if __name__ == "__main__":
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     except Exception as e:
         print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "감귤을 대구에서 팔고싶어"})
+    result_state = app.invoke({"query": "경주에서 배추를 팔고싶어"})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

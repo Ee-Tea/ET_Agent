@@ -8,21 +8,26 @@ from langgraph.graph import StateGraph, END
 from langchain_huggingface import HuggingFaceEmbeddings
 import json, re
 from langchain_openai import ChatOpenAI
-from ..base_agent import BaseAgent
+from teacher.base_agent import BaseAgent
 from docling.document_converter import DocumentConverter
 from datetime import datetime
+from teacher.agents.solution.ocr_simple import extract_mcq_from_image
+
 
 load_dotenv()
 GROQ_API_KEY=REDACTED("GROQ_API_KEY=REDACTED SolutionState(TypedDict):
-    user_question: str
+    # 입력
+    input_kind: Literal["file", "image", "text", "stm"]  # 입력 종류
+    user_input_txt: str
+    external_file_paths: List[str]
+    external_image_paths: List[str]
+    # 문제리스트, 문제, 보기
     user_problems: List[Dict]
     user_problem: str
     user_problem_options: List[str]
 
     source_type: Literal["internal", "external"]
-    # 내부/외부 원천
     short_term_memory: List[Dict]
-    external_file_paths: List[str] 
 
     vectorstore: Milvus
     retrieved_docs: List[Document]
@@ -66,7 +71,8 @@ class SolutionAgent(BaseAgent):
         graph.add_node("route", self._route)
         graph.add_node("load_from_short_term_memory", self._load_from_stm)
         graph.add_node("load_from_external_docs", self._load_from_external)
-
+        graph.add_node("load_from_images", self._load_from_images)   # NEW
+        graph.add_node("load_from_text", self._load_from_text)       # NEW
         # 공통 처리
         graph.add_node("search_similarity", self._search_similar_questions)
         graph.add_node("generate_solution", self._generate_solution)
@@ -76,11 +82,25 @@ class SolutionAgent(BaseAgent):
 
         graph.set_entry_point("route")
         graph.add_conditional_edges(
-            "route", 
-            lambda s: s["source_type"],
-            {"internal": "load_from_short_term_memory", "external": "load_from_external_docs"})
+            "route",
+            lambda s: (s.get("input_kind") or (
+                "file"  if s.get("external_file_paths") else
+                "image" if s.get("external_image_paths") else
+                "stm"   if s.get("short_term_memory") else
+                "text"
+            )),
+            {
+                "stm": "load_from_short_term_memory",
+                "file": "load_from_external_docs",
+                "image": "load_from_images",
+                "text": "load_from_text",
+            }
+        )
+        
         graph.add_edge("load_from_short_term_memory", "next_problem")
         graph.add_edge("load_from_external_docs", "next_problem")
+        graph.add_edge("load_from_images", "next_problem")   # NEW
+        graph.add_edge("load_from_text", "next_problem")     # NEW
 
         graph.add_edge("next_problem", "search_similarity")
         graph.add_edge("search_similarity", "generate_solution")
@@ -100,6 +120,23 @@ class SolutionAgent(BaseAgent):
         )
 
         return graph.compile()
+
+    def _chunk_text(self, s: str, max_chars: int = 6000) -> List[str]:
+        """길이 제한을 위해 줄 단위로 잘라 청크 목록 반환."""
+        s = re.sub(r"[ \t]+", " ", s)
+        chunks, buf = [], []
+        curr = 0
+        for ln in s.splitlines():
+            if curr + len(ln) + 1 > max_chars:
+                if buf:
+                    chunks.append("\n".join(buf))
+                buf, curr = [ln], len(ln) + 1
+            else:
+                buf.append(ln)
+                curr += len(ln) + 1
+        if buf:
+            chunks.append("\n".join(buf))
+        return chunks
     
     def _llm_extract_qas(self, text: str, llm) -> List[tuple]:
         """
@@ -177,12 +214,53 @@ class SolutionAgent(BaseAgent):
 
         return cleaned_blocks
 
+    def _ocr_image_to_text(self, image_path: str) -> str:
+        """
+        1순위: pytesseract (로컬)
+        2순위: Google Vision API (설정돼 있으면)
+        둘 다 실패하면 빈 문자열
+        """
+        # pytesseract
+        try:
+            import pytesseract
+            from PIL import Image
+            try:
+                _ = pytesseract.get_tesseract_version()
+            except Exception:
+                print("⚠️ Tesseract 엔진이 설치되어 있지 않거나 경로가 설정되지 않았습니다.")
+            img = Image.open(image_path)
+            text = pytesseract.image_to_string(img, lang="kor+eng", config="--psm 6")
+            if text and text.strip():
+                return text
+        except Exception as e:
+            print(f"⚠️ pytesseract OCR 실패: {e}")
+
+        # Google Vision API (선택)
+        try:
+            from google.cloud import vision
+            client = vision.ImageAnnotatorClient()
+            with open(image_path, "rb") as f:
+                content = f.read()
+            image = vision.Image(content=content)
+            response = client.text_detection(image=image)
+            if response.error.message:
+                print(f"⚠️ Vision API 오류: {response.error.message}")
+                return ""
+            annotations = response.text_annotations
+            if annotations:
+                return annotations[0].description
+        except Exception as e:
+            print(f"⚠️ Google Vision OCR 실패 또는 미구성: {e}")
+
+        return ""
+
+
+    #----------------------------------------nodes------------------------------------------------------
+
     
     # --------- 분기 ----------
     def _route(self, state: SolutionState) -> SolutionState:
-        # 오케스트레이터가 채워준 source_type을 그대로 사용
-        st = state["source_type"]
-        print(f"🧭 분기: {st}")
+        print(f"🧭 분기: input_kind={state.get('input_kind')} | source_type={state.get('source_type')}")
         return state
 
     # --------- 내부: STM에서 문제 1개 꺼내와 state에 세팅 ----------
@@ -212,60 +290,6 @@ class SolutionAgent(BaseAgent):
             temperature=0
         )
 
-        # ----- 블록 1개를 LLM으로 파싱하는 내부 함수 -----
-        def parse_block_with_llm(block_text: str) -> Optional[Dict[str, object]]:
-            # 노이즈 제거 (정답/해설 라인)
-            cleaned = []
-            for ln in block_text.splitlines():
-                if re.search(r"(정답|해설|답안|풀이|answer|solution)\s*[:：]", ln, re.I):
-                    continue
-                cleaned.append(ln)
-            cleaned_text = "\n".join(cleaned).strip()
-
-            if len(cleaned_text) < 5:
-                return None
-
-            sys_prompt = (
-                "너는 시험 블록 텍스트를 정확히 구조화하는 도우미다. "
-                "입력 블록에는 '한 문제'가 들어있다. "
-                "출력은 반드시 JSON 하나의 객체로만 하며, 다음 스키마를 지켜라:\n"
-                '{"question": "<질문 본문(번호/머리글 제거)>", "options": ["<보기1>","<보기2>","<보기3>","<보기4>"]}\n'
-                "주의사항:\n"
-                "- 반드시 options는 정확히 4개여야 한다.\n"
-                "- 입력 블록에 있는 보기 텍스트만 사용하고 새로 만들지 마라.\n"
-                "- 불필요한 설명/정답/해설/코드블록/문자열은 출력하지 마라. JSON만 출력하라."
-            )
-            user_prompt = f"다음 블록을 구조화하라:\n```\n{cleaned_text}\n```"
-
-            try:
-                resp = llm.invoke([
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_prompt}
-                ])
-                content = (resp.content or "").strip()
-                m = re.search(r"\{.*\}", content, re.S)  # JSON 객체만 추출
-                if not m:
-                    return None
-                obj = json.loads(m.group(0))
-
-                q = (obj.get("question") or "").strip()
-                opts = [str(o).strip() for o in (obj.get("options") or []) if str(o).strip()]
-                if not q or len(opts) != 4:
-                    return None
-
-                # 번호/머리글 정리
-                q = re.sub(r"^\s*(?:문제\s*)?\d{1,3}\s*[\).:]\s*", "", q).strip()
-                norm_opts = []
-                for o in opts:
-                    o = re.sub(r"^\s*(?:\(?[①-④1-4A-Da-d가-라]\)?[\).．\.]?)\s*", "", o).strip()
-                    norm_opts.append(o)
-
-                return {"question": q, "options": norm_opts}
-
-            except Exception as e:
-                print(f"⚠️ LLM 파싱 실패: {e}")
-                return None
-
         extracted: List[Dict[str, object]] = []
 
         for p in paths:
@@ -289,7 +313,7 @@ class SolutionAgent(BaseAgent):
             print(f"📦 {p} | 추정 문제 블록 수: {len(blocks)}")
 
             for idx, block in enumerate(blocks, 1):
-                item = parse_block_with_llm(block)
+                item = self._parse_block_with_llm(block, llm)
                 if item:
                     extracted.append({
                         "question": item["question"],
@@ -313,8 +337,75 @@ class SolutionAgent(BaseAgent):
         state["user_problems"] = [{"question": it["question"], "options": it["options"]} for it in deduped]
         print(f"✅ 최종 추출 문항 수(보기 4개): {len(state['user_problems'])}")
 
-        saved_file = self.save_user_problems_to_json(state["user_problems"], "user_problems_json.json")
+        saved_file = self.save_user_problems_to_json(state["user_problems"], "./teacher/agents/solution/user_problems_json.json")
         print(f"💾 저장된 파일: {saved_file}")
+        
+        return state
+
+    def _load_from_text(self, state: SolutionState) -> SolutionState:
+        print("📝 [내부] 텍스트 입력 → 문항 파싱 시작")
+        raw = (state.get("user_input_txt") or "").strip()
+
+        if not raw:
+            raise ValueError("텍스트 입력이 비었습니다. user_input_txt을 확인하세요.")
+
+        # LLM으로 먼저 시도 (여러 문항 포함 가능)
+        llm = ChatOpenAI(
+            api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            temperature=0
+        )
+
+        qas = self._llm_extract_qas(raw, llm)  # -> List[(q, options)]
+        problems = []
+        if qas:
+            for q, opts in qas:
+                # 옵션 0~4개 가능. 4개 아니어도 통과(텍스트 입력은 그대로 프롬프트에 들어갈 수 있게)
+                problems.append({"question": q, "options": opts[:4]})
+        else:
+            # LLM 실패하면 단일 문항으로 처리
+            problems = [{"question": raw, "options": []}]
+
+        state["user_problems"] = problems
+        saved_file = self.save_user_problems_to_json(state["user_problems"], "user_problems_from_text.json")
+        print(f"✅ 텍스트 문항 구성 완료: {len(state['user_problems'])}개 | 저장: {saved_file}")
+        return state
+
+
+    def _load_from_images(self, state: SolutionState) -> SolutionState:
+        print("🖼️ [외부] 이미지 → OCR → 문항 파싱 (심플)")
+        paths = state.get("external_image_paths", []) or []
+        if not paths:
+            raise ValueError("external_image_paths 가 비어있습니다.")
+
+        all_items = []
+        for p in paths:
+            items = extract_mcq_from_image(
+                p,
+                lang="kor+eng",   # 한/영 혼용 권장
+                psm="6",          # 문단/한 줄 위주. 필요 시 "4" 또는 "11"도 시도 가능
+                oem="3",
+                tesseract_cmd=os.getenv("TESSERACT_CMD"),  # 없으면 시스템 PATH 사용
+                scale=1.6,
+                binarize=True,
+            )
+            print(f" - {os.path.basename(p)}: {len(items)}문항 감지")
+            all_items.extend(items)
+
+        if not all_items:
+            raise ValueError("이미지에서 문항(질문+보기4)을 찾지 못했습니다.")
+
+        # 중복 제거(질문 텍스트 기준)
+        seen, user_problems = set(), []
+        for it in all_items:
+            key = re.sub(r"\s+", " ", it["question"]).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            user_problems.append({"question": it["question"], "options": it["options"]})
+
+        state["user_problems"] = user_problems
+        print(f"✅ 이미지 문항 추출 완료: {len(user_problems)}개")
         return state
 
 
@@ -336,6 +427,54 @@ class SolutionAgent(BaseAgent):
                 clean_opts = [re.sub(r"^\(?\d+\)?[).]\s*", "", o) for o in opts]
                 results.append((qtext, clean_opts))
         return results
+
+    def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict[str, object]]:
+        # (기존 _load_from_external 내부 함수였던 내용을 그대로 이동)
+        cleaned = []
+        for ln in block_text.splitlines():
+            if re.search(r"(정답|해설|답안|풀이|answer|solution)\s*[:：]", ln, re.I):
+                continue
+            cleaned.append(ln)
+        cleaned_text = "\n".join(cleaned).strip()
+        if len(cleaned_text) < 5:
+            return None
+
+        sys_prompt = (
+            "너는 시험 블록 텍스트를 정확히 구조화하는 도우미다. "
+            "입력 블록에는 '한 문제'가 들어있다. "
+            '출력은 반드시 JSON 하나의 객체로만 하며, 다음 스키마를 지켜라:\n'
+            '{"question": "<질문 본문(번호/머리글 제거)>", "options": ["<보기1>","<보기2>","<보기3>","<보기4>"]}\n'
+            "주의사항:\n"
+            "- 반드시 options는 정확히 4개여야 한다.\n"
+            "- 입력 블록에 있는 보기 텍스트만 사용하고 새로 만들지 마라.\n"
+            "- 불필요한 설명/정답/해설/코드블록/문자열은 출력하지 마라. JSON만 출력하라."
+        )
+        user_prompt = f"다음 블록을 구조화하라:\n```\n{cleaned_text}\n```"
+
+        try:
+            resp = llm.invoke([
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt}
+            ])
+            content = (resp.content or "").strip()
+            m = re.search(r"\{.*\}", content, re.S)
+            if not m:
+                return None
+            obj = json.loads(m.group(0))
+            q = (obj.get("question") or "").strip()
+            opts = [str(o).strip() for o in (obj.get("options") or []) if str(o).strip()]
+            if not q or len(opts) != 4:
+                return None
+            q = re.sub(r"^\s*(?:문제\s*)?\d{1,3}\s*[\).:]\s*", "", q).strip()
+            norm_opts = []
+            for o in opts:
+                o = re.sub(r"^\s*(?:\(?[①-④1-4A-Da-d가-라]\)?[\).．\.]?)\s*", "", o).strip()
+                norm_opts.append(o)
+            return {"question": q, "options": norm_opts}
+        except Exception as e:
+            print(f"⚠️ LLM 파싱 실패: {e}")
+            return None
+
 
 
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
@@ -380,7 +519,7 @@ class SolutionAgent(BaseAgent):
 
         prompt = f"""
             사용자가 입력한 질문:
-            {state['user_question']}
+            {state['user_input_txt']}
             다음은 사용자가 입력한 문제:
             {state['user_problem']}
             {state['user_problem_options']}
@@ -404,7 +543,7 @@ class SolutionAgent(BaseAgent):
         explanation_match = re.search(r"풀이:\s*(.+)", result, re.DOTALL)
         state["generated_answer"] = answer_match.group(1).strip() if answer_match else ""
         state["generated_explanation"] = explanation_match.group(1).strip() if explanation_match else ""
-        state["chat_history"].append(f"Q: {state['user_question']}\nP: {state['user_problem']}\nA: {state['generated_answer']}\nE: {state['generated_explanation']}")
+        state["chat_history"].append(f"Q: {state['user_input_txt']}\nP: {state['user_problem']}\nA: {state['generated_answer']}\nE: {state['generated_explanation']}")
 
         return state
 
@@ -420,7 +559,7 @@ class SolutionAgent(BaseAgent):
         )
 
         validation_prompt = f"""
-        사용자 요구사항: {state['user_question']}
+        사용자 요구사항: {state['user_input_txt']}
 
         문제 질문: {state['user_problem']}
         문제 보기: {state['user_problem_options']}
@@ -551,11 +690,14 @@ class SolutionAgent(BaseAgent):
 
     def execute(
             self, 
-            user_question: str, 
+            user_input_txt: str, 
             source_type: Literal["internal", "external"],
+            input_kind: Optional[Literal["file", "image", "text", "stm"]] = None,
+            external_image_paths: Optional[List[str]] = None,
             vectorstore: Optional[Milvus] = None,
             short_term_memory: Optional[List[Dict]] = None,
             external_file_paths: Optional[List[str]] = None,
+
             exam_title: str = "정보처리기사 모의고사 (Groq 순차 버전)",
             difficulty: str = "중급",
             subject: str = "기타",
@@ -580,13 +722,27 @@ class SolutionAgent(BaseAgent):
                 connection_args={"host": "localhost", "port": "19530"}
             )
         
+        inferred_input = input_kind
+        if not inferred_input:
+            if external_file_paths:
+                inferred_input = "file"
+            elif external_image_paths:
+                inferred_input = "image"
+            elif short_term_memory:
+                inferred_input = "stm"
+            else:
+                inferred_input = "text"  # 파일/이미지/STM 없으면 텍스트로 간주
+
         initial_state: SolutionState = {
-            "user_question": user_question,
+            "user_input_txt": user_input_txt,
+            "source_type": source_type,
+            "input_kind": inferred_input,
+            "external_image_paths": external_image_paths or [],
+
             "user_problems": [], 
             "user_problem": "",
             "user_problem_options": [],
 
-            "source_type": source_type,
             "short_term_memory": short_term_memory or [],
             "external_file_paths": external_file_paths or [],
 
@@ -609,6 +765,16 @@ class SolutionAgent(BaseAgent):
         
         final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
         
+        # 그래프 시각화
+        try:
+            graph_image_path = "agent_workflow.png"
+            with open(graph_image_path, "wb") as f:
+                f.write(agent.graph.get_graph().draw_mermaid_png())
+            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+        except Exception as e:
+            print(f"그래프 시각화 중 오류 발생: {e}")
+            print("워크플로우는 정상적으로 작동합니다.")
+
         # 결과 확인 및 디버깅
         results = final_state.get("results", [])
         print(f"\n🎯 최종 실행 결과:")
@@ -623,7 +789,7 @@ class SolutionAgent(BaseAgent):
             print("   ⚠️ results가 비어있습니다!")
             print(f"   - final_state 내용: {final_state}")
         
-        return results
+        return final_state
 
     def save_user_problems_to_json(self, user_problems: List[Dict], filename: str = None) -> str:
         """
@@ -680,7 +846,7 @@ if __name__ == "__main__":
 
     agent = SolutionAgent()
 
-    # 그래프 시각화
+    # 그래프 시각화 (선택)
     try:
         graph_image_path = "agent_workflow.png"
         with open(graph_image_path, "wb") as f:
@@ -691,18 +857,26 @@ if __name__ == "__main__":
         print("워크플로우는 정상적으로 작동합니다.")
 
     # ✅ 사용자 질문 입력
-    user_question = input("\n❓ 사용자 질문을 입력하세요 : ").strip()
-    
-    results = agent.execute(user_question, "external", vectorstore, external_file_paths=["./user_problems.pdf"])
+    user_input_txt = input("\n❓ 사용자 질문을 입력하세요 : ").strip()
+
+    # ✅ (수정) 키워드 인자 + input_kind 명시
+    final_state = agent.execute(
+        user_input_txt=user_input_txt,
+        source_type="external",
+        input_kind="image",
+        vectorstore=vectorstore,
+        external_image_paths=["./teacher/agents/solution/user_problems.png"],
+    )
 
     # 결과를 JSON 파일로 저장
+    results = final_state.get("results", [])
     results_data = {
         "timestamp": datetime.now().isoformat(),
-        "user_question": user_question,
+        "user_input_txt": user_input_txt,
         "total_results": len(results),
         "results": results
     }
-    
+
     results_filename = f"solution_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(results_filename, "w", encoding="utf-8") as f:
         json.dump(results_data, f, ensure_ascii=False, indent=2)

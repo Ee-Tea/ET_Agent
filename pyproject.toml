@@ -39,6 +39,7 @@ dependencies = [
     "groq>=0.31.0",
     "docling>=2.43.0",
     "protobuf==5.27.2",
+    "huggingface-hub[hf-xet]>=0.34.4",
 ]
 
 [build-system]

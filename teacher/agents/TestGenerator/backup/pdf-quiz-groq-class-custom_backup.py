@@ -154,7 +154,7 @@ class BaseAgent(ABC):
         pass
     
     @abstractmethod
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """에이전트의 주된 로직을 실행하는 메서드입니다."""
         pass
 
@@ -222,7 +222,7 @@ class InfoProcessingExamAgent(BaseAgent):
         """에이전트의 역할에 대한 설명을 반환합니다."""
         return "정보처리기사 출제기준에 맞는 25문제를 자동으로 생성하는 에이전트입니다. PDF 문서를 기반으로 5개 과목별로 문제를 생성하며, LLM을 활용하여 학습자의 취약점을 자동 분석하고 맞춤형 문제를 생성합니다."
 
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         에이전트의 주된 로직을 실행하는 메서드입니다.
         

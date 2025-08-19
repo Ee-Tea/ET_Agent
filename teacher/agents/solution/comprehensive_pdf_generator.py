@@ -158,7 +158,7 @@ class ComprehensivePDFGenerator:
                 print(f"[DEBUG] 보기 {idx}: {options}")
                 
                 for i, option in enumerate(options, 1):
-                    option_text = f"{i}. {str(option).strip()}"
+                    option_text = f"{i}) {str(option).strip()}"
                     story.append(Paragraph(option_text, self.styles["option"]))
                 
                 story.append(Spacer(1, 5*mm))

@@ -66,7 +66,7 @@ class ScoreEngine(BaseAgent):
         return "사용자 답안과 정답을 단순 비교하여 채점, JSON 결과를 반환합니다."
 
     # --------- 실행 메서드 ---------
-    def execute(self, data: Dict[str, Any]) -> ScoreResult:
+    def invoke(self, data: Dict[str, Any]) -> ScoreResult:
         """
         기대 입력:
           {

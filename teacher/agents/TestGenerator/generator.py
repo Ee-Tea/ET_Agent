@@ -24,9 +24,16 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from base_agent import BaseAgent
 
-# Groq 관련 임포트
-from langchain_groq import ChatGroq
+# OpenAI 관련 임포트
+from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 
 # .env 파일 로드
 load_dotenv()
@@ -97,9 +104,9 @@ class InfoProcessingExamAgent(BaseAgent):
         os.makedirs(self.data_folder, exist_ok=True)
 
         if groq_api_key:
-            os.environ["GROQ_API_KEY"] = groq_api_key
-        elif not os.getenv("GROQ_API_KEY"):
-            raise ValueError("Groq API 키가 필요합니다.")
+            os.environ["OPENAI_API_KEY"] = groq_api_key
+        elif not os.getenv("OPENAI_API_KEY"):
+            raise ValueError("OpenAI API 키가 필요합니다.")
 
         self.embeddings_model = None
         self.llm = None
@@ -120,7 +127,7 @@ class InfoProcessingExamAgent(BaseAgent):
     def description(self) -> str:
         return "정보처리기사 5과목 기준으로 문제를 생성/검증하여 100문제(또는 과목별 지정 수)를 자동 생성합니다."
 
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Args (확장):
           - mode: "full_exam" | "subject_quiz" | "partial_exam"
@@ -224,12 +231,14 @@ class InfoProcessingExamAgent(BaseAgent):
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )
-            self.llm = ChatGroq(
-                model="moonshotai/kimi-k2-instruct",
-                temperature=0.0,
-                max_tokens=2048,
-                timeout=120,
-                max_retries=3
+            self.llm = ChatOpenAI(
+                model=OPENAI_LLM_MODEL,
+                temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_TOKENS,
+                timeout=LLM_TIMEOUT,
+                max_retries=LLM_MAX_RETRIES,
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+                api_key=os.getenv("OPENAI_API_KEY")
             )
             _ = self.llm.invoke("ping")
         except Exception as e:

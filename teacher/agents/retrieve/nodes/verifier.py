@@ -1,15 +1,28 @@
 import os
-from dotenv import load_dotenv
-from openai import OpenAI
 import json
 import re
-
-# 1. 환경 변수 로드
+from typing import Dict, Any, List, Optional
+from dotenv import load_dotenv
 load_dotenv()
-groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQAI_API_KEY")
-if not groq_api_key:
-  raise ValueError("GROQ_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
-client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
+
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+  raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
+client = ChatOpenAI(
+    model=OPENAI_LLM_MODEL,
+    temperature=LLM_TEMPERATURE,
+    max_tokens=LLM_MAX_TOKENS,
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+    api_key=openai_api_key,
+)
 
 def parse_llama_json(result: str) -> dict:
   """
@@ -41,56 +54,41 @@ def parse_llama_json(result: str) -> dict:
       print("→ 원본:", repr(json_match.group()))
       return {}
 
-def fact_check_with_context(question:str, context: str, answer: str) -> dict:
+def fact_check(state: dict) -> dict:
     """
-    LLM으로 답변 검증 → 출력만 Guardrails로 파싱
-
-    Args:
-        context (str): LLM이 참고한 컨텍스트
-        answer (str): LLM이 생성한 응답
-
-    Returns:
-        dict: {"verdict": ..., "confidence": ..., "evidence": [...]}
+    LLM 응답을 사실 검증합니다.
     """
+    question = state["retrieval_question"]
+    answer = state["answer"]
+    context = state["merged_context"]
+
     prompt = f"""
-    다음은 사용자의 질문에 대한 LLM 응답입니다. 
-    이 응답이 주어진 문맥(Context)에 기반하여 사실인지 검토하고 그것이 사용자의 질문에 맞는 응답인지 판단하세요.
-    
-    # Question:
-    {question}
+    다음 질문과 답변을 주어진 문맥을 바탕으로 사실 검증해주세요.
 
-    # Context:
-    {context}
+    질문: {question}
+    답변: {answer}
+    문맥: {context}
 
-    # Answer:
-    {answer}
-
-    아래 형식으로 JSON으로 출력하세요:
+    다음 JSON 형식으로만 출력하세요:
     {{
-    "verdict": "SUPPORTED" | "REFUTED" | "NOT ENOUGH INFO",
-    "confidence": 0~1 사이의 점수 (float),
-    "evidence": ["해당 판단을 뒷받침하는 문장들"]
+        "verdict": "SUPPORTS" | "REFUTES" | "NOT ENOUGH INFO",
+        "confidence": 0.0-1.0,
+        "reasoning": "판단 근거"
     }}
     """
 
-    try:
-        # LLM 호출
-        response = client.chat.completions.create(
-            model="moonshotai/kimi-k2-instruct",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-        )
-
-        raw_output = response.choices[0].message.content.strip()
-
-        # Guardrails로 출력 파싱 및 검증
-        validated = parse_llama_json(raw_output)
-        return validated
-
-    except Exception as e:
+    # LLM 호출
+    response = client.invoke([HumanMessage(content=prompt)])
+    raw_output = response.content
+    
+    # JSON 파싱
+    validated = parse_llama_json(raw_output)
+    
+    if not validated:
         return {
             "verdict": "NOT ENOUGH INFO",
             "confidence": 0.0,
-            "evidence": [],
-            "error": str(e)
+            "reasoning": "LLM 응답을 파싱할 수 없음"
         }
+    
+    return validated

@@ -2,15 +2,24 @@
 # uv run teacher/teacher_graph.py
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import os
 from typing import Dict, Any, List, Optional, Tuple
 from copy import deepcopy
-
 from dotenv import load_dotenv
+load_dotenv()
+
 from langsmith import traceable
 from langgraph.graph import START, END, StateGraph
 from langchain_core.runnables import RunnableLambda
 from typing_extensions import TypedDict, NotRequired
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 경로는 실제 프로젝트 구조에 맞게 하나만 활성화하세요.
@@ -166,10 +175,21 @@ class Orchestrator:
         if not os.getenv("LANGCHAIN_API_KEY"):
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
         # TTL/길이 제한은 redis_memory.py에서 설정
-        self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
+        try:
+            # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
+            os.environ['REDIS_PORT'] = '6380'
+            self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
+        except Exception as e:
+            print(f"⚠️ Redis 연결 실패: {e}")
+            print("📝 메모리 기반으로 실행합니다.")
+            # 간단한 메모리 기반 메모리 클래스
+            class SimpleMemory:
+                def load(self, state): return state
+                def save(self, state, _): return state
+            self.memory = SimpleMemory()
         
         # PDF 전처리기 초기화
-        from .pdf_preprocessor import PDFPreprocessor
+        from pdf_preprocessor import PDFPreprocessor
         self.pdf_preprocessor = PDFPreprocessor()
         
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
@@ -242,7 +262,7 @@ class Orchestrator:
             return None
 
         # PDF 전처리 모듈 import (편의 함수들)
-        from .pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
+        from pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
 
         # PDF 경로 추출 및 artifacts 업데이트
         extracted_pdfs = extract_pdf_paths(uq)
@@ -490,81 +510,70 @@ class Orchestrator:
         generated_answers = []
         generated_explanations = []
         
-        # 모든 문제를 한 번에 solution_agent에 전달
+        # 각 문제를 개별적으로 solution_agent에 전달
         all_user_problems = []
         for question, options in zip(pdf_questions, pdf_options):
             if isinstance(options, str):
                 options = [x.strip() for x in options.splitlines() if x.strip()] or [options.strip()]
             all_user_problems.append({"question": question, "options": options})
         
-        print(f"📝 [Solution] 총 {len(all_user_problems)}개 문제를 한 번에 처리 중...")
+        print(f"📝 [Solution] 총 {len(all_user_problems)}개 문제를 개별적으로 처리 중...")
         
         try:
-            # solution_agent에 필요한 state 전달 (모든 문제를 한 번에)
-            agent_input_state = {
-                "user_input_txt": state.get("user_query", ""),
-                "user_problems": all_user_problems,
-                "user_problem": all_user_problems[0]["question"] if all_user_problems else "",
-                "user_problem_options": all_user_problems[0]["options"] if all_user_problems else [],
-                "source_type": "external",  # PDF 데이터이므로 external
-                "input_kind": "file",
-                "external_file_paths": [],
-                "short_term_memory": [],
-                "vectorstore": None,
-                "retrieved_docs": [],
-                "similar_questions_text": "",
-                "generated_answer": "",
-                "generated_explanation": "",
-                "results": [],
-                "validated": False,
-                "retry_count": 0,
-                "exam_title": "정보처리기사 모의고사",
-                "difficulty": "중급",
-                "subject": "기타",
-                "chat_history": []
-            }
+            # 각 문제를 개별적으로 처리
+            for i, problem_data in enumerate(all_user_problems):
+                print(f"🔄 [Solution] 문제 {i+1}/{len(all_user_problems)} 처리 중...")
+                
+                agent_input_state = {
+                    "user_input_txt": state.get("user_query", ""),
+                    "user_problems": [problem_data],  # 한 번에 하나씩만 전달
+                    "user_problem": problem_data["question"],
+                    "user_problem_options": problem_data["options"],
+                    "source_type": "external",  # PDF 데이터이므로 external
+                    "input_kind": "file",
+                }
+                
+                # subgraph로 실행
+                agent_result = agent.invoke(agent_input_state)
             
-            # subgraph로 실행
-            agent_result = agent.invoke(agent_input_state)
-            
-            if agent_result:
-                # results 배열에서 모든 문제의 답과 해설을 추출
-                if "results" in agent_result and agent_result["results"]:
-                    results = agent_result["results"]
-                    print(f"📊 [Solution] {len(results)}개 문제 결과 수신")
-                    
-                    for i, result in enumerate(results):
-                        answer = result.get("generated_answer", "")
-                        explanation = result.get("generated_explanation", "")
-                        
-                        if answer:
+                if agent_result:
+                    # results 배열에서 문제의 답과 해설을 추출
+                    if "results" in agent_result and agent_result["results"]:
+                        results = agent_result["results"]
+                        if results:  # 결과가 있으면
+                            result = results[0]  # 첫 번째(유일한) 결과
+                            answer = result.get("generated_answer", "")
+                            explanation = result.get("generated_explanation", "")
+                            
                             generated_answers.append(answer)
+                            generated_explanations.append(explanation)
+                            
+                            print(f"   - 문제 {i+1}: 답안 {'✅' if answer else '❌'}, 해설 {'✅' if explanation else '❌'}")
+                        else:
+                            print(f"   - 문제 {i+1}: 결과 없음")
+                            generated_answers.append("")
+                            generated_explanations.append("")
+                    
+                    # results가 없거나 비어있으면 기존 방식으로 처리 (호환성)
+                    elif "generated_answer" in agent_result or "generated_explanation" in agent_result:
+                        print(f"   - 문제 {i+1}: 기존 방식으로 처리")
+                        if "generated_answer" in agent_result:
+                            generated_answers.append(agent_result["generated_answer"])
                         else:
                             generated_answers.append("")
                             
-                        if explanation:
-                            generated_explanations.append(explanation)
+                        if "generated_explanation" in agent_result:
+                            generated_explanations.append(agent_result["generated_explanation"])
                         else:
                             generated_explanations.append("")
-                        
-                        print(f"   - 문제 {i+1}: 답안 {'✅' if answer else '❌'}, 해설 {'✅' if explanation else '❌'}")
-                
-                # results가 없거나 비어있으면 기존 방식으로 처리 (호환성)
-                elif "generated_answer" in agent_result or "generated_explanation" in agent_result:
-                    print("⚠️ [Solution] results 배열이 비어있어 기존 방식으로 처리")
-                    if "generated_answer" in agent_result:
-                        generated_answers.append(agent_result["generated_answer"])
+                    
+                    # 아무것도 없으면 빈 값으로 채움
                     else:
+                        print(f"   - 문제 {i+1}: 결과 없음, 빈 값으로 처리")
                         generated_answers.append("")
-                        
-                    if "generated_explanation" in agent_result:
-                        generated_explanations.append(agent_result["generated_explanation"])
-                    else:
                         generated_explanations.append("")
-                
-                # 아무것도 없으면 빈 값으로 채움
                 else:
-                    print("⚠️ [Solution] 결과가 없어 빈 값으로 처리")
+                    print(f"   - 문제 {i+1}: agent_result가 None")
                     generated_answers.append("")
                     generated_explanations.append("")
             
@@ -684,40 +693,136 @@ class Orchestrator:
                 # 생성된 문제를 shared state에 추가
                 shared = new_state["shared"]
                 
-                if "questions" in agent_result:
-                    questions = agent_result["questions"]
-                    shared.setdefault("question", [])
-                    shared["question"].extend(questions)
-                    print(f"📝 [Generator] {len(questions)}개 문제 추가")
-                
-                if "options" in agent_result:
-                    options = agent_result["options"]
-                    shared.setdefault("options", [])
-                    shared["options"].extend(options)
-                    print(f"📝 [Generator] {len(options)}개 보기 추가")
-                
-                if "answers" in agent_result:
-                    answers = agent_result["answers"]
-                    shared.setdefault("answer", [])
-                    shared["answer"].extend(answers)
-                    print(f"📝 [Generator] {len(answers)}개 정답 추가")
-                
-                if "explanations" in agent_result:
-                    explanations = agent_result["explanations"]
-                    shared.setdefault("explanation", [])
-                    shared["explanation"].extend(explanations)
-                    print(f"📝 [Generator] {len(explanations)}개 해설 추가")
-                
-                # 과목 정보 추가
-                if "subjects" in agent_result:
-                    subjects = agent_result["subjects"]
-                    shared.setdefault("subject", [])
-                    shared["subject"].extend(subjects)
-                
-                # generation state에 결과 저장
-                new_state["generation"].update(agent_result)
-                
-                print(f"✅ [Generator] 문제 생성 완료: 총 {len(shared.get('question', []))}개 문제")
+                # agent_result의 구조: {"success": True, "result": {...}}
+                if agent_result.get("success") and "result" in agent_result:
+                    result = agent_result["result"]
+                    
+                    # full_exam 모드: result.all_questions에서 추출
+                    if "all_questions" in result:
+                        questions = []
+                        options = []
+                        answers = []
+                        explanations = []
+                        subjects = []
+                        
+                        for q in result["all_questions"]:
+                            if isinstance(q, dict):
+                                questions.append(q.get("question", ""))
+                                options.append(q.get("options", []))
+                                answers.append(q.get("answer", ""))
+                                explanations.append(q.get("explanation", ""))
+                                subjects.append(q.get("subject", ""))
+                        
+                        if questions:
+                            shared.setdefault("question", [])
+                            shared["question"].extend(questions)
+                            print(f"📝 [Generator] {len(questions)}개 문제 추가")
+                        
+                        if options:
+                            shared.setdefault("options", [])
+                            shared["options"].extend(options)
+                            print(f"📝 [Generator] {len(options)}개 보기 추가")
+                        
+                        if answers:
+                            shared.setdefault("answer", [])
+                            shared["answer"].extend(answers)
+                            print(f"📝 [Generator] {len(answers)}개 정답 추가")
+                        
+                        if explanations:
+                            shared.setdefault("explanation", [])
+                            shared["explanation"].extend(explanations)
+                            print(f"📝 [Generator] {len(explanations)}개 해설 추가")
+                        
+                        if subjects:
+                            shared.setdefault("subject", [])
+                            shared["subject"].extend(subjects)
+                    
+                    # subject_quiz 모드: result.questions에서 추출
+                    elif "questions" in result:
+                        questions = []
+                        options = []
+                        answers = []
+                        explanations = []
+                        subjects = []
+                        
+                        for q in result["questions"]:
+                            if isinstance(q, dict):
+                                questions.append(q.get("question", ""))
+                                options.append(q.get("options", []))
+                                answers.append(q.get("answer", ""))
+                                explanations.append(q.get("explanation", ""))
+                                subjects.append(q.get("subject", result.get("subject_area", "")))
+                        
+                        if questions:
+                            shared.setdefault("question", [])
+                            shared["question"].extend(questions)
+                            print(f"📝 [Generator] {len(questions)}개 문제 추가")
+                        
+                        if options:
+                            shared.setdefault("options", [])
+                            shared["options"].extend(options)
+                            print(f"📝 [Generator] {len(options)}개 보기 추가")
+                        
+                        if answers:
+                            shared.setdefault("answer", [])
+                            shared["answer"].extend(answers)
+                            print(f"📝 [Generator] {len(answers)}개 정답 추가")
+                        
+                        if explanations:
+                            shared.setdefault("explanation", [])
+                            shared["explanation"].extend(explanations)
+                            print(f"📝 [Generator] {len(explanations)}개 해설 추가")
+                        
+                        if subjects:
+                            shared.setdefault("subject", [])
+                            shared["subject"].extend(subjects)
+                    
+                    # partial_exam 모드: result.all_questions에서 추출
+                    elif "all_questions" in result:
+                        questions = []
+                        options = []
+                        answers = []
+                        explanations = []
+                        subjects = []
+                        
+                        for q in result["all_questions"]:
+                            if isinstance(q, dict):
+                                questions.append(q.get("question", ""))
+                                options.append(q.get("options", []))
+                                answers.append(q.get("answer", ""))
+                                explanations.append(q.get("explanation", ""))
+                                subjects.append(q.get("subject", ""))
+                        
+                        if questions:
+                            shared.setdefault("question", [])
+                            shared["question"].extend(questions)
+                            print(f"📝 [Generator] {len(questions)}개 문제 추가")
+                        
+                        if options:
+                            shared.setdefault("options", [])
+                            shared["options"].extend(options)
+                            print(f"📝 [Generator] {len(options)}개 보기 추가")
+                        
+                        if answers:
+                            shared.setdefault("answer", [])
+                            shared["answer"].extend(answers)
+                            print(f"📝 [Generator] {len(answers)}개 정답 추가")
+                        
+                        if explanations:
+                            shared.setdefault("explanation", [])
+                            shared["explanation"].extend(explanations)
+                            print(f"📝 [Generator] {len(explanations)}개 해설 추가")
+                        
+                        if subjects:
+                            shared.setdefault("subject", [])
+                            shared["subject"].extend(subjects)
+                    
+                    # generation state에 결과 저장
+                    new_state["generation"].update(agent_result)
+                    
+                    print(f"✅ [Generator] 문제 생성 완료: 총 {len(shared.get('question', []))}개 문제")
+                else:
+                    print(f"⚠️ [Generator] 문제 생성 실패: {agent_result.get('error', '알 수 없는 오류')}")
             else:
                 print("⚠️ [Generator] 문제 생성 실패")
                 
@@ -1063,21 +1168,21 @@ class Orchestrator:
         """텍스트를 문제 블록으로 분할 (pdf_preprocessor 사용)"""
         return self.pdf_preprocessor._split_problem_blocks(raw_text)
     
-    def _merge_blocks_by_question(self, micro_blocks: List[str]) -> List[str]:
-        """미세 분할된 블록들을 문제별로 재묶기 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._merge_blocks_by_question(micro_blocks)
+    def _process_pdf_text(self, raw_text: str, pdf_path: str) -> List[str]:
+        """PDF 텍스트를 1단/2단 구분하여 처리 (pdf_preprocessor 사용)"""
+        return self.pdf_preprocessor._process_pdf_text(raw_text, pdf_path)
+    
+    def _reorder_two_columns_with_pdfminer(self, pdf_path: str) -> str:
+        """PDFMiner를 사용하여 2단 PDF를 1단으로 재정렬 (pdf_preprocessor 사용)"""
+        return self.pdf_preprocessor._reorder_two_columns_with_pdfminer(pdf_path)
+    
+    def _split_problem_blocks_without_keyword(self, text: str) -> List[str]:
+        """문제 키워드 없는 시험지에서 번호로 문항 분할 (pdf_preprocessor 사용)"""
+        return self.pdf_preprocessor._split_problem_blocks_without_keyword(text)
     
     def normalize_docling_markdown(self, md: str) -> str:
         """Docling 마크다운 정규화 (pdf_preprocessor 사용)"""
         return self.pdf_preprocessor.normalize_docling_markdown(md)
-
-    def _find_option_clusters(self, lines: List[str], start: int, end: int) -> List[Tuple[int, int]]:
-        """옵션 클러스터 찾기 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._find_option_clusters(lines, start, end)
-
-    def split_problem_blocks_without_keyword(self, text: str) -> List[str]:
-        """문제 키워드 없는 시험지에서 번호로 문항 분할 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor.split_problem_blocks_without_keyword(text)
     
     def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict]:
         """LLM으로 블록을 문제 형태로 파싱 (pdf_preprocessor 사용)"""

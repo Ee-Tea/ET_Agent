@@ -1,15 +1,21 @@
-from openai import OpenAI
-from typing import List
-import os 
+import os
 import json
 import re
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQAI_API_KEY")
-if not groq_api_key:
-  raise ValueError("GROQ_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
-client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+  raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
 
 def parse_llama_json(result: str) -> dict:
   """
@@ -53,15 +59,20 @@ def extract_query_elements(user_question: str) -> dict:
     "keyword": "LLM"
     }"""
 
-    response = client.chat.completions.create(
-        model="moonshotai/kimi-k2-instruct",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_question}
-        ],
-        temperature=0.2
+    llm = ChatOpenAI(
+        api_key=openai_api_key,
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+        model=OPENAI_LLM_MODEL,
+        temperature=LLM_TEMPERATURE,
+        max_tokens=LLM_MAX_TOKENS
     )
-    result = response.choices[0].message.content
+    
+    response = llm.invoke([
+        HumanMessage(content=system_prompt),
+        HumanMessage(content=user_question)
+    ])
+    
+    result = response.content
     result_dict = parse_llama_json(result)
     keyword = result_dict.get("keyword", "")
     if isinstance(keyword, str):
@@ -85,12 +96,17 @@ def query_rewrite(question: str, keywords: list[str]) -> str:
 
     ==> 재작성된 검색 질문:
     """
-    rewritten_question = client.chat.completions.create(
-        model="moonshotai/kimi-k2-instruct",
-        messages=[{"role": "user", "content": rewrite_prompt}],
+    
+    llm = ChatOpenAI(
+        api_key=openai_api_key,
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+        model=OPENAI_LLM_MODEL,
         temperature=0.5,
+        max_tokens=LLM_MAX_TOKENS
     )
-    return rewritten_question.choices[0].message.content.strip()
+    
+    response = llm.invoke([HumanMessage(content=rewrite_prompt)])
+    return response.content.strip()
 
 def query_reinforce(state: dict) -> str:
     """
@@ -117,12 +133,15 @@ def query_reinforce(state: dict) -> str:
     따라서, 이 질문을 더 명확하고 사실 검증이 가능한 형태로 재작성해주세요.
     """
 
-    response = client.chat.completions.create(
-        model="moonshotai/kimi-k2-instruct",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
+    llm = ChatOpenAI(
+        api_key=openai_api_key,
+        base_url="https://api.groq.com/openai/v1",
+        model=OPENAI_LLM_MODEL,
+        temperature=0.3,
+        max_tokens=LLM_MAX_TOKENS
     )
-
-    rewritten_question = response.choices[0].message.content.strip()
+    
+    response = llm.invoke([HumanMessage(content=prompt)])
+    rewritten_question = response.content.strip()
     print(f"🔁 재작성된 질문 (보강): {rewritten_question}")
     return rewritten_question

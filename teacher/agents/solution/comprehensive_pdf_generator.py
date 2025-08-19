@@ -158,7 +158,14 @@ class ComprehensivePDFGenerator:
                 print(f"[DEBUG] 보기 {idx}: {options}")
                 
                 for i, option in enumerate(options, 1):
-                    option_text = f"{i}) {str(option).strip()}"
+                    # 기존 번호 제거 (1), 2), 3), 4) 또는 1. 2. 3. 4. 패턴)
+                    clean_option = str(option).strip()
+                    # 정규식으로 번호 패턴 제거
+                    import re
+                    clean_option = re.sub(r'^[①②③④⑤⑥⑦⑧⑨⑩]?\s*[0-9]+[\.\)]\s*', '', clean_option)
+                    clean_option = re.sub(r'^[0-9]+[\.\)]\s*', '', clean_option)
+                    
+                    option_text = f"{i}) {clean_option}"
                     story.append(Paragraph(option_text, self.styles["option"]))
                 
                 story.append(Spacer(1, 5*mm))
@@ -216,7 +223,14 @@ class ComprehensivePDFGenerator:
             # 보기
             options = problem.get("options", [])
             for i, option in enumerate(options, 1):
-                option_text = f"{i}. {str(option).strip()}"
+                # 기존 번호 제거 (1), 2), 3), 4) 또는 1. 2. 3. 4. 패턴)
+                clean_option = str(option).strip()
+                # 정규식으로 번호 패턴 제거
+                import re
+                clean_option = re.sub(r'^[①②③④⑤⑥⑦⑧⑨⑩]?\s*[0-9]+[\.\)]\s*', '', clean_option)
+                clean_option = re.sub(r'^[0-9]+[\.\)]\s*', '', clean_option)
+                
+                option_text = f"{i}) {clean_option}"
                 story.append(Paragraph(option_text, self.styles["option"]))
             
             story.append(Spacer(1, 3*mm))

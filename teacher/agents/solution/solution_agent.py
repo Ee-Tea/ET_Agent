@@ -870,9 +870,9 @@ if __name__ == "__main__":
     final_state = agent.execute(
         user_input_txt=user_input_txt,
         source_type="external",
-        input_kind="image",
+        input_kind="text",
         vectorstore=vectorstore,
-        external_image_paths=["./teacher/agents/solution/user_problems.png"],
+        # external_image_paths=["./teacher/agents/solution/user_problems.png"],
     )
 
     # 결과를 JSON 파일로 저장

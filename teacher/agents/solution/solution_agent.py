@@ -11,7 +11,6 @@ from langchain_openai import ChatOpenAI
 from teacher.base_agent import BaseAgent
 from docling.document_converter import DocumentConverter
 from datetime import datetime
-from teacher.agents.solution.ocr_simple import extract_mcq_from_image
 
 
 load_dotenv()
@@ -81,20 +80,38 @@ class SolutionAgent(BaseAgent):
         graph.add_node("next_problem", self._next_problem)
 
         graph.set_entry_point("route")
+
+        def _decide_route(s: SolutionState) -> str:
+            # 1) 내부는 무조건 STM 경로
+            if s.get("source_type") == "internal":
+                return "stm"
+
+            # 2) 외부: 명시 input_kind 우선
+            kind = s.get("input_kind")
+            if kind:
+                return kind
+
+            # 3) 외부: 첨부 상태로 추정
+            if s.get("external_file_paths"):
+                return "file"
+            if s.get("external_image_paths"):
+                return "image"
+            if s.get("short_term_memory"):
+                # 외부라도 상위가 STM을 넘겨줄 수 있으므로 보조 경로
+                return "stm"
+
+            # 4) 그 외엔 텍스트
+            return "text"
+        
         graph.add_conditional_edges(
-            "route",
-            lambda s: (s.get("input_kind") or (
-                "file"  if s.get("external_file_paths") else
-                "image" if s.get("external_image_paths") else
-                "stm"   if s.get("short_term_memory") else
-                "text"
-            )),
+        "route",
+            _decide_route,
             {
                 "stm": "load_from_short_term_memory",
                 "file": "load_from_external_docs",
                 "image": "load_from_images",
                 "text": "load_from_text",
-            }
+            },
         )
         
         graph.add_edge("load_from_short_term_memory", "next_problem")
@@ -120,23 +137,15 @@ class SolutionAgent(BaseAgent):
         )
 
         return graph.compile()
+    
+    
+    def _llm(self, temperature: float = 0):
+        return ChatOpenAI(
+            api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            temperature=temperature,
+        )
 
-    def _chunk_text(self, s: str, max_chars: int = 6000) -> List[str]:
-        """길이 제한을 위해 줄 단위로 잘라 청크 목록 반환."""
-        s = re.sub(r"[ \t]+", " ", s)
-        chunks, buf = [], []
-        curr = 0
-        for ln in s.splitlines():
-            if curr + len(ln) + 1 > max_chars:
-                if buf:
-                    chunks.append("\n".join(buf))
-                buf, curr = [ln], len(ln) + 1
-            else:
-                buf.append(ln)
-                curr += len(ln) + 1
-        if buf:
-            chunks.append("\n".join(buf))
-        return chunks
     
     def _llm_extract_qas(self, text: str, llm) -> List[tuple]:
         """
@@ -160,9 +169,10 @@ class SolutionAgent(BaseAgent):
         )
 
         try:
-            resp = llm.invoke([{"role":"system","content":sys_prompt},
-                            {"role":"user","content":user_prompt}])
-            content = (resp.content or "").strip()
+            resp = llm.invoke(
+                "SYSTEM:\n" + sys_prompt + "\n\nUSER:\n" + user_prompt
+            )
+            content = (getattr(resp, "content", "") or "").strip()
 
             # JSON만 남기기 (혹시 모델이 불필요한 텍스트를 붙였을 때 대비)
             m = re.search(r"\[.*\]", content, re.S)
@@ -214,45 +224,88 @@ class SolutionAgent(BaseAgent):
 
         return cleaned_blocks
 
-    def _ocr_image_to_text(self, image_path: str) -> str:
-        """
-        1순위: pytesseract (로컬)
-        2순위: Google Vision API (설정돼 있으면)
-        둘 다 실패하면 빈 문자열
-        """
-        # pytesseract
-        try:
-            import pytesseract
-            from PIL import Image
-            try:
-                _ = pytesseract.get_tesseract_version()
-            except Exception:
-                print("⚠️ Tesseract 엔진이 설치되어 있지 않거나 경로가 설정되지 않았습니다.")
-            img = Image.open(image_path)
-            text = pytesseract.image_to_string(img, lang="kor+eng", config="--psm 6")
-            if text and text.strip():
-                return text
-        except Exception as e:
-            print(f"⚠️ pytesseract OCR 실패: {e}")
+    def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict[str, object]]:
+        # (기존 _load_from_external 내부 함수였던 내용을 그대로 이동)
+        cleaned = []
+        for ln in block_text.splitlines():
+            if re.search(r"(정답|해설|답안|풀이|answer|solution)\s*[:：]", ln, re.I):
+                continue
+            cleaned.append(ln)
+        cleaned_text = "\n".join(cleaned).strip()
+        if len(cleaned_text) < 5:
+            return None
 
-        # Google Vision API (선택)
-        try:
-            from google.cloud import vision
-            client = vision.ImageAnnotatorClient()
-            with open(image_path, "rb") as f:
-                content = f.read()
-            image = vision.Image(content=content)
-            response = client.text_detection(image=image)
-            if response.error.message:
-                print(f"⚠️ Vision API 오류: {response.error.message}")
-                return ""
-            annotations = response.text_annotations
-            if annotations:
-                return annotations[0].description
-        except Exception as e:
-            print(f"⚠️ Google Vision OCR 실패 또는 미구성: {e}")
+        sys_prompt = (
+            "너는 시험 블록 텍스트를 정확히 구조화하는 도우미다. "
+            "입력 블록에는 '한 문제'가 들어있다. "
+            '출력은 반드시 JSON 하나의 객체로만 하며, 다음 스키마를 지켜라:\n'
+            '{"question": "<질문 본문(번호/머리글 제거)>", "options": ["<보기1>","<보기2>","<보기3>","<보기4>"]}\n'
+            "주의사항:\n"
+            "- 반드시 options는 정확히 4개여야 한다.\n"
+            "- 입력 블록에 있는 보기 텍스트만 사용하고 새로 만들지 마라.\n"
+            "- 불필요한 설명/정답/해설/코드블록/문자열은 출력하지 마라. JSON만 출력하라."
+        )
+        user_prompt = f"다음 블록을 구조화하라:\n```\n{cleaned_text}\n```"
 
-        return ""
+        try:
+            resp = llm.invoke(
+                "SYSTEM:\n" + sys_prompt + "\n\nUSER:\n" + user_prompt
+            )
+            content = (getattr(resp, "content", "") or "").strip()
+            m = re.search(r"\{.*\}", content, re.S)
+            if not m:
+                return None
+            obj = json.loads(m.group(0))
+            q = (obj.get("question") or "").strip()
+            opts = [str(o).strip() for o in (obj.get("options") or []) if str(o).strip()]
+            if not q or len(opts) != 4:
+                return None
+            q = re.sub(r"^\s*(?:문제\s*)?\d{1,3}\s*[\).:]\s*", "", q).strip()
+            norm_opts = []
+            for o in opts:
+                o = re.sub(r"^\s*(?:\(?[①-④1-4A-Da-d가-라]\)?[\).．\.]?)\s*", "", o).strip()
+                norm_opts.append(o)
+            return {"question": q, "options": norm_opts}
+        except Exception as e:
+            print(f"⚠️ LLM 파싱 실패: {e}")
+            return None
+
+    def save_user_problems_to_json(self, user_problems: List[Dict], filename: str = None) -> str:
+        """
+        user_problems를 JSON 파일로 저장합니다.
+        
+        Args:
+            user_problems: 저장할 문제 데이터 리스트
+            filename: 저장할 파일명 (None이면 자동 생성)
+            
+        Returns:
+            저장된 파일 경로
+        """
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"user_problems_{timestamp}.json"
+        
+        # 파일 경로가 상대 경로인 경우 현재 디렉토리에 저장
+        if not os.path.isabs(filename):
+            filename = os.path.join(os.getcwd(), filename)
+        
+        # 디렉토리가 없으면 생성
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        # JSON 데이터 준비
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "total_problems": len(user_problems),
+            "problems": user_problems
+        }
+        
+        # JSON 파일로 저장
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ user_problems가 JSON 파일로 저장되었습니다: {filename}")
+        return filename
+   
 
 
     #----------------------------------------nodes------------------------------------------------------
@@ -283,12 +336,7 @@ class SolutionAgent(BaseAgent):
 
         converter = DocumentConverter()
 
-        # LLM (엄격한 구조화 전용)
-        llm = ChatOpenAI(
-            api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            temperature=0
-        )
+        llm = self._llm(0)
 
         extracted: List[Dict[str, object]] = []
 
@@ -343,18 +391,14 @@ class SolutionAgent(BaseAgent):
         return state
 
     def _load_from_text(self, state: SolutionState) -> SolutionState:
-        print("📝 [내부] 텍스트 입력 → 문항 파싱 시작")
+        print("📝 [외부] 텍스트 입력 → 문항 파싱 시작")
         raw = (state.get("user_input_txt") or "").strip()
 
         if not raw:
             raise ValueError("텍스트 입력이 비었습니다. user_input_txt을 확인하세요.")
 
         # LLM으로 먼저 시도 (여러 문항 포함 가능)
-        llm = ChatOpenAI(
-            api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            temperature=0
-        )
+        llm = self._llm(0)
 
         qas = self._llm_extract_qas(raw, llm)  # -> List[(q, options)]
         problems = []
@@ -373,108 +417,8 @@ class SolutionAgent(BaseAgent):
 
 
     def _load_from_images(self, state: SolutionState) -> SolutionState:
-        print("🖼️ [외부] 이미지 → OCR → 문항 파싱 (심플)")
-        paths = state.get("external_image_paths", []) or []
-        if not paths:
-            raise ValueError("external_image_paths 가 비어있습니다.")
-
-        all_items = []
-        for p in paths:
-            items = extract_mcq_from_image(
-                p,
-                lang="kor+eng",   # 한/영 혼용 권장
-                psm="6",          # 문단/한 줄 위주. 필요 시 "4" 또는 "11"도 시도 가능
-                oem="3",
-                tesseract_cmd=os.getenv("TESSERACT_CMD"),  # 없으면 시스템 PATH 사용
-                scale=1.6,
-                binarize=True,
-            )
-            print(f" - {os.path.basename(p)}: {len(items)}문항 감지")
-            all_items.extend(items)
-
-        if not all_items:
-            raise ValueError("이미지에서 문항(질문+보기4)을 찾지 못했습니다.")
-
-        # 중복 제거(질문 텍스트 기준)
-        seen, user_problems = set(), []
-        for it in all_items:
-            key = re.sub(r"\s+", " ", it["question"]).strip()
-            if key in seen:
-                continue
-            seen.add(key)
-            user_problems.append({"question": it["question"], "options": it["options"]})
-
-        state["user_problems"] = user_problems
-        print(f"✅ 이미지 문항 추출 완료: {len(user_problems)}개")
+        
         return state
-
-
-    # 간단한 문제/보기 파서 (문서 포맷에 맞게 조정 가능)
-    def _split_by_questions(self, text: str) -> List[tuple]:
-        blocks = re.split(r"\n\s*\n", text)  # 빈 줄 기준 거칠게 분할
-        results = []
-        for b in blocks:
-            lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
-            if not lines:
-                continue
-            # 옵션 라인 감지 (숫자. 또는 숫자) 패턴)
-            opts = [ln for ln in lines if re.match(r"^\(?\d+\)?[).]\s*", ln)]
-            if opts:
-                # 문제문은 옵션 라인 제외 첫 줄 위주로 사용
-                question_lines = [ln for ln in lines if ln not in opts]
-                qtext = " ".join(question_lines) if question_lines else lines[0]
-                # 옵션 텍스트 정제: "1) ..." → "..." 로
-                clean_opts = [re.sub(r"^\(?\d+\)?[).]\s*", "", o) for o in opts]
-                results.append((qtext, clean_opts))
-        return results
-
-    def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict[str, object]]:
-        # (기존 _load_from_external 내부 함수였던 내용을 그대로 이동)
-        cleaned = []
-        for ln in block_text.splitlines():
-            if re.search(r"(정답|해설|답안|풀이|answer|solution)\s*[:：]", ln, re.I):
-                continue
-            cleaned.append(ln)
-        cleaned_text = "\n".join(cleaned).strip()
-        if len(cleaned_text) < 5:
-            return None
-
-        sys_prompt = (
-            "너는 시험 블록 텍스트를 정확히 구조화하는 도우미다. "
-            "입력 블록에는 '한 문제'가 들어있다. "
-            '출력은 반드시 JSON 하나의 객체로만 하며, 다음 스키마를 지켜라:\n'
-            '{"question": "<질문 본문(번호/머리글 제거)>", "options": ["<보기1>","<보기2>","<보기3>","<보기4>"]}\n'
-            "주의사항:\n"
-            "- 반드시 options는 정확히 4개여야 한다.\n"
-            "- 입력 블록에 있는 보기 텍스트만 사용하고 새로 만들지 마라.\n"
-            "- 불필요한 설명/정답/해설/코드블록/문자열은 출력하지 마라. JSON만 출력하라."
-        )
-        user_prompt = f"다음 블록을 구조화하라:\n```\n{cleaned_text}\n```"
-
-        try:
-            resp = llm.invoke([
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_prompt}
-            ])
-            content = (resp.content or "").strip()
-            m = re.search(r"\{.*\}", content, re.S)
-            if not m:
-                return None
-            obj = json.loads(m.group(0))
-            q = (obj.get("question") or "").strip()
-            opts = [str(o).strip() for o in (obj.get("options") or []) if str(o).strip()]
-            if not q or len(opts) != 4:
-                return None
-            q = re.sub(r"^\s*(?:문제\s*)?\d{1,3}\s*[\).:]\s*", "", q).strip()
-            norm_opts = []
-            for o in opts:
-                o = re.sub(r"^\s*(?:\(?[①-④1-4A-Da-d가-라]\)?[\).．\.]?)\s*", "", o).strip()
-                norm_opts.append(o)
-            return {"question": q, "options": norm_opts}
-        except Exception as e:
-            print(f"⚠️ LLM 파싱 실패: {e}")
-            return None
-
 
 
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
@@ -508,11 +452,7 @@ class SolutionAgent(BaseAgent):
 
         print("\n✏️ [2단계] 해답 및 풀이 생성 시작")
 
-        llm = ChatOpenAI(
-            api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            temperature=0.5
-        )
+        llm_gen = self._llm(0.5)  
 
         similar_problems = state.get("similar_questions_text", "")
         print("유사 문제들:\n", similar_problems[:100])
@@ -535,7 +475,7 @@ class SolutionAgent(BaseAgent):
             풀이: ...
         """
 
-        response = llm.invoke(prompt)
+        response = llm_gen.invoke(prompt)
         result = response.content.strip()
         print("🧠 LLM 응답 완료")
 
@@ -552,11 +492,7 @@ class SolutionAgent(BaseAgent):
     def _validate_solution(self, state: SolutionState) -> SolutionState:
         print("\n🧐 [3단계] 정합성 검증 시작")
         
-        llm = ChatOpenAI(
-            api_key=GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1",
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            temperature=0
-        )
+        llm = self._llm(0)
 
         validation_prompt = f"""
         사용자 요구사항: {state['user_input_txt']}
@@ -692,6 +628,7 @@ class SolutionAgent(BaseAgent):
             self, 
             user_input_txt: str, 
             source_type: Literal["internal", "external"],
+
             input_kind: Optional[Literal["file", "image", "text", "stm"]] = None,
             external_image_paths: Optional[List[str]] = None,
             vectorstore: Optional[Milvus] = None,
@@ -722,8 +659,10 @@ class SolutionAgent(BaseAgent):
                 connection_args={"host": "localhost", "port": "19530"}
             )
         
-        inferred_input = input_kind
-        if not inferred_input:
+        if source_type == "internal":
+            inferred_input = "stm"
+        else:   
+            inferred_input = input_kind
             if external_file_paths:
                 inferred_input = "file"
             elif external_image_paths:
@@ -767,9 +706,9 @@ class SolutionAgent(BaseAgent):
         
         # 그래프 시각화
         try:
-            graph_image_path = "agent_workflow.png"
+            graph_image_path = "./teacher/agents/solution/agent_workflow.png"
             with open(graph_image_path, "wb") as f:
-                f.write(agent.graph.get_graph().draw_mermaid_png())
+                f.write(self.graph.get_graph().draw_mermaid_png())
             print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
         except Exception as e:
             print(f"그래프 시각화 중 오류 발생: {e}")
@@ -791,41 +730,7 @@ class SolutionAgent(BaseAgent):
         
         return final_state
 
-    def save_user_problems_to_json(self, user_problems: List[Dict], filename: str = None) -> str:
-        """
-        user_problems를 JSON 파일로 저장합니다.
-        
-        Args:
-            user_problems: 저장할 문제 데이터 리스트
-            filename: 저장할 파일명 (None이면 자동 생성)
-            
-        Returns:
-            저장된 파일 경로
-        """
-        if filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"user_problems_{timestamp}.json"
-        
-        # 파일 경로가 상대 경로인 경우 현재 디렉토리에 저장
-        if not os.path.isabs(filename):
-            filename = os.path.join(os.getcwd(), filename)
-        
-        # 디렉토리가 없으면 생성
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        
-        # JSON 데이터 준비
-        data = {
-            "timestamp": datetime.now().isoformat(),
-            "total_problems": len(user_problems),
-            "problems": user_problems
-        }
-        
-        # JSON 파일로 저장
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        print(f"✅ user_problems가 JSON 파일로 저장되었습니다: {filename}")
-        return filename
+    
 
 if __name__ == "__main__":
     # ✅ Milvus 연결 및 벡터스토어 생성
@@ -848,7 +753,7 @@ if __name__ == "__main__":
 
     # 그래프 시각화 (선택)
     try:
-        graph_image_path = "agent_workflow.png"
+        graph_image_path = "./teacher/agents/solution/agent_workflow.png"
         with open(graph_image_path, "wb") as f:
             f.write(agent.graph.get_graph().draw_mermaid_png())
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
@@ -877,7 +782,8 @@ if __name__ == "__main__":
         "results": results
     }
 
-    results_filename = f"solution_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    results_filename = os.path.join("./teacher/agents/solution", f"solution_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    os.makedirs(os.path.dirname(results_filename), exist_ok=True)
     with open(results_filename, "w", encoding="utf-8") as f:
         json.dump(results_data, f, ensure_ascii=False, indent=2)
     print(f"✅ 해답 결과가 JSON 파일로 저장되었습니다: {results_filename}")

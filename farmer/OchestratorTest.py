@@ -160,16 +160,16 @@ def split_agents(user_question, llm, embedding_model, agent_descriptions):
         "original_question": user_question
     }
 
-# from agents.crop_recommend_agent import run as crop_recommend_run
-# from agents.crop_cultivation_agent import run as crop_cultivation_run
-# from agents.disaster_agent import run as disaster_run
+from 작물추천.test0812_복사본 import run as crop_recommend_run
+from 재배방법.crop_overall import run as crop_cultivation_run
+from 재해대응.verification_search import run as disaster_run
 from sales.SalesAgent import run as market_run
 # from agents.etc_agent import run as etc_run
 
 agent_functions = {
-#     "작물추천_agent": crop_recommend_run,
-#     "작물재배_agent": crop_cultivation_run,
-#     "재해_agent": disaster_run,
+    "작물추천_agent": crop_recommend_run,
+    "작물재배_agent": crop_cultivation_run,
+    "재해_agent": disaster_run,
     "판매처_agent": market_run,
 #     "기타": etc_run
 }
@@ -218,7 +218,6 @@ from langgraph.graph import StateGraph, END
 class RouterState(dict):
     query: str = ""
     selected_agents: list = []
-    split_questions: dict = {}
     crop_info: str = ""
     agent_answers: dict = {}
     output: str = ""
@@ -287,8 +286,21 @@ def node_merge_output(state: RouterState) -> RouterState:
         output += f"[작물추천 결과]\n{state['crop_info']}\n"
     for agent, answer in state.get("agent_answers", {}).items():
         output += f"[{agent} 결과]\n{answer}\n"
-    state["output"] = output.strip()
-    print("\n=== 최종 응답 ===\n" + state["output"])
+    merged_output = output.strip()
+    print("\n=== 최종 응답(병합 전) ===\n" + merged_output)
+
+    # LLM에게 전체 응답을 정리하도록 요청
+    summary_prompt = (
+        "아래는 여러 농업 에이전트의 답변입니다. 사용자가 이해하기 쉽도록 정리해서 알려줘.\n\n"
+        f"{merged_output}"
+    )
+    try:
+        summary = llm.invoke(summary_prompt)
+    except Exception as e:
+        summary = f"요약 중 오류: {e}"
+
+    state["output"] = summary.strip()
+    print("\n=== 최종 응답(요약) ===\n" + state["output"])
     return state
 
 def judge_branch(state: RouterState) -> str:

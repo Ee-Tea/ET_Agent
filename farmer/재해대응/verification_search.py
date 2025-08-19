@@ -585,6 +585,23 @@ def evaluate_goldenset(app, csv_path: str, limit: int = 50, out_path: str = "eva
     eval_df.to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"\n전체 결과 저장: {out_path}")
 
+def run(state: dict) -> dict:
+    """
+    오케스트레이터에서 호출 가능한 entrypoint 함수.
+    입력: {"query": 질문}
+    반환: {"pred_answer": 답변}
+    """
+    app = build_graph()
+    question = state.get("query", "")
+    if not question:
+        return {"pred_answer": "질문이 비어 있습니다."}
+    try:
+        result = app.invoke({"question": question})
+        answer = result.get("answer", "답변 생성 실패")
+        return {"pred_answer": answer}
+    except Exception as e:
+        return {"pred_answer": f"verification_search 실행 중 오류: {e}"}
+    
 # =========[ 실행부 ]=========
 if __name__ == "__main__":
     from argparse import ArgumentParser

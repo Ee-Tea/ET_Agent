@@ -230,7 +230,7 @@ class InfoProcessingExamAgent(BaseAgent):
             )
             
             self.llm = ChatGroq(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="moonshotai/kimi-k2-instruct",
                 temperature=0.0,
                 max_tokens=2048,
                 timeout=120,

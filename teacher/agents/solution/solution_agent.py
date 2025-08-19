@@ -1,5 +1,5 @@
 import os
-from typing import TypedDict, List, Dict, Literal, Optional
+from typing import TypedDict, List, Dict, Literal, Optional, Tuple, Any
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_milvus import Milvus
@@ -148,7 +148,7 @@ class SolutionAgent(BaseAgent):
         return ChatOpenAI(
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="moonshotai/kimi-k2-instruct",  # ✅ 통일된 모델
             temperature=temperature,
         )
 
@@ -197,38 +197,122 @@ class SolutionAgent(BaseAgent):
             return []
 
     @staticmethod
-    def _split_problem_blocks(raw: str) -> List[str]:
-        """
-        빈 줄(2개 이상) 기준으로 블록 분할.
-        페이지 구분(\f)은 빈 줄로 치환.
-        머리글/푸터/잡음 라인은 1차 필터링.
-        """
-        if not raw:
+    def normalize_docling_markdown_static(md: str) -> str:
+        """Docling 마크다운 정규화 (정적 메서드)"""
+        import re
+        s = md
+        s = re.sub(r'(?m)^\s*(\d+)\.\s*\1\.\s*', r'\1. ', s)  # '1. 1.' -> '1.'
+        s = re.sub(r'(?m)^\s*(\d+)\s*\.\s*', r'\1. ', s)      # '1 . ' -> '1. '
+        s = re.sub(r'[ \t]+', ' ', s).replace('\r', '')
+        return s.strip()
+
+    @staticmethod
+    def _find_option_clusters_static(lines: List[str], start: int, end: int) -> List[Tuple[int, int]]:
+        """옵션 클러스터 찾기 (정적 메서드)"""
+        import re
+        _OPT_LINE = re.compile(
+            r'(?m)^\s*(?:\(?([1-5])\)?\.?|[①-⑤]|[가-하]\)|[A-Z]\))\s+\S'
+        )
+        
+        clusters = []
+        i = start
+        while i < end:
+            if _OPT_LINE.match(lines[i] or ''):
+                j = i
+                cnt = 0
+                while j < end and _OPT_LINE.match(lines[j] or ''):
+                    cnt += 1
+                    j += 1
+                if cnt >= 3:
+                    clusters.append((i, j))  # [i, j) 옵션 블록
+                i = j
+            else:
+                i += 1
+        return clusters
+
+    @staticmethod
+    def split_problem_blocks_without_keyword_static(text: str) -> List[str]:
+        """개선된 문제 블록 분할 (정적 메서드 버전)"""
+        import re
+        from typing import List, Tuple
+        
+        if not text:
             return []
+            
+        text = SolutionAgent.normalize_docling_markdown_static(text)
+        lines = text.split('\n')
+        n = len(lines)
 
-        text = raw.replace("\f", "\n\n")      # 페이지 경계는 빈 줄로
-        text = re.sub(r"[ \t]+\n", "\n", text)  # 행 끝 공백 제거
-        # 문서 공통 잡음 헤더/푸터(필요시 추가)
-        noise_patterns = [
-            r"^\s*문제\s*지\s*$", r"^\s*모의\s*고사\s*$", r"^\s*페이지\s*\d+\s*$"
-        ]
+        # 미리 옵션 클러스터를 계산해놓고, 그 내부 번호는 문항 헤더로 안 봄
+        clusters = SolutionAgent._find_option_clusters_static(lines, 0, n)
 
-        blocks = [b.strip() for b in re.split(r"\n{2,}", text) if b.strip()]
+        def in_option_cluster(idx: int) -> bool:
+            for a, b in clusters:
+                if a <= idx < b:
+                    return True
+            return False
 
-        cleaned_blocks = []
-        for b in blocks:
-            lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
-            # 잡음 제거
-            kept = []
-            for ln in lines:
-                if any(re.search(pat, ln, re.I) for pat in noise_patterns):
-                    continue
-                kept.append(ln)
-            if not kept:
+        # 문항 헤더 후보 인덱스 수집
+        _QHEAD_CAND = re.compile(r'(?m)^\s*(\d{1,3})[.)]\s+\S')
+        candidates = []
+        for i, ln in enumerate(lines):
+            m = _QHEAD_CAND.match(ln or '')
+            if not m:
                 continue
-            cleaned_blocks.append("\n".join(kept))
+            if in_option_cluster(i):
+                # 보기 블록 안의 번호는 문항 헤더가 아님
+                continue
+            num = int(m.group(1))
+            candidates.append((i, num))
 
-        return cleaned_blocks
+        # 전역 증가 시퀀스 + 섹션 리셋 허용으로 실제 헤더 선별
+        headers = []
+        prev_num = 0
+        last_header_idx = -9999
+        for i, num in candidates:
+            if num == prev_num + 1:
+                headers.append(i)
+                prev_num = num
+                last_header_idx = i
+                continue
+            # 섹션 리셋: num==1이고, 최근 헤더에서 충분히 떨어져 있거나 섹션 느낌의 라인 존재 시 허용
+            if num == 1:
+                window = '\n'.join(lines[max(0, i-3): i+1])
+                if (i - last_header_idx) >= 8 or re.search(r'(Ⅰ|Ⅱ|III|과목|파트|SECTION)', window):
+                    headers.append(i)
+                    prev_num = 1
+                    last_header_idx = i
+                    continue
+            # 그 외는 옵션/노이즈로 무시
+
+        # 헤더가 하나도 안 잡히면 폴백 전략 사용
+        if not headers:
+            print(f"❌ [디버그] 헤더가 하나도 선택되지 않음 - 폴백 전략 사용")
+            # 폴백 1: 더 느슨한 조건으로 재시도
+            if candidates:
+                print(f"🔄 [폴백] 순차 조건 없이 모든 후보를 헤더로 사용")
+                headers = [i for i, num in candidates]
+            else:
+                # 폴백 2: 기본 번호 패턴으로 분할
+                print(f"🔄 [폴백] 기본 번호 패턴으로 분할")
+                simple_pattern = re.compile(r'(?m)^\s*(\d{1,2})\.\s+')
+                for i, ln in enumerate(lines):
+                    if simple_pattern.match(ln or ''):
+                        headers.append(i)
+                        print(f"📌 [폴백] 라인 {i}: '{ln[:30]}...' → 헤더 추가")
+            
+            if not headers:
+                print(f"❌ [폴백 실패] 전체를 1개 블록으로 처리")
+                return [text] if text.strip() else []
+
+        # 헤더 범위로 블록 만들기
+        headers.append(n)  # sentinel
+        blocks = []
+        for a, b in zip(headers[:-1], headers[1:]):
+            blk = '\n'.join(lines[a:b]).strip()
+            if blk:
+                blocks.append(blk)
+        return blocks
 
     def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict[str, object]]:
         # (기존 _load_from_external 내부 함수였던 내용을 그대로 이동)
@@ -320,78 +404,76 @@ class SolutionAgent(BaseAgent):
 
     # --------- 내부: STM에서 문제 1개 꺼내와 state에 세팅 ----------
     def _load_from_stm(self, state: SolutionState) -> SolutionState:
-        stm = state.get("short_term_memory", [])
-        state["user_problems"] = [{"question": x.get("question",""),
-                                "options": x.get("options",[])} for x in stm]
+        """
+        내부 모드에서 문제 로드 (pdf_extracted 우선, short_term_memory 차선)
+        """
+        print("📊 [내부] 문제 로드 시작")
+        
+        # 1. pdf_extracted 우선 확인 (PDF 전처리 데이터)
+        pdf_data = state.get("pdf_extracted", {})
+        pdf_questions = pdf_data.get("question", []) or []
+        
+        if pdf_questions:
+            print("📄 PDF 전처리 데이터에서 문제 로드")
+            questions = pdf_questions
+            options_list = pdf_data.get("options", []) or []
+        else:
+            # 2. short_term_memory에서 로드
+            print("📊 short_term_memory에서 문제 로드")
+            stm = state.get("short_term_memory", [])
+            questions = [x.get("question", "") for x in stm]
+            options_list = [x.get("options", []) for x in stm]
+        
+        # user_problems 설정
+        user_problems = []
+        for i, question in enumerate(questions):
+            options = options_list[i] if i < len(options_list) else []
+            if question and options:
+                user_problems.append({
+                    "question": question,
+                    "options": options
+                })
+        
+        state["user_problems"] = user_problems
         state["short_term_memory"] = []  # 큐로 이관
+        
+        print(f"✅ [내부] 최종 로드된 문제: {len(user_problems)}개")
         return state
     
-    # --------- 외부: Docling으로 문서 → 텍스트 → JSON(문제/옵션) → state에 세팅 ----------
+    # --------- 외부: shared state에서 전처리된 문제 로드 ----------
     def _load_from_external(self, state: SolutionState) -> SolutionState:
-        """
-        PDF/문서 → 텍스트 → [문제 블록 분할] → (블록 단위) LLM 파싱 → '문항+보기4'만 저장
-        """
-        print("📄 [외부] 첨부 문서 로드 → 텍스트 변환 → 블록 단위 LLM 파싱 시작")
-        paths = state.get("external_file_paths", [])
-        if not paths:
-            raise ValueError("external_file_paths 가 비어있습니다. 외부 분기에서는 파일 경로가 필요합니다.")
-
-        converter = DocumentConverter()
-
-        llm = self._llm(0)
-
-        extracted: List[Dict[str, object]] = []
-
-        for p in paths:
-            try:
-                result = converter.convert(p)
-                doc = result.document
-            except Exception as e:
-                print(f"⚠️ 변환 실패: {p} - {e}")
-                continue
-
-            # 문서 전체 텍스트 추출
-            raw = ""
-            if hasattr(doc, "export_to_markdown"):
-                raw = doc.export_to_markdown()
-            elif hasattr(doc, "export_to_text"):
-                raw = doc.export_to_text()
-            raw = (raw or "").replace("\r\n", "\n")
-
-            # ✅ 문제 블록 분할 (빈 줄 2개 이상 기준 + 일부 헤더 제거)
-            blocks = self._split_problem_blocks(raw)
-            print(f"📦 {p} | 추정 문제 블록 수: {len(blocks)}")
-
-            for idx, block in enumerate(blocks, 1):
-                item = self._parse_block_with_llm(block, llm)
-                if item:
-                    extracted.append({
-                        "question": item["question"],
-                        "options": item["options"],
-                        "source": p,
-                        "block_index": idx
-                    })
-
-        if not extracted:
-            raise ValueError("문서에서 '문항 + 보기4'를 추출하지 못했습니다. LLM 파싱 규칙 또는 블록 분할 기준을 조정하세요.")
-
-        # ✅ 질문 텍스트 기준 중복 제거
-        seen, deduped = set(), []
-        for it in extracted:
-            key = re.sub(r"\s+", " ", it["question"]).strip()
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(it)
-
-        state["user_problems"] = [{"question": it["question"], "options": it["options"]} for it in deduped]
-        print(f"✅ 최종 추출 문항 수(보기 4개): {len(state['user_problems'])}")
-
-        saved_file = self.save_user_problems_to_json(state["user_problems"], "./teacher/agents/solution/user_problems_json.json")
+        """전처리 노드에서 추출된 문제들을 로드"""
+        print("📄 [외부] 문제 로드 시작")
+        
+        # pdf_extracted에서 문제 로드 (teacher_graph.py에서 이미 처리됨)
+        pdf_data = state.get("pdf_extracted", {})
+        questions = pdf_data.get("question", []) or []
+        options_list = pdf_data.get("options", []) or []
+        
+        if not questions:
+            print("⚠️ pdf_extracted에 문제가 없습니다.")
+            state["user_problems"] = []
+            return state
+        
+        # user_problems 형태로 변환
+        user_problems = []
+        for i, question in enumerate(questions):
+            options = options_list[i] if i < len(options_list) else []
+            if question and options:
+                user_problems.append({
+                    "question": question,
+                    "options": options
+                })
+        
+        state["user_problems"] = user_problems
+        print(f"✅ 최종 로드된 문제: {len(user_problems)}개")
+        
+        # JSON 파일로 저장 (디버깅용)
+        saved_file = self.save_user_problems_to_json(user_problems, "user_problems_json.json")
         print(f"💾 저장된 파일: {saved_file}")
         
         return state
-
+    
     def _load_from_text(self, state: SolutionState) -> SolutionState:
         print("📝 [외부] 텍스트 입력 → 문항 파싱 시작")
         raw = (state.get("user_input_txt") or "").strip()
@@ -425,8 +507,21 @@ class SolutionAgent(BaseAgent):
 
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
         print("\n🔍 [1단계] 유사 문제 검색 시작")
-        results = state["vectorstore"].similarity_search(state["user_problem"], k=3)
-
+        
+        vectorstore = state.get("vectorstore")
+        if vectorstore is None:
+            print("⚠️ 벡터스토어가 없어 유사 문제 검색을 건너뜁니다.")
+            state["retrieved_docs"] = []
+            state["similar_questions_text"] = ""
+            print("🔍 [1단계] 유사 문제 검색 함수 종료 (건너뜀)")
+            return state
+        
+        try:
+            results = vectorstore.similarity_search(state["user_problem"], k=3)
+        except Exception as e:
+            print(f"⚠️ 유사 문제 검색 실패: {e}")
+            results = []
+        
         similar_questions = []
         for i, doc in enumerate(results):
             metadata = doc.metadata
@@ -551,7 +646,8 @@ class SolutionAgent(BaseAgent):
                     metadata={
                         "options": json.dumps(state.get("user_problem_options", [])), 
                         "answer": state["generated_answer"],
-                        "explanation": state["generated_explanation"]
+                        "explanation": state["generated_explanation"],
+                        "subject": state["subject"],
                     }
                 )
                 vectorstore.add_documents([doc])
@@ -653,21 +749,26 @@ class SolutionAgent(BaseAgent):
 
         # ✅ Milvus 연결 및 벡터스토어 생성
         if vectorstore is None:
+            try:
+                embedding_model = HuggingFaceEmbeddings(
+                    model_name="jhgan/ko-sroberta-multitask",
+                    model_kwargs={"device": "cpu"}
+                )
 
-            embedding_model = HuggingFaceEmbeddings(
-                model_name="jhgan/ko-sroberta-multitask",
-                model_kwargs={"device": "cpu"}
-            )
+                if "default" in connections.list_connections():
+                    connections.disconnect("default")
+                connections.connect(alias="default", host="localhost", port="19530")
 
-            if "default" in connections.list_connections():
-                connections.disconnect("default")
-            connections.connect(alias="default", host="localhost", port="19530")
-
-            vectorstore = Milvus(
-                embedding_function=embedding_model,
-                collection_name="problems",
-                connection_args={"host": "localhost", "port": "19530"}
-            )
+                vectorstore = Milvus(
+                    embedding_function=embedding_model,
+                    collection_name="problems",
+                    connection_args={"host": "localhost", "port": "19530"}
+                )
+                print("✅ Milvus 벡터스토어 연결 성공")
+            except Exception as e:
+                print(f"⚠️ Milvus 연결 실패: {e}")
+                print("   - 벡터스토어 없이 실행을 계속합니다.")
+                vectorstore = None
         
         if source_type == "internal":
             inferred_input = "stm"
@@ -742,6 +843,41 @@ class SolutionAgent(BaseAgent):
         return final_state
 
     
+
+    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        LangGraph 그래프를 subgraph로 실행하는 메서드입니다.
+        
+        Args:
+            input_data (Dict[str, Any]): 에이전트 실행에 필요한 입력 데이터입니다.
+            
+        Returns:
+            Dict[str, Any]: 에이전트 실행 결과 데이터입니다.
+        """
+        try:
+            # LangGraph 그래프 실행
+            final_state = self.graph.invoke(input_data)
+            
+            # 결과 추출 및 반환
+            results = final_state.get("results", [])
+            generated_answer = final_state.get("generated_answer", "")
+            generated_explanation = final_state.get("generated_explanation", "")
+            
+            return {
+                "results": results,
+                "generated_answer": generated_answer,
+                "generated_explanation": generated_explanation,
+                "final_state": final_state
+            }
+            
+        except Exception as e:
+            print(f"❌ SolutionAgent invoke 실행 실패: {e}")
+            return {
+                "results": [],
+                "generated_answer": "",
+                "generated_explanation": "",
+                "error": str(e)
+            }
 
 if __name__ == "__main__":
     # ✅ Milvus 연결 및 벡터스토어 생성

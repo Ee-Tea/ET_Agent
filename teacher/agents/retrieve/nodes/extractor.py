@@ -54,7 +54,7 @@ def extract_query_elements(user_question: str) -> dict:
     }"""
 
     response = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 또는 gpt-3.5-turbo 사용 가능
+        model="moonshotai/kimi-k2-instruct",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_question}
@@ -86,7 +86,7 @@ def query_rewrite(question: str, keywords: list[str]) -> str:
     ==> 재작성된 검색 질문:
     """
     rewritten_question = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
+        model="moonshotai/kimi-k2-instruct",
         messages=[{"role": "user", "content": rewrite_prompt}],
         temperature=0.5,
     )
@@ -118,7 +118,7 @@ def query_reinforce(state: dict) -> str:
     """
 
     response = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # Groq 또는 원하는 모델
+        model="moonshotai/kimi-k2-instruct",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3
     )

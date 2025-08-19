@@ -13,7 +13,7 @@ from config import DEFAULT_SAVE_DIR, DEFAULT_WEAKNESS_DIR
 
 def extract_quiz_params(
     user_question: str,
-    model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+    model: str = "moonshotai/kimi-k2-instruct",
     temperature: float = 0.2,
     groq_api_key: str = None,
     base_url: str = "https://api.groq.com/openai/v1"

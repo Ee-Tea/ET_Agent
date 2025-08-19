@@ -243,3 +243,5 @@ milvus/configs/
 # runtime data
 data/
 data/**
+*.rdb
+*.aof

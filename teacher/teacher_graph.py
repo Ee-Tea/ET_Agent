@@ -78,6 +78,24 @@ SHARED_DEFAULTS: Dict[str, Any] = {
     "retrieve_answer": "",
 }
 
+# 의도 정규화 헬퍼
+CANON_INTENTS = {"retrieve","generate","analyze","solution","score"}
+
+def normalize_intent(raw: str) -> str:
+    s = (raw or "").strip().strip('"\'' ).lower()  # 양끝 따옴표/공백 제거
+    # 흔한 별칭/오타 흡수
+    alias = {
+    "generator":"generate",
+    "problem_generation":"generate",
+    "make":"generate","create":"generate","생성":"generate","만들":"generate",
+    "analysis":"analyze","분석":"analyze",
+    "search":"retrieve","lookup":"retrieve","검색":"retrieve",
+    "solve":"solution","풀이":"solution",
+    "grade":"score","채점":"score",
+    }
+    s = alias.get(s, s)
+    return s if s in CANON_INTENTS else "retrieve"
+
 def ensure_shared(state: TeacherState) -> TeacherState:
     """shared 키 및 타입을 보정하여 이후 노드에서 안정적으로 사용 가능하게 합니다."""
     ns = deepcopy(state) if state else {}
@@ -166,19 +184,50 @@ class Orchestrator:
         return state
 
     # ── Intent & Routing ────────────────────────────────────────────────────
+
     @traceable(name="teacher.intent_classifier")
     def intent_classifier(self, state: TeacherState) -> TeacherState:
         uq = (state.get("user_query") or "").strip()
-        intent = "retrieve" if not uq else "retrieve"  # 기본값: 검색
-        try:
-            from teacher_nodes import user_intent
-            intent = (user_intent(uq) or intent).lower() if uq else intent
-        except Exception:
-            pass
-        print(f"사용자 의도 분류: {intent}")
+
+        # 규칙 기반 빠른 분기: 문제 생성 의도 강하게 감지 시 바로 generate
+        def _looks_like_generation(text: str) -> bool:
+            import re
+            if not text:
+                return False
+            text_no_space = re.sub(r"\s+", "", text)
+            keywords = ["문제", "문항", "출제", "만들", "생성", "모의고사"]
+            if any(kw in text for kw in keywords):
+                # 과목명 또는 문항수 표기가 함께 있으면 강한 시그널
+                subjects = [
+                    "소프트웨어설계",
+                    "소프트웨어개발",
+                    "데이터베이스구축",
+                    "프로그래밍언어활용",
+                    "정보시스템구축관리",
+                ]
+                has_subject = any((s in text) or (re.sub(r"\s+","",s) in text_no_space) for s in subjects)
+                has_count = re.search(r"\d+\s*(?:문제|문항|개)", text) is not None
+                return has_subject or has_count
+            return False
+
+        raw = ""  # raw 변수를 먼저 초기화
+        if _looks_like_generation(uq):
+            intent = "generate"
+        else:
+            try:
+                from teacher_nodes import user_intent
+                raw = user_intent(uq) if uq else ""
+            except Exception:
+                pass
+            intent = normalize_intent(raw or "retrieve")
+        print(f"사용자 의도 분류(정규화): {intent} (raw={raw!r})")
         return {**state, "user_query": uq, "intent": intent}
 
     def select_agent(self, state: TeacherState) -> str:
+        try:
+            intent_norm = normalize_intent(state.get("intent", ""))
+        except NameError:
+            intent_norm = (state.get("intent","") or "").strip().strip('"\'' ).lower()
         mapping = {
             "retrieve": "retrieve",
             "generate": "generator",
@@ -186,7 +235,9 @@ class Orchestrator:
             "solution": "route_solution",
             "score": "route_score",
         }
-        return mapping.get((state.get("intent") or "").lower(), "retrieve")
+        chosen = mapping.get(intent_norm, "retrieve")
+        print(f"[router] intent={intent_norm} → {chosen}")
+        return chosen
 
     # ── Router (의존성 자동 보장) ───────────────────────────────────────────
     def route_solution(self, state: TeacherState) -> str:
@@ -248,25 +299,130 @@ class Orchestrator:
         agent = self.generator_runner
         if agent is None:
             raise RuntimeError("generator_runner is not initialized (init_agents=False).")
-        agent_input = {"query": state.get("user_query", "")}
-        agent_result = safe_execute(agent, agent_input)
+        user_query = state.get("user_query", "")
 
+        # 사용자 입력에서 과목/문항수/난이도 파싱
+        def _parse_count(text: str) -> int | None:
+            import re
+            # 예: "10문제", "10문항", "10개"
+            m = re.search(r"(\d+)\s*(?:문제|문항|개)", text)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    return None
+            # 숫자만 있는 경우 가장 처음 숫자를 문항수로 가정
+            m2 = re.search(r"(\d+)", text)
+            if m2:
+                try:
+                    return int(m2.group(1))
+                except ValueError:
+                    return None
+            return None
+
+        def _parse_difficulty(text: str) -> str | None:
+            if not text:
+                return None
+            text = text.strip()
+            for d in ("초급", "중급", "고급"):
+                if d in text:
+                    return d
+            return None
+
+        def _parse_subject(text: str, subject_candidates: list[str]) -> str | None:
+            if not text:
+                return None
+            import re
+            from difflib import SequenceMatcher
+
+            def _norm(s: str) -> str:
+                s = s or ""
+                return re.sub(r"\s+", "", s)
+
+            text_norm = _norm(text)
+
+            # 동의어/약칭 매핑으로 우선 매칭
+            alias_map: dict[str, list[str]] = {
+                "소프트웨어설계": ["소프트웨어설계", "소프트웨어 설계", "소프트웨어구조", "소프트웨어 구조", "SW설계", "SW 설계", "설계"],
+                "소프트웨어개발": ["소프트웨어개발", "소프트웨어 개발", "SW개발", "SW 개발", "개발"],
+                "데이터베이스구축": [
+                    "데이터베이스구축", "데이터베이스 구축", "데이터베이스구조", "데이터베이스 구조",
+                    "데이터베이스", "DB", "디비", "DB구축", "DB 구축", "DB구조", "DB 구조"
+                ],
+                "프로그래밍언어활용": ["프로그래밍언어활용", "프로그래밍 언어", "언어", "코딩", "프로그래밍"],
+                "정보시스템구축관리": ["정보시스템구축관리", "정보시스템 구축 관리", "정보시스템", "시스템구축", "시스템 관리"]
+            }
+
+            alias_hits: list[tuple[str, int]] = []  # (subject, matched_alias_len)
+            for subject, aliases in alias_map.items():
+                for al in aliases:
+                    if _norm(al) and _norm(al) in text_norm:
+                        alias_hits.append((subject, len(_norm(al))))
+                        break
+            if alias_hits:
+                # 가장 구체적인(길이가 긴) 별칭이 매칭된 과목을 우선 선택
+                alias_hits.sort(key=lambda x: x[1], reverse=True)
+                return alias_hits[0][0]
+
+            # 후보 과목명 직접 포함 매칭
+            ordered = sorted(subject_candidates or [], key=len, reverse=True)
+            for name in ordered:
+                if name and _norm(name) in text_norm:
+                    return name
+
+            # 유사도 기반(완화된 임계치)
+            best_name, best_score = None, 0.0
+            for name in ordered:
+                if not name:
+                    continue
+                score = SequenceMatcher(None, _norm(name), text_norm).ratio()
+                if score > best_score:
+                    best_name, best_score = name, score
+            if best_score >= 0.68:
+                return best_name
+            return None
+
+        subject_candidates = list(getattr(agent, "SUBJECT_AREAS", {}).keys()) if agent else []
+        parsed_subject = _parse_subject(user_query, subject_candidates)
+        parsed_count = _parse_count(user_query)
+        parsed_difficulty = _parse_difficulty(user_query) or "중급"
+
+        # 에이전트 입력 구성: 과목을 지정하면 subject_quiz, 아니면 full_exam
+        if parsed_subject:
+            # 과목 문제 생성 모드 - 사용자가 요청한 수만큼만 생성
+            target_count = parsed_count if parsed_count and parsed_count > 0 else 5
+            agent_input = {
+                "mode": "subject_quiz",
+                "subject_area": parsed_subject,
+                "target_count": target_count,  # 사용자 요청 수 사용
+                "difficulty": parsed_difficulty,
+                "save_to_file": False,
+                "strict_count": True,  # 정확한 수만큼만 생성하도록 플래그 추가
+            }
+            print(f"[Generator] {parsed_subject} 과목 {target_count}문제 생성 요청")
+        else:
+            # 전체 모드. 문항수만 명시된 경우는 현재 구조상 25문 고정이라 무시됨
+            agent_input = {
+                "mode": "full_exam",
+                "difficulty": parsed_difficulty,
+                "save_to_file": False,
+            }
+        agent_result = safe_execute(agent, agent_input)
+        print(f"문제 생성 결과: {agent_result}")
         new_state: TeacherState = {**state}
         new_state.setdefault("generation", {})
         new_state["generation"].update(agent_result)
 
         # 공유부 누적(Append)
-        if "validated_questions" in agent_result:
-            sh = new_state.setdefault("shared", {})
+        def _append_items_into_shared(target_state: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
+            sh = target_state.setdefault("shared", {})
             sh.setdefault("question", [])
             sh.setdefault("options", [])
             sh.setdefault("answer", [])
             sh.setdefault("explanation", [])
             sh.setdefault("subject", [])
-
-            for item in agent_result["validated_questions"]:
-                if "question" in item and "options" in item:
-                    # options 정규화
+            for item in items or []:
+                if isinstance(item, dict) and ("question" in item) and ("options" in item):
                     opts = item.get("options", [])
                     if isinstance(opts, str):
                         lines = [x.strip() for x in opts.splitlines() if x.strip()]
@@ -275,11 +431,45 @@ class Orchestrator:
                         opts = [str(x).strip() for x in opts if str(x).strip()]
                     else:
                         opts = []
-                    sh["question"].append(item["question"])
+                    sh["question"].append(item.get("question", ""))
                     sh["options"].append(opts)
                     sh["answer"].append(item.get("answer", ""))
                     sh["explanation"].append(item.get("explanation", ""))
                     sh["subject"].append(item.get("subject", ""))
+
+        # 이전 대화의 누적을 방지하기 위해 Q/A 관련 shared 리스트 초기화
+        sh_init = new_state.setdefault("shared", {})
+        for _k in ("question", "options", "answer", "explanation", "subject"):
+            sh_init[_k] = []
+
+        items_to_append: List[Dict[str, Any]] = []
+        # 1) validated_questions 직접 제공 시
+        if isinstance(agent_result, dict) and isinstance(agent_result.get("validated_questions"), list):
+            items_to_append = agent_result.get("validated_questions", [])
+        else:
+            # 2) InfoProcessingExamAgent.execute 포맷 처리
+            result_payload = agent_result.get("result") if isinstance(agent_result, dict) else None
+            if isinstance(result_payload, dict):
+                # subject_quiz 모드: questions 필드 (사용자 요청 수만큼만)
+                if isinstance(result_payload.get("questions"), list):
+                    target_count = parsed_count if parsed_count and parsed_count > 0 else 5
+                    questions = result_payload.get("questions", [])
+                    items_to_append = questions[:target_count]  # 요청한 수만큼만 추출
+                    print(f"[Generator] {len(questions)}개 생성됨 → {len(items_to_append)}개 사용 (요청: {target_count}개)")
+                # full_exam 모드: all_questions가 있으면 우선 사용
+                elif isinstance(result_payload.get("all_questions"), list):
+                    items_to_append = result_payload.get("all_questions", [])
+                # 없으면 subjects.*.questions 합치기
+                elif isinstance(result_payload.get("subjects"), dict):
+                    aggregated: List[Dict[str, Any]] = []
+                    for v in result_payload.get("subjects", {}).values():
+                        qs = v.get("questions") if isinstance(v, dict) else None
+                        if isinstance(qs, list):
+                            aggregated.extend(qs)
+                    items_to_append = aggregated
+
+        if items_to_append:
+            _append_items_into_shared(new_state, items_to_append)
 
         validate_qas(new_state["shared"])
         return new_state
@@ -588,21 +778,25 @@ if __name__ == "__main__":
             e_cnt = len(shared.get("explanation", []) or [])
             print(f"[QA] question={q_cnt}, answer={a_cnt}, explanation={e_cnt}")
 
-            # 최근 문항 미리보기(있으면)
+            # 문항 미리보기(있으면)
             if q_cnt:
-                latest_q = shared["question"][-1]
-                latest_opts = (shared.get("options") or [[]])[-1] if shared.get("options") else []
-                print(f"[Last Q] {str(latest_q)[:180]}{'...' if len(str(latest_q))>180 else ''}")
-                if latest_opts:
-                    print("  Options:", "; ".join(latest_opts[:6]) + ("..." if len(latest_opts) > 6 else ""))
+                print(f"\n=== 생성된 {q_cnt}개 문제 ===")
+                for i in range(q_cnt):
+                    q = shared["question"][i] if i < len(shared["question"]) else ""
+                    opts = (shared.get("options") or [[]] * q_cnt)[i] if i < len(shared.get("options") or []) else []
+                    ans = (shared.get("answer") or [""] * q_cnt)[i] if i < len(shared.get("answer") or []) else ""
+                    exp = (shared.get("explanation") or [""] * q_cnt)[i] if i < len(shared.get("explanation") or []) else ""
+                    
+                    print(f"\n[문제 {i+1}] {str(q)[:150]}{'...' if len(str(q))>150 else ''}")
+                    if opts:
+                        print("  Options:", "; ".join(opts[:6]) + ("..." if len(opts) > 6 else ""))
+                    if ans:
+                        print(f"  Answer: {str(ans)[:100]}{'...' if len(str(ans))>100 else ''}")
+                    if exp:
+                        print(f"  Explanation: {str(exp)[:120]}{'...' if len(str(exp))>120 else ''}")
+                print("=" * 50)
 
-            # 최근 모델 풀이/해설 미리보기(있으면)
-            if a_cnt:
-                last_ans = shared["answer"][-1]
-                print(f"[Model Answer] {str(last_ans)[:120]}{'...' if len(str(last_ans))>120 else ''}")
-            if e_cnt:
-                last_exp = shared["explanation"][-1]
-                print(f"[Explanation]  {str(last_exp)[:160]}{'...' if len(str(last_exp))>160 else ''}")
+            # 최근 모델 풀이/해설 미리보기 제거 (각 문제마다 이미 표시됨)
 
             # 분석/취약유형
             weak = shared.get("weak_type")

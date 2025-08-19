@@ -13,6 +13,7 @@ import re
 from collections import Counter
 import time
 from datetime import datetime
+from pathlib import Path
 
 # .env 파일 로드를 위한 임포트
 from dotenv import load_dotenv
@@ -62,7 +63,6 @@ class GraphState(TypedDict):
     documents: List[Document]
     context: str
     quiz_questions: List[Dict[str, Any]]
-    quiz_count: int
     difficulty: str
     error: str
     used_sources: List[str]
@@ -101,9 +101,12 @@ class InfoProcessingExamAgent(BaseAgent):
         }
     }
     
-    def __init__(self, data_folder="C:\\ET_Agent\\teacher\\TestGenerator\\data", groq_api_key=None):
-        """초기화"""
-        self.data_folder = data_folder
+    def __init__(self, data_folder=None, groq_api_key=None):
+        if data_folder is None:
+            # 현재 파일 기준으로 data 폴더 설정
+            base_dir = Path(__file__).resolve().parent  # TestGenerator 폴더
+            data_folder = base_dir / "data"
+        self.data_folder = Path(data_folder)
         os.makedirs(self.data_folder, exist_ok=True)
         
         # Groq API 키 설정
@@ -320,17 +323,18 @@ class InfoProcessingExamAgent(BaseAgent):
             if not context.strip():
                 return {**state, "error": "검색된 문서 내용이 없습니다."}
             
-            generate_count = max(needed_count, 3)
+            # 정확히 필요한 개수만 생성하여 속도와 일관성 개선
+            generate_count = max(min(needed_count, 10), 1)
             
             prompt_template = PromptTemplate(
-                input_variables=["context", "quiz_count", "subject_area"],
-                template="""아래 문서 내용을 바탕으로 {subject_area} 과목의 객관식 문제 {quiz_count}개를 반드시 생성하세요.\n각 문제는 4지선다, 정답 번호와 간단한 해설을 포함해야 하며, 반드시 JSON만 출력하세요.\n\n[문서]\n{context}\n\n[출력 예시]\n{{\n  \"questions\": [\n    {{\n      \"question\": \"문제 내용\",\n      \"options\": [\"선택지1\", \"선택지2\", \"선택지3\", \"선택지4\"],\n      \"answer\": \"정답 번호(예: 1)\",\n      \"explanation\": \"간단한 해설\"\n    }}\n  ]\n}}\n"""
+                input_variables=["context", "subject_area", "needed_count"],
+                template="""아래 문서 내용을 바탕으로 {subject_area} 과목의 객관식 문제 {needed_count}개를 반드시 생성하세요.\n각 문제는 4지선다, 정답 번호와 간단한 해설을 포함해야 하며, 반드시 JSON만 출력하세요.\n\n[문서]\n{context}\n\n[출력 예시]\n{{\n  \"questions\": [\n    {{\n      \"question\": \"문제 내용\",\n      \"options\": [\"선택지1\", \"선택지2\", \"선택지3\", \"선택지4\"],\n      \"answer\": \"정답 번호(예: 1)\",\n      \"explanation\": \"간단한 해설\"\n    }}\n  ]\n}}\n"""
             )
             
             prompt = prompt_template.format(
                 context=context,
-                quiz_count=generate_count,
-                subject_area=subject_area
+                subject_area=subject_area,
+                needed_count=generate_count
             )
             
             self.llm.temperature = 0.2
@@ -340,7 +344,14 @@ class InfoProcessingExamAgent(BaseAgent):
             
             new_questions = self._parse_quiz_response(response_content, subject_area)
             if not new_questions:
-                return {**state, "error": "유효한 문제를 생성하지 못했습니다."}
+                # 재시도 유도: 시도 횟수 증가시켜 루프가 계속 돌도록 함
+                return {
+                    **state,
+                    "quiz_questions": [],
+                    "validated_questions": validated_questions,
+                    "generation_attempts": state.get("generation_attempts", 0) + 1,
+                    "error": "유효한 문제를 생성하지 못했습니다."
+                }
             
             return {
                 **state,
@@ -382,6 +393,7 @@ class InfoProcessingExamAgent(BaseAgent):
 2. 정보처리기사 시험 수준에 적합한 난이도인가?
 3. 4개 선택지가 명확하고 정답이 유일한가?
 4. 해설이 문서 내용을 정확히 반영하고 있는가?
+5. 사용자의 질문을 파악하고 정답을 추론할 수 있는 문제인가?
 
 [응답 형식]
 'is_valid'(boolean)와 'reason'(한국어 설명) 키를 가진 JSON 객체로만 응답해주세요.
@@ -554,7 +566,6 @@ Your JSON response:"""
         try:
             initial_state = {
                 "query": query,
-                "quiz_count": needed_count,
                 "target_quiz_count": needed_count,
                 "difficulty": difficulty,
                 "generation_attempts": 0,

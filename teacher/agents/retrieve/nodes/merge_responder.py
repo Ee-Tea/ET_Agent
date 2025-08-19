@@ -26,7 +26,7 @@ def merge_context(wiki,ddg) -> str:
     ==> 중복을 제거한 요약 결과:
     """
     merged_result = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
+        model="moonshotai/kimi-k2-instruct",
         messages=[{"role": "user", "content": merge_prompt}],
         temperature=0.5,
     )
@@ -42,7 +42,7 @@ def generate_answer(prompt: str, context: str) -> str:
     질문: {prompt}
     답변:"""
     response = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
+        model="moonshotai/kimi-k2-instruct",
         messages=[{"role": "user", "content": full_prompt}],
         temperature=0.5,
     )

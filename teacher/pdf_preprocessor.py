@@ -102,9 +102,25 @@ class PDFPreprocessor:
     def extract_problems_from_pdf(self, file_paths: List[str]) -> List[Dict]:
         """PDF 파일에서 문제 추출 (Docling 사용)"""
         try:
-            # Docling 변환기 초기화
+            # Docling 변환기 초기화 - 설정 개선
             print("🔧 DocumentConverter 초기화 중...")
             converter = DocumentConverter()
+            
+            # Docling 설정 조정
+            try:
+                # 이미지 처리 비활성화 시도
+                converter.config.image_processing = False
+                print("✅ 이미지 처리 비활성화 설정")
+            except:
+                print("⚠️ 이미지 처리 설정 변경 불가")
+            
+            try:
+                # 텍스트 추출 우선순위 설정
+                converter.config.text_extraction_priority = "text"
+                print("✅ 텍스트 추출 우선순위 설정")
+            except:
+                print("⚠️ 텍스트 추출 우선순위 설정 불가")
+                
             print("✅ DocumentConverter 초기화 완료")
         except Exception as e:
             print(f"❌ DocumentConverter 초기화 실패: {e}")
@@ -128,16 +144,75 @@ class PDFPreprocessor:
             try:
                 print(f"📖 파일 처리 중: {path}")
                 
-                # Docling으로 PDF 변환
+                # Docling으로 PDF 변환 - 여러 방법 시도
                 doc_result = converter.convert(path)
-                raw_text = doc_result.document.export_to_markdown()
                 
-                if not raw_text.strip():
-                    print(f"⚠️ PDF에서 텍스트를 추출할 수 없음: {path}")
+                # 방법 1: 마크다운 추출
+                raw_text = doc_result.document.export_to_markdown()
+                print(f"📝 [방법1] 마크다운 추출 결과 (길이: {len(raw_text)}자)")
+                print(f"   미리보기: '{raw_text[:200]}...'")
+                
+                # 방법 2: 텍스트 직접 추출
+                try:
+                    raw_text2 = doc_result.document.text
+                    print(f"📝 [방법2] 텍스트 직접 추출 결과 (길이: {len(raw_text2)}자)")
+                    print(f"   미리보기: '{raw_text2[:200]}...'")
+                    
+                    # 텍스트 직접 추출이 더 나으면 사용
+                    if len(raw_text2) > len(raw_text) and not raw_text2.startswith('<!--'):
+                        raw_text = raw_text2
+                        print("✅ 텍스트 직접 추출 방식 사용")
+                except Exception as e:
+                    print(f"⚠️ 텍스트 직접 추출 실패: {e}")
+                
+                # 방법 3: 페이지별 텍스트 추출
+                try:
+                    pages_text = []
+                    for page in doc_result.document.pages:
+                        page_text = page.text
+                        if page_text and not page_text.startswith('<!--'):
+                            pages_text.append(page_text)
+                    
+                    if pages_text:
+                        raw_text3 = '\n\n'.join(pages_text)
+                        print(f"📝 [방법3] 페이지별 텍스트 추출 결과 (길이: {len(raw_text3)}자)")
+                        print(f"   미리보기: '{raw_text3[:200]}...'")
+                        
+                        # 페이지별 추출이 더 나으면 사용
+                        if len(raw_text3) > len(raw_text) and not raw_text3.startswith('<!--'):
+                            raw_text = raw_text3
+                            print("✅ 페이지별 텍스트 추출 방식 사용")
+                except Exception as e:
+                    print(f"⚠️ 페이지별 텍스트 추출 실패: {e}")
+                
+                # 방법 4: 마크다운에서 HTML 태그 제거
+                if raw_text.startswith('<!--'):
+                    print("🔄 마크다운에서 HTML 태그 제거 시도...")
+                    try:
+                        # HTML 주석과 태그 제거
+                        import re
+                        cleaned_text = re.sub(r'<!--.*?-->', '', raw_text, flags=re.DOTALL)
+                        cleaned_text = re.sub(r'<[^>]+>', '', cleaned_text)
+                        cleaned_text = re.sub(r'^\s*-\s*', '', cleaned_text, flags=re.MULTILINE)
+                        cleaned_text = re.sub(r'^\s*$', '', cleaned_text, flags=re.MULTILINE)
+                        cleaned_text = '\n'.join(line for line in cleaned_text.split('\n') if line.strip())
+                        
+                        if cleaned_text and len(cleaned_text) > 50:
+                            raw_text = cleaned_text
+                            print(f"✅ HTML 태그 제거 성공 (길이: {len(raw_text)}자)")
+                            print(f"   미리보기: '{raw_text[:200]}...'")
+                        else:
+                            print("⚠️ HTML 태그 제거 후 텍스트가 너무 짧음")
+                    except Exception as e:
+                        print(f"⚠️ HTML 태그 제거 실패: {e}")
+                
+                if not raw_text.strip() or raw_text.startswith('<!--'):
+                    print(f"❌ 모든 Docling 방법으로도 텍스트 추출 실패")
+                    print(f"⚠️ PDF 파일 자체에 문제가 있을 수 있음")
                     continue
                 
                 # 디버깅: 추출된 텍스트 일부 출력
-                print(f"📝 추출된 텍스트 미리보기 (처음 500자):")
+                print(f"📝 최종 추출된 텍스트 미리보기 (처음 500자):")
                 print(f"'{raw_text[:500]}...'")
                 print(f"📊 총 텍스트 길이: {len(raw_text)} 문자")
                 
@@ -289,8 +364,16 @@ class PDFPreprocessor:
             m = _QHEAD_CAND.match(ln or '')
             if m:
                 num = int(m.group(1))
-                candidates.append((i, num))
-                print(f"🔍 [폴백] 라인 {i}: '{ln[:50]}...' → 후보 번호 {num}")
+                # 보기 번호가 아닌지 확인 (1), 2), 3), 4)는 보기)
+                if not re.match(r'^\s*\d+\)\s*', ln):
+                    # 추가 검증: 실제 문제 내용이 있는지 확인
+                    if len(ln.strip()) > 10:  # 최소 10자 이상
+                        candidates.append((i, num))
+                        print(f"🔍 [폴백] 라인 {i}: '{ln[:50]}...' → 후보 번호 {num}")
+                    else:
+                        print(f"🔍 [폴백] 라인 {i}: '{ln[:50]}...' → 너무 짧아서 제외")
+                else:
+                    print(f"🔍 [폴백] 라인 {i}: '{ln[:50]}...' → 보기 번호로 판단하여 제외")
         
         print(f"🔍 [폴백] 총 후보 수: {len(candidates)}")
         
@@ -333,8 +416,12 @@ class PDFPreprocessor:
                 simple_pattern = re.compile(r'(?m)^\s*(\d{1,2})\.\s+')
                 for i, ln in enumerate(lines):
                     if simple_pattern.match(ln or ''):
-                        headers.append(i)
-                        print(f"📌 [폴백] 라인 {i}: '{ln[:30]}...' → 헤더 추가")
+                        # 보기 번호가 아닌지 확인
+                        if not re.match(r'^\s*\d+\)\s*', ln):
+                            headers.append(i)
+                            print(f"📌 [폴백] 라인 {i}: '{ln[:30]}...' → 헤더 추가")
+                        else:
+                            print(f"📌 [폴백] 라인 {i}: '{ln[:30]}...' → 보기 번호로 판단하여 제외")
             
             if not headers:
                 print(f"❌ [폴백 실패] 전체를 1개 블록으로 처리")
@@ -360,19 +447,41 @@ class PDFPreprocessor:
         
         lines = raw_text.split('\n')
         
+        # 디버깅: 전체 라인 구조 분석
+        print(f"📊 전체 라인 수: {len(lines)}")
+        print("🔍 라인별 내용 분석 (처음 50줄):")
+        for i, line in enumerate(lines[:50]):
+            if line.strip():
+                print(f"   라인 {i+1:2d}: '{line.strip()}'")
+        
+        # 숫자로 시작하는 라인들 찾기
+        print("\n🔍 숫자로 시작하는 라인들:")
+        number_lines = []
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            if line_stripped and re.match(r'^\d+\.', line_stripped):
+                number_lines.append((i, line_stripped))
+                print(f"   라인 {i+1:2d}: '{line_stripped[:100]}...'")
+        
+        print(f"📊 숫자로 시작하는 라인 수: {len(number_lines)}")
+        
         # 실제 문제 헤더 패턴들 (우선순위 순)
         problem_header_patterns = [
-            r'^\s*##\s*문제\s*(\d+)\s*[.)]\s*',  # "## 문제 1." (마크다운 헤더)
-            r'^\s*#+\s*문제\s*(\d+)\s*[.)]\s*',  # "# 문제 1.", "### 문제 1." 등
-            r'^\s*문제\s*(\d+)\s*[.)]\s*',       # "문제 1." 또는 "문제 1)"
-            r'^\s*Q\s*(\d+)\s*[.)]\s*',          # "Q1." 또는 "Q1)"
+            r'^\s*##\s*문제\s*(\d+)\s*\.\s*',   # "## 문제 1." (마크다운 헤더)
+            r'^\s*#+\s*문제\s*(\d+)\s*\.\s*',   # "# 문제 1.", "### 문제 1." 등
+            r'^\s*문제\s*(\d+)\s*\.\s*',        # "문제 1." (점만)
+            r'^\s*(\d+)\s*\.\s*',                # "1." (숫자. + 공백)
+            r'^\s*(\d+)\s*\.\s*\S',             # "1. 텍스트" (숫자. + 공백 + 텍스트)
+            r'^\s*Q\s*(\d+)\s*\.\s*',           # "Q1." (점만)
             r'^\s*\[(\d+)\]\s*',                 # "[1]"
+            # 마크다운 헤더 안의 숫자 패턴 추가
+            r'^\s*#+\s*.*?(\d+)\s*\.\s*',       # "## ... 1. ..." (마크다운 헤더 안의 숫자)
         ]
         
         # 보기 번호 패턴들 (문제 헤더가 아님)
         option_patterns = [
             r'^\s*(\d+)\.\s*\1\.\s*',           # "4. 4." (중복 번호)
-            r'^\s*(\d+)\s*[.)]\s*',              # "1)", "2." (보기 번호)
+            r'^\s*(\d+)\s*[)]\s*',              # "1)", "2)" (보기 번호 - 괄호만)
             r'^\s*[①②③④⑤⑥⑦⑧⑨⑩]\s*',      # 원문자 보기
             r'^\s*[가-하]\s*[)]\s*',            # "가)", "나)" (보기)
             r'^\s*[A-E]\s*[)]\s*',              # "A)", "B)" (보기)

@@ -222,9 +222,19 @@ if user_text is not None:
                 file_name=f"solution_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
             )
+            # 메시지에 상세 결과도 함께 추가
+            details = "\n\n".join(
+                [
+                    f"문항 {i+1}:\n"
+                    f"문제: {item.get('question','')}\n"
+                    f"정답: {item.get('generated_answer','')}\n"
+                    f"풀이: {item.get('generated_explanation','')}"
+                    for i, item in enumerate(merged_results)
+                ]
+            )
             st.session_state["messages"].append({
                 "role": "assistant",
-                "content": f"총 {len(merged_results)}개의 문항 결과를 생성했습니다. 상세는 아래 확장영역을 확인하세요."
+                "content": f"총 {len(merged_results)}개의 문항 결과를 생성했습니다. 상세는 아래 확장영역을 확인하세요.\n\n{details}"
             })
         else:
             st.info("결과가 없습니다. 입력 텍스트 또는 첨부를 확인해 주세요.")

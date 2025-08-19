@@ -23,13 +23,9 @@ from typing import Dict, Any
 load_dotenv()
 api_key = os.getenv("KAMIS_API_KEY")
 api_id = os.getenv("KAMIS_ID")
-groq_api_keys = [os.getenv(f"OPENAI_KEY{i}") for i in range(1, 4)]
+groq_api_key = os.getenv(f"OPENAI_KEY1")
 milvus_host = os.getenv("MILVUS_HOST", "localhost")
 milvus_port = os.getenv("MILVUS_PORT", "19530")
-
-# Milvus 연결 및 컬렉션 설정
-connections.connect("default", host=milvus_host, port=milvus_port)
-
 collection_name = "market_price_docs"
 
 # CSV 파일 임베딩 및 Milvus에 저장
@@ -45,31 +41,37 @@ def embed_and_store_csv(csv_path="data/info_20240812.csv"):
         collection.insert([embeddings.tolist(), docs], fields=["embedding", "text"])
 
 # 컬렉션 있는지 검사
-if collection_name in utility.list_collections():
-    collection = Collection(collection_name)  # 이미 있으면 기존 컬렉션 사용
-    print(f"컬렉션 '{collection_name}'이 이미 존재합니다. 기존 컬렉션을 사용합니다.")
-else:
-    fields = [
-        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
-        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512),
-    ]
-    schema = CollectionSchema(fields, "시장 가격 문서 컬렉션")
-    collection = Collection(collection_name, schema)
-    print(f"컬렉션 '{collection_name}'을 새로 생성했습니다.")
-    embed_and_store_csv()
+def check_collection():
+    global collection
+    connections.connect("default", host=milvus_host, port=milvus_port)
 
-# 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
-if not collection.has_index():
-    index_params = {
-        "metric_type": "IP",
-        "index_type": "IVF_FLAT",
-        "params": {"nlist": 128}
-    }
-    collection.create_index(
-        field_name="embedding",
-        index_params=index_params
-    )
+    if collection_name in utility.list_collections():
+        collection = Collection(collection_name)  # 이미 있으면 기존 컬렉션 사용
+        print(f"컬렉션 '{collection_name}'이 이미 존재합니다. 기존 컬렉션을 사용합니다.")
+    else:
+        fields = [
+            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
+            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512),
+        ]
+        schema = CollectionSchema(fields, "시장 가격 문서 컬렉션")
+        collection = Collection(collection_name, schema)
+        print(f"컬렉션 '{collection_name}'을 새로 생성했습니다.")
+        embed_and_store_csv()
+
+    # 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
+    if not collection.has_index():
+        index_params = {
+            "metric_type": "IP",
+            "index_type": "IVF_FLAT",
+            "params": {"nlist": 128}
+        }
+        collection.create_index(
+            field_name="embedding",
+            index_params=index_params
+        )
+    
+    return collection
 
 # api 요청
 def fetch_api_data(query=None):
@@ -253,76 +255,76 @@ def hybrid_search(query, top_k=3):
 
 # Groq LLM
 class GroqLLM:
-    def __init__(self, model="openai/gpt-oss-20b", api_keys=None):
+    def __init__(self, model="openai/gpt-oss-20b", api_key=None):
         self.model = model
-        self.api_keys = api_keys or [os.getenv(f"OPENAI_KEY{i}") for i in range(1, 4)]
+        self.api_key = groq_api_key
         self.client = None
 
-    def invoke(self, prompt: str):
-        msg = ""
-        for key in self.api_keys:
-            if not key:
-                continue
-            try:
-                self.client = Groq(api_key=key)
-                completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.8,
-                    max_completion_tokens=512,
-                    top_p=0.8,
-                    reasoning_effort="low",
-                    stream=True,
-                    stop=None
-                )
-                result = "".join(chunk.choices[0].delta.content or "" for chunk in completion)
-                return result.strip()
-            except Exception as e:
-                msg = str(e)
-                print(f"API key 실패: {e}")
-                continue
-        print("모든 키가 실패했습니다.")
-        return f"LLM 호출 실패"
+    def invoke(self, prompt: str, context: str = None, system_instruction: str = None):
+        messages = []
+        
+        # 시스템 메시지로 컨텍스트와 지시사항 전달
+        if context or system_instruction:
+            system_content = ""
+            if context:
+                system_content += f"[참고 정보]\n{context}\n\n"
+            if system_instruction:
+                system_content += system_instruction
+            
+            messages.append({
+                "role": "system", 
+                "content": system_content
+            })
+        
+        # 사용자 질문
+        messages.append({
+            "role": "user", 
+            "content": prompt
+        })
+        
+        try:
+            self.client = Groq(api_key=self.api_key)
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.8,
+                max_completion_tokens=512,
+                top_p=0.8,
+                reasoning_effort="low",
+                stream=True,
+                stop=None
+            )
+            result = "".join(chunk.choices[0].delta.content or "" for chunk in completion)
+            return result.strip()
+        except Exception as e:
+            print(f"API key 실패: {e}")
+            return f"LLM 호출 실패"
 
 # 프롬프트 생성
-def make_prompt(context, query, validation_feedback=""):
-    return (
-        f"""
-        [정보]
-        {context}
-        
-        [질문]
-        {query}
-
-        {validation_feedback}
-        
+def make_system_instruction():
+    return """
         [지시]
-        - 반드시 [정보]에 나온 단위와 가격을 그대로 사용하세요.
-        - [정보]에 없는 내용은 포함하지 마세요.
-        - 답변은 한국어로, 간결하게 작성하세요.
-        - 아래 순서대로 답변하세요:
-            1. **품목과 등락율** (시세 정보가 없으면 "해당 작물에 대한 정보는 현재 없습니다."라고 답변 후 3번으로 넘어감)
-            2. 당일, 1개월전, 1년전 가격 (정보 없으면 "해당 일자의 시세 정보가 없습니다."라고 작성)
-            3. **해당 지역의 판매처 정보를 안내** (만약 판매처 정보가 없으면 "해당 지역에 위치한 판매점 정보가 없습니다."라고 답변)
-            4. **정보 출처** (정보가 있는 경우에만 작성)
+        - [참고 정보]의 가격과 단위를 정확히 사용
+        - 없는 정보는 없다고 안내
+        - 순서: 품목/등락율 → 가격정보(없으면 생략) → 판매처 → 출처 
 
         [예시]
         감자(20kg)의 가격은 어제보다 2.8%(1,060원) 증가한 39,660원입니다.
         1개월전에는 33,260원, 1년전에는 31,576원이었습니다.
-        
+
         해당 지역의 판매처는 충남 태안군 태안 로컬푸드 판매장(충남 태안군 남면 안면대로 1641 / 주요 품목: 채소, 과일, 서류) 등이 있습니다.
-        
+
         시세 정보 출처: https://www.kamis.or.kr/customer/main/main.do
         판매처 정보 출처: https://www.data.go.kr/data/15025997/fileData.do
-        """
-    )
+    """
 
 # LLM 호출
-def ask_llm_groq(prompt, model="openai/gpt-oss-20b"):
-    llm = GroqLLM(model=model, api_keys=groq_api_keys)
-    return llm.invoke(prompt)
+def ask_llm_groq(prompt, context="", system_instruction=None, model="openai/gpt-oss-20b"):
+    if system_instruction is None:
+        system_instruction = make_system_instruction()
+    
+    llm = GroqLLM(model=model, api_key=groq_api_key)
+    return llm.invoke(prompt, context, system_instruction)
 
 # === Agent Node 기반 워크플로우 ===
 # 상태 스키마 정의
@@ -334,6 +336,7 @@ class GraphState(dict):
     is_recommend_ok: bool = False
     exit: bool = False
     retry_count: int = 0
+    final_answer: str = ""
 
 # LangGraph 노드 함수
 def node_input_graph(state: GraphState) -> GraphState:
@@ -364,18 +367,17 @@ def node_llm_summarize_graph(state: GraphState) -> GraphState:
         f"판매처 정보: {context.get('판매처', [])}"
     )
 
-    # 이전 검증 실패 정보가 있으면 프롬프트에 포함
-    validation_feedback = ""
+    # 이전 검증 실패 정보가 있으면 컨텍스트에 추가
     if state.get("validation_details") and state.get("retry_count", 0) > 0:
-        validation_feedback = f"""
-            [이전 검증 실패 정보]
-            {chr(10).join([f"• {issue}" for issue in state.get("validation_details", {}).get("issues", [])])}
+        validation_feedback = f"\n[이전 검증 실패 정보]\n" + "\n".join([f"• {issue}" for issue in state.get("validation_details", {}).get("issues", [])])
+        context_str += validation_feedback + "\n\n위의 문제점들을 해결하여 다시 답변을 생성해주세요."
 
-            위의 문제점들을 해결하여 다시 답변을 생성해주세요.
-        """
-
-    llm_prompt = make_prompt(context_str, query, validation_feedback)
-    pred_answer = ask_llm_groq(llm_prompt)
+    # 토큰 절약된 방식으로 LLM 호출
+    pred_answer = ask_llm_groq(
+        prompt=query,
+        context=context_str,
+        system_instruction=make_system_instruction()
+    )
     
     state["pred_answer"] = pred_answer
     state["context_str_for_judge"] = context_str
@@ -642,7 +644,7 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
 def node_reanalyze_graph(state: GraphState) -> GraphState:
     state["retry_count"] += 1
     query = state["query"]
-    
+
     # 이전 검증 실패 정보 출력
     if state.get("validation_details"):
         print(f"재분석 {state['retry_count']}회차: 이전 검증에서 발견된 문제점:")
@@ -650,7 +652,7 @@ def node_reanalyze_graph(state: GraphState) -> GraphState:
             print(f"  - {issue}")
         print("위 문제점들을 해결하여 재분석합니다.")
     
-    results = hybrid_search(query, top_k=5)
+    results = hybrid_search(query, top_k=3)
     state["context"] = results
     return state
 
@@ -689,7 +691,14 @@ def judge_branch(state: GraphState) -> str:
     else:
         return "reanalyze"
 
-graph.add_conditional_edges("judge_recommendation", judge_branch)
+graph.add_conditional_edges(
+    "judge_recommendation", 
+    judge_branch,
+    {
+        "output": "output",
+        "reanalyze": "reanalyze"
+    }
+)
 graph.add_edge("reanalyze", "llm_summarize")
 graph.add_edge("output", END)
 
@@ -701,6 +710,8 @@ def run(state):
     판매처 에이전트의 워크플로우를 실행합니다.
     오케스트레이터에서 전달받은 상태를 바탕으로 LangGraph를 실행합니다.
     """
+    check_collection()
+    collection.load()
     app = graph.compile()
     
     # LangGraph가 TypedDict를 기반으로 작동하기 때문에, 일반 Dict를 TypedDict로 변환
@@ -712,9 +723,15 @@ def run(state):
 
 if __name__ == "__main__":
     # 판매처 에이전트 단독 실행용 코드
+    check_collection()
     collection.load()
     print("=== 판매처 에이전트 단독 실행 모드 ===")
     
     # LangGraph를 컴파일하고 단독으로 실행
     app = graph.compile()
-    app.invoke({"query": ""})
+    result_state = app.invoke({"query": "동두천에서 배추를 팔고 싶어"})
+    
+    print("\n" + "=" * 50)
+    if result_state.get('final_answer'):
+        print(f"\n[최종 답변]")
+        print(result_state['final_answer'])

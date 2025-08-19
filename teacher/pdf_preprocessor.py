@@ -6,9 +6,18 @@ teacher_graph.py에서 PDF 관련 로직을 분리하여 가독성을 높임
 import os
 import re
 import json
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
+from dotenv import load_dotenv
+load_dotenv()
+
 from docling.document_converter import DocumentConverter
 from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 
 class PDFPreprocessor:
@@ -92,14 +101,24 @@ class PDFPreprocessor:
     
     def extract_problems_from_pdf(self, file_paths: List[str]) -> List[Dict]:
         """PDF 파일에서 문제 추출 (Docling 사용)"""
-        # Docling 변환기 초기화
-        converter = DocumentConverter()
+        try:
+            # Docling 변환기 초기화
+            print("🔧 DocumentConverter 초기화 중...")
+            converter = DocumentConverter()
+            print("✅ DocumentConverter 초기화 완료")
+        except Exception as e:
+            print(f"❌ DocumentConverter 초기화 실패: {e}")
+            print(f"❌ 에러 타입: {type(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
         
         # LLM 설정
         llm = ChatOpenAI(
-            api_key=os.getenv("GROQ_API_KEY=REDACTED="https://api.groq.com/openai/v1", 
-            model="moonshotai/kimi-k2-instruct",
-            temperature=0
+            api_key=os.getenv("OPENAI_API_KEY=REDACTED=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"), 
+            model=OPENAI_LLM_MODEL,
+            temperature=LLM_TEMPERATURE,
+            max_tokens=LLM_MAX_TOKENS
         )
         
         all_problems = []
@@ -121,8 +140,8 @@ class PDFPreprocessor:
                 print(f"'{raw_text[:500]}...'")
                 print(f"📊 총 텍스트 길이: {len(raw_text)} 문자")
                 
-                # 텍스트를 블록으로 분할
-                blocks = self._split_problem_blocks(raw_text)
+                # 1단/2단 구분 및 처리
+                blocks = self._process_pdf_text(raw_text, path)
                 print(f"📝 {len(blocks)}개 블록으로 분할")
                 
                 # 디버깅: 첫 번째 블록 미리보기
@@ -166,6 +185,173 @@ class PDFPreprocessor:
         
         print(f"🎯 총 {len(all_problems)}개 문제 추출 완료")
         return all_problems
+    
+    def _process_pdf_text(self, raw_text: str, pdf_path: str) -> List[str]:
+        """PDF 텍스트를 1단/2단 구분하여 처리"""
+        print("🔍 [레이아웃 분석] 1단/2단 구조 파악 중...")
+        
+        # 1단 구조로 먼저 시도
+        blocks = self._split_problem_blocks(raw_text)
+        
+        # 1단 파싱 결과가 부족하면 2단 구조로 재시도
+        if len(blocks) <= 2:
+            print("⚠️ 1단 파싱 결과 부족 - 2단 구조로 재시도")
+            try:
+                # 2단 재정렬
+                reordered_text = self._reorder_two_columns_with_pdfminer(pdf_path)
+                reordered_text = self.normalize_docling_markdown(reordered_text)
+                
+                # 2단 재정렬 후 파싱 시도
+                blocks = self._split_problem_blocks(reordered_text)
+                print(f"🔄 2단 재정렬 후: {len(blocks)}개 블록")
+                
+                # 여전히 부족하면 숫자 헤더 폴백 사용
+                if len(blocks) <= 2:
+                    print("⚠️ 2단 파싱도 부족 - 숫자 헤더 폴백 사용")
+                    blocks = self._split_problem_blocks_without_keyword(reordered_text)
+                    print(f"🔄 폴백 후: {len(blocks)}개 블록")
+                    
+            except Exception as e:
+                print(f"⚠️ 2단 처리 실패: {e}")
+                # 2단 처리 실패 시 원본 텍스트로 폴백
+                blocks = self._split_problem_blocks_without_keyword(raw_text)
+        
+        return blocks
+    
+    def _reorder_two_columns_with_pdfminer(self, pdf_path: str) -> str:
+        """PDFMiner를 사용하여 2단 PDF를 1단으로 재정렬"""
+        try:
+            from pdfminer.high_level import extract_pages
+            from pdfminer.layout import LTTextContainer
+            
+            print("🔄 [2단 재정렬] PDFMiner로 좌우 컬럼 재정렬 중...")
+            
+            pages_text = []
+            for page_layout in extract_pages(pdf_path):
+                left, right = [], []
+                
+                # x 분할 기준값을 페이지 폭의 중간쯤으로 설정 (휴리스틱)
+                # LTTextContainer의 bbox=(x0,y0,x1,y1)
+                # 먼저 평균 x0를 보고 중앙값을 추정하는 보정 로직
+                xs = []
+                for el in page_layout:
+                    if isinstance(el, LTTextContainer):
+                        xs.append(el.bbox[0])
+                
+                if not xs:
+                    continue
+                    
+                # 중앙값 계산 (더 안정적인 방법)
+                sorted_xs = sorted(xs)
+                mid = sorted_xs[len(sorted_xs)//2]
+                
+                # 좌우 컬럼 분리
+                for el in page_layout:
+                    if isinstance(el, LTTextContainer):
+                        (x0, y0, x1, y1) = el.bbox
+                        text = el.get_text().strip()
+                        if text:  # 빈 텍스트 제외
+                            (left if x0 < mid else right).append((y1, text))
+                
+                # y1 기준으로 위→아래 정렬 (y1이 클수록 위쪽)
+                left.sort(key=lambda t: -t[0])
+                right.sort(key=lambda t: -t[0])
+                
+                # 왼쪽 전체 → 오른쪽 전체 순으로 합치기
+                page_text = "".join(t for _, t in left) + "\n" + "".join(t for _, t in right)
+                pages_text.append(page_text)
+            
+            result = "\n\n".join(pages_text)
+            print(f"✅ [2단 재정렬 완료] 총 {len(pages_text)}페이지 처리")
+            return result
+            
+        except ImportError:
+            print("⚠️ PDFMiner가 설치되지 않음 - 2단 재정렬 불가")
+            return ""
+        except Exception as e:
+            print(f"⚠️ 2단 재정렬 실패: {e}")
+            return ""
+    
+    def _split_problem_blocks_without_keyword(self, text: str) -> List[str]:
+        """문제 키워드가 없는 시험지에서 번호(1., 2., …)만으로 문항 단위를 분할"""
+        print("🔄 [폴백 파싱] 문제 키워드 없이 번호만으로 분할 시도")
+        
+        text = self.normalize_docling_markdown(text)
+        lines = text.split('\n')
+        n = len(lines)
+        
+        # 문항 헤더 후보 인덱스 수집
+        _QHEAD_CAND = re.compile(r'(?m)^\s*(\d{1,3})[.)]\s+\S')
+        candidates = []
+        
+        for i, ln in enumerate(lines):
+            m = _QHEAD_CAND.match(ln or '')
+            if m:
+                num = int(m.group(1))
+                candidates.append((i, num))
+                print(f"🔍 [폴백] 라인 {i}: '{ln[:50]}...' → 후보 번호 {num}")
+        
+        print(f"🔍 [폴백] 총 후보 수: {len(candidates)}")
+        
+        # 전역 증가 시퀀스 + 섹션 리셋 허용으로 실제 헤더 선별
+        headers = []
+        prev_num = 0
+        last_header_idx = -9999
+        
+        for i, num in candidates:
+            if num == prev_num + 1:
+                headers.append(i)
+                prev_num = num
+                last_header_idx = i
+                print(f"✅ [폴백] 라인 {i}: 번호 {num} - 순차 증가로 헤더 선택")
+                continue
+            
+            # 섹션 리셋: num==1이고, 최근 헤더에서 충분히 떨어져 있거나 섹션 느낌의 라인 존재 시 허용
+            if num == 1:
+                window = '\n'.join(lines[max(0, i-3): i+1])
+                if (i - last_header_idx) >= 8 or re.search(r'(Ⅰ|Ⅱ|III|과목|파트|SECTION)', window):
+                    headers.append(i)
+                    prev_num = 1
+                    last_header_idx = i
+                    print(f"✅ [폴백] 라인 {i}: 번호 {num} - 섹션 리셋으로 헤더 선택")
+                    continue
+                else:
+                    print(f"❌ [폴백] 라인 {i}: 번호 {num} - 섹션 리셋 조건 불충족 (거리: {i - last_header_idx})")
+            else:
+                print(f"❌ [폴백] 라인 {i}: 번호 {num} - 순차 증가 아님 (예상: {prev_num + 1})")
+        
+        # 헤더가 하나도 안 잡히면 폴백 전략 사용
+        if not headers:
+            print(f"❌ [폴백] 헤더가 하나도 선택되지 않음 - 폴백 전략 사용")
+            if candidates:
+                print(f"🔄 [폴백] 순차 조건 없이 모든 후보를 헤더로 사용")
+                headers = [i for i, num in candidates]
+            else:
+                # 기본 번호 패턴으로 분할
+                print(f"🔄 [폴백] 기본 번호 패턴으로 분할")
+                simple_pattern = re.compile(r'(?m)^\s*(\d{1,2})\.\s+')
+                for i, ln in enumerate(lines):
+                    if simple_pattern.match(ln or ''):
+                        headers.append(i)
+                        print(f"📌 [폴백] 라인 {i}: '{ln[:30]}...' → 헤더 추가")
+            
+            if not headers:
+                print(f"❌ [폴백 실패] 전체를 1개 블록으로 처리")
+                return [text] if text.strip() else []
+        
+        print(f"✅ [폴백] 최종 선택된 헤더 수: {len(headers)}")
+        
+        # 헤더 범위로 블록 만들기
+        headers.append(n)  # sentinel
+        blocks = []
+        for a, b in zip(headers[:-1], headers[1:]):
+            blk = '\n'.join(lines[a:b]).strip()
+            if blk:
+                blocks.append(blk)
+                print(f"📦 [폴백] 블록 {len(blocks)}: 라인 {a}-{b-1} ({len(blk)}자)")
+        
+        print(f"🎯 [폴백] 최종 블록 수: {len(blocks)}")
+        return blocks
     
     def _split_problem_blocks(self, raw_text: str) -> List[str]:
         """텍스트를 문제 블록으로 분할 (실제 문제 헤더 기반)"""
@@ -251,84 +437,6 @@ class PDFPreprocessor:
         print(f"✅ 총 {len(problem_blocks)}개 문제 블록 생성 완료")
         return problem_blocks
     
-    def _merge_blocks_by_question(self, micro_blocks: List[str]) -> List[str]:
-        """미세 분할된 블록들을 문제별로 재묶기"""
-        if not micro_blocks:
-            return []
-        
-        print(f"🔄 [재묶기] {len(micro_blocks)}개 미세 블록을 문제별로 묶는 중...")
-        
-        # 문제 헤더 패턴들 (마크다운 헤더 우선, 다양한 형식 지원)
-        question_patterns = [
-            r'^\s*##\s*문제\s*(\d+)\s*[.)]\s*',  # "## 문제 1." (마크다운 헤더 우선)
-            r'^\s*#+\s*문제\s*(\d+)\s*[.)]\s*',  # "# 문제 1.", "### 문제 1." 등
-            r'^\s*문제\s*(\d+)\s*[.)]\s*',       # "문제 1." 또는 "문제 1)"
-            r'^\s*(\d+)\s*[.)]\s*(?![①②③④⑤])', # "1." (보기가 아닌 경우)
-            r'^\s*Q\s*(\d+)\s*[.)]\s*',          # "Q1." 또는 "Q1)"
-            r'^\s*\[(\d+)\]\s*',                 # "[1]"
-        ]
-        
-        # 보기 패턴들 (문제와 구분하기 위해)
-        option_patterns = [
-            r'^\s*[①②③④⑤⑥⑦⑧⑨⑩]',      # 원문자 보기
-            r'^\s*[1-5]\s*[)]\s*\S',        # "1) 내용" (짧은 숫자 + 내용)
-            r'^\s*[가-하]\s*[)]\s*',        # "가) 내용"
-            r'^\s*[A-E]\s*[)]\s*',          # "A) 내용"
-        ]
-        
-        merged_blocks = []
-        current_block = ""
-        current_question_num = 0
-        
-        for i, block in enumerate(micro_blocks):
-            block = block.strip()
-            if not block:
-                continue
-            
-            # 문제 헤더인지 확인
-            is_question_header = False
-            question_num = 0
-            
-            for pattern in question_patterns:
-                match = re.match(pattern, block, re.IGNORECASE)
-                if match:
-                    # 보기가 아닌지 추가 확인
-                    is_option = any(re.match(opt_pattern, block) for opt_pattern in option_patterns)
-                    if not is_option:
-                        is_question_header = True
-                        question_num = int(match.group(1))
-                        print(f"✅ [문제 헤더 발견] 블록 {i+1}: '{block[:50]}...' (문제 {question_num}번)")
-                        break
-            
-            if is_question_header and current_block:
-                # 새로운 문제 시작 - 이전 블록 저장
-                merged_blocks.append(current_block.strip())
-                current_block = block
-                current_question_num = question_num
-                print(f"📦 [블록 완성] {len(merged_blocks)}번째 문제 블록 생성 ({len(current_block)}자)")
-            else:
-                # 현재 문제에 추가
-                if current_block:
-                    current_block += "\n\n" + block
-                else:
-                    current_block = block
-                    if is_question_header:
-                        current_question_num = question_num
-        
-        # 마지막 블록 추가
-        if current_block:
-            merged_blocks.append(current_block.strip())
-            print(f"📦 [블록 완성] {len(merged_blocks)}번째 문제 블록 생성 ({len(current_block)}자)")
-        
-        print(f"🎯 [재묶기 완료] {len(micro_blocks)}개 → {len(merged_blocks)}개 문제 블록")
-        
-        # 디버깅: 첫 번째 블록 미리보기
-        if merged_blocks:
-            print(f"🔍 [재묶기 결과] 첫 번째 문제 블록:")
-            print(f"'{merged_blocks[0][:200]}...'")
-        
-        return merged_blocks
-    
     def normalize_docling_markdown(self, md: str) -> str:
         """Docling 마크다운 정규화"""
         s = md
@@ -336,129 +444,6 @@ class PDFPreprocessor:
         s = re.sub(r'(?m)^\s*(\d+)\s*\.\s*', r'\1. ', s)      # '1 . ' -> '1. '
         s = re.sub(r'[ \t]+', ' ', s).replace('\r', '')
         return s.strip()
-    
-    def _find_option_clusters(self, lines: List[str], start: int, end: int) -> List[Tuple[int, int]]:
-        """
-        [start, end) 라인 구간에서 옵션 라인이 3개 이상 연속되는 구간들을 반환.
-        (보기 영역 식별용)
-        """
-        _OPT_LINE = re.compile(
-            r'(?m)^\s*(?:\(?([1-5])\)?\.?|[①-⑤]|[가-하]\)|[A-Z]\))\s+\S'
-        )
-        
-        clusters = []
-        i = start
-        while i < end:
-            if _OPT_LINE.match(lines[i] or ''):
-                j = i
-                cnt = 0
-                while j < end and _OPT_LINE.match(lines[j] or ''):
-                    cnt += 1
-                    j += 1
-                if cnt >= 3:
-                    clusters.append((i, j))  # [i, j) 옵션 블록
-                i = j
-            else:
-                i += 1
-        return clusters
-    
-    def split_problem_blocks_without_keyword(self, text: str) -> List[str]:
-        """
-        '문제' 키워드가 없는 시험지에서 번호(1., 2., …)만으로 문항 단위를 분할.
-        - 전역 증가 시퀀스(prev+1) 휴리스틱
-        - 섹션 리셋(번호=1) 제한적 허용
-        - 옵션 클러스터(연속 3+)는 문항 헤더로 취급하지 않음
-        """
-        text = self.normalize_docling_markdown(text)
-        lines = text.split('\n')
-        n = len(lines)
-
-        # 미리 옵션 클러스터를 계산해놓고, 그 내부 번호는 문항 헤더로 안 봄
-        clusters = self._find_option_clusters(lines, 0, n)
-
-        def in_option_cluster(idx: int) -> bool:
-            for a, b in clusters:
-                if a <= idx < b:
-                    return True
-            return False
-
-        # 문항 헤더 후보 인덱스 수집
-        _QHEAD_CAND = re.compile(r'(?m)^\s*(\d{1,3})[.)]\s+\S')
-        candidates = []
-        for i, ln in enumerate(lines):
-            m = _QHEAD_CAND.match(ln or '')
-            if not m:
-                continue
-            if in_option_cluster(i):
-                # 보기 블록 안의 번호는 문항 헤더가 아님
-                print(f"🔍 [디버그] 라인 {i}: '{ln[:50]}...' (옵션 클러스터 내부 - 스킵)")
-                continue
-            num = int(m.group(1))
-            candidates.append((i, num))
-            print(f"🔍 [디버그] 라인 {i}: '{ln[:50]}...' → 후보 번호 {num}")
-        
-        print(f"🔍 [디버그] 총 후보 수: {len(candidates)}")
-        print(f"🔍 [디버그] 옵션 클러스터 수: {len(clusters)}")
-
-        # 전역 증가 시퀀스 + 섹션 리셋 허용으로 실제 헤더 선별
-        headers = []
-        prev_num = 0
-        last_header_idx = -9999
-        for i, num in candidates:
-            if num == prev_num + 1:
-                headers.append(i)
-                prev_num = num
-                last_header_idx = i
-                print(f"✅ [디버그] 라인 {i}: 번호 {num} - 순차 증가로 헤더 선택")
-                continue
-            # 섹션 리셋: num==1이고, 최근 헤더에서 충분히 떨어져 있거나 섹션 느낌의 라인 존재 시 허용
-            if num == 1:
-                window = '\n'.join(lines[max(0, i-3): i+1])
-                if (i - last_header_idx) >= 8 or re.search(r'(Ⅰ|Ⅱ|III|과목|파트|SECTION)', window):
-                    headers.append(i)
-                    prev_num = 1
-                    last_header_idx = i
-                    print(f"✅ [디버그] 라인 {i}: 번호 {num} - 섹션 리셋으로 헤더 선택")
-                    continue
-                else:
-                    print(f"❌ [디버그] 라인 {i}: 번호 {num} - 섹션 리셋 조건 불충족 (거리: {i - last_header_idx})")
-            else:
-                print(f"❌ [디버그] 라인 {i}: 번호 {num} - 순차 증가 아님 (예상: {prev_num + 1})")
-            # 그 외는 옵션/노이즈로 무시
-
-        # 헤더가 하나도 안 잡히면 폴백 전략 사용
-        if not headers:
-            print(f"❌ [디버그] 헤더가 하나도 선택되지 않음 - 폴백 전략 사용")
-            # 폴백 1: 더 느슨한 조건으로 재시도
-            if candidates:
-                print(f"🔄 [폴백] 순차 조건 없이 모든 후보를 헤더로 사용")
-                headers = [i for i, num in candidates]
-            else:
-                # 폴백 2: 기본 번호 패턴으로 분할
-                print(f"🔄 [폴백] 기본 번호 패턴으로 분할")
-                simple_pattern = re.compile(r'(?m)^\s*(\d{1,2})\.\s+')
-                for i, ln in enumerate(lines):
-                    if simple_pattern.match(ln or ''):
-                        headers.append(i)
-                        print(f"📌 [폴백] 라인 {i}: '{ln[:30]}...' → 헤더 추가")
-            
-            if not headers:
-                print(f"❌ [폴백 실패] 전체를 1개 블록으로 처리")
-                return [text] if text.strip() else []
-
-        print(f"✅ [디버그] 최종 선택된 헤더 수: {len(headers)}")
-        
-        # 헤더 범위로 블록 만들기
-        headers.append(n)  # sentinel
-        blocks = []
-        for a, b in zip(headers[:-1], headers[1:]):
-            blk = '\n'.join(lines[a:b]).strip()
-            if blk:
-                blocks.append(blk)
-                print(f"📦 [디버그] 블록 {len(blocks)}: 라인 {a}-{b-1} ({len(blk)}자)")
-        
-        print(f"🎯 [디버그] 최종 블록 수: {len(blocks)}")
-        return blocks
     
     def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict]:
         """LLM으로 블록을 문제 형태로 파싱"""

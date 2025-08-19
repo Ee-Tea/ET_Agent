@@ -125,7 +125,7 @@ if run:
                     else:
                         for j, option in enumerate(opts, 1):
                             # 옵션에 번호가 이미 포함되어 있으면 그대로 보여줌
-                            st.markdown(f"{option}" if option.strip().startswith(("1.", "1)")) else f"{j}. {option}")
+                            st.markdown(f"{option}" if option.strip().startswith(("1.", "1)")) else f"{j}) {option}")
 
                     # 해설/정답 보기
                     with st.expander("📝 해답 · 풀이 보기"):

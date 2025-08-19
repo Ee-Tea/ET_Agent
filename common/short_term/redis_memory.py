@@ -46,7 +46,7 @@ class RedisLangGraphMemory:
         service: str,
         chat_id: str,
         redis_host: str = "localhost",
-        redis_port: int = 6379,
+        redis_port: int = 6380,
         ttl_seconds: Optional[int] = DEFAULT_TTL,
     ):
         self.user_id = user_id

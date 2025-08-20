@@ -6,11 +6,151 @@
 
 import os
 import sys
+import re
 from pathlib import Path
 
 # 프로젝트 루트 경로 추가
 project_root = Path(__file__).parent
 sys.path.append(str(project_root))
+
+def analyze_missing_problems(blocks, text):
+    """누락된 문제들을 분석합니다."""
+    print("\n🔍 누락된 문제 분석")
+    print("=" * 50)
+    
+    # 모든 문제 번호 찾기
+    all_problem_numbers = set()
+    missing_numbers = set()
+    
+    # 텍스트에서 문제 번호 패턴 찾기
+    problem_patterns = [
+        r'(\d+)\.\s*[^가-힣]*[가-힣]',  # "1. 문제내용" 형태
+        r'##\s*(\d+)\.\s*[^가-힣]*[가-힣]',  # "## 1. 문제내용" 형태
+        r'##\s*[^가-힣]*(\d+)\.\s*[가-힣]',  # "## 문제내용 1." 형태
+    ]
+    
+    for pattern in problem_patterns:
+        matches = re.findall(pattern, text)
+        for match in matches:
+            if match.isdigit():
+                all_problem_numbers.add(int(match))
+    
+    print(f"📊 발견된 모든 문제 번호: {sorted(all_problem_numbers)}")
+    
+    # 1-29까지의 문제 번호 중 누락된 것 찾기
+    expected_numbers = set(range(1, 30))
+    missing_numbers = expected_numbers - all_problem_numbers
+    
+    if missing_numbers:
+        print(f"❌ 누락된 문제 번호: {sorted(missing_numbers)}")
+        
+        # 누락된 문제 주변 텍스트 찾기
+        for missing_num in sorted(missing_numbers):
+            print(f"\n🔍 누락된 문제 {missing_num}번 주변 텍스트:")
+            
+            # 텍스트에서 해당 번호 주변 검색
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if str(missing_num) in line:
+                    start = max(0, i-2)
+                    end = min(len(lines), i+3)
+                    print(f"   라인 {start+1}-{end}:")
+                    for j in range(start, end):
+                        marker = ">>> " if j == i else "    "
+                        print(f"   {marker}{lines[j]}")
+                    break
+            else:
+                print(f"   문제 {missing_num}번을 포함한 라인을 찾을 수 없습니다.")
+    else:
+        print("✅ 모든 문제 번호가 발견되었습니다!")
+    
+    # 특별히 문제 6번과 9번 상세 분석
+    print("\n🔍 특별 분석: 문제 6번과 9번")
+    print("=" * 30)
+    
+    # 문제 6번 상세 분석
+    print("\n📝 문제 6번 상세 분석:")
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        if '6.' in line and 'UML' in line:
+            print(f"   라인 {i+1}: {line}")
+            # 주변 라인들도 확인
+            start = max(0, i-3)
+            end = min(len(lines), i+4)
+            print(f"   주변 라인 {start+1}-{end}:")
+            for j in range(start, end):
+                marker = ">>> " if j == i else "    "
+                print(f"   {marker}{lines[j]}")
+            break
+    
+    # 문제 9번 상세 분석
+    print("\n📝 문제 9번 상세 분석:")
+    found_9 = False
+    for i, line in enumerate(lines):
+        if '9.' in line and any(keyword in line for keyword in ['문제', '설명', '것은', '?']):
+            print(f"   라인 {i+1}: {line}")
+            found_9 = True
+            # 주변 라인들도 확인
+            start = max(0, i-3)
+            end = min(len(lines), i+4)
+            print(f"   주변 라인 {start+1}-{end}:")
+            for j in range(start, end):
+                marker = ">>> " if j == i else "    "
+                print(f"   {marker}{lines[j]}")
+            break
+    
+    if not found_9:
+        print("   ❌ 문제 9번을 찾을 수 없습니다.")
+        # 8번과 10번 사이의 텍스트 확인
+        print("   🔍 8번과 10번 사이 텍스트 확인:")
+        for i, line in enumerate(lines):
+            if '8.' in line and '사용자의 요구사항' in line:
+                start_line = i
+            elif '10.' in line and '객체지향 기법' in line:
+                end_line = i
+                print(f"   라인 {start_line+1}-{end_line+1} (8번과 10번 사이):")
+                for j in range(start_line, end_line+1):
+                    print(f"      {lines[j]}")
+                break
+    
+    return missing_numbers
+
+def debug_problem_blocks(blocks, text):
+    """문제 블록을 상세히 디버깅합니다."""
+    print("\n🔧 문제 블록 상세 디버깅")
+    print("=" * 50)
+    
+    print(f"📊 총 {len(blocks)}개 블록 분석:")
+    
+    for i, block in enumerate(blocks):
+        print(f"\n📦 블록 {i+1}/{len(blocks)} (길이: {len(block)}자)")
+        
+        # 문제 번호 추출 시도
+        problem_number = None
+        number_patterns = [
+            r'(\d+)\.\s*[^가-힣]*[가-힣]',
+            r'##\s*(\d+)\.\s*[^가-힣]*[가-힣]',
+            r'##\s*[^가-힣]*(\d+)\.\s*[가-힣]',
+        ]
+        
+        for pattern in number_patterns:
+            match = re.search(pattern, block)
+            if match:
+                problem_number = int(match.group(1))
+                break
+        
+        if problem_number:
+            print(f"   ✅ 문제 번호: {problem_number}번")
+        else:
+            print(f"   ❌ 문제 번호를 찾을 수 없음")
+        
+        # 블록 내용 미리보기
+        preview = block[:100].replace('\n', ' ').strip()
+        print(f"   📝 내용: {preview}...")
+        
+        # 특정 문제 번호가 포함된 블록 강조
+        if problem_number in [6, 9, 13]:
+            print(f"   🎯 *** 찾고 있던 문제 {problem_number}번 발견! ***")
 
 def test_2column_pdf_parsing():
     """2단 PDF 파싱 기능을 테스트합니다."""
@@ -28,7 +168,7 @@ def test_2column_pdf_parsing():
         print("✅ PDF 전처리기 초기화 완료")
         
         # 테스트할 PDF 파일 경로 (사용자가 수정 가능)
-        test_pdf_path = "teacher/agents/solution/pdf_outputs/1. 2024년3회_정보처리기사필기기출문제_cut.pdf"
+        test_pdf_path = "1. 2024년3회_정보처리기사필기기출문제_cut.pdf"
         
         if not os.path.exists(test_pdf_path):
             print(f"⚠️ 테스트 PDF 파일을 찾을 수 없습니다: {test_pdf_path}")
@@ -69,6 +209,12 @@ def test_2column_pdf_parsing():
             if blocks:
                 print(f"📝 첫 번째 블록 미리보기:")
                 print(f"   {blocks[0][:150]}...")
+            
+            # 누락된 문제 분석
+            missing_problems = analyze_missing_problems(blocks, doc_md)
+            
+            # 블록 상세 디버깅
+            debug_problem_blocks(blocks, doc_md)
             
         except Exception as e:
             print(f"❌ 문제 블록 분할 실패: {e}")

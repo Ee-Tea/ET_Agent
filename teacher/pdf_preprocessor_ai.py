@@ -125,7 +125,7 @@ class PDFPreprocessor:
             return ""
 
         # 1) 1. / 12. / 3)
-        text = re.sub(r"(?m)(?<!^)\s*(?=\d{1,3}\s*[.)]\s)", r"\n", text)
+        text = re.sub(r"(?m)(?<!^)\s*(?=\d{1,3}\s*[.]\s)", r"\n", text)
         # 2) (1) / (12)
         text = re.sub(r"(?m)(?<!^)\s*(?=\(\d{1,3}\)\s)", r"\n", text)
 

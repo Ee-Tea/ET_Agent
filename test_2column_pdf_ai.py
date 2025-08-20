@@ -43,7 +43,7 @@ def main():
     print("=" * 60)
     
     # PDF 파일 경로 설정
-    pdf_file = "1. 2024년3회_정보처리기사필기기출문제_cut.pdf"
+    pdf_file = "2025년 1회_only.pdf"
     
     if not os.path.exists(pdf_file):
         print(f"❌ PDF 파일을 찾을 수 없습니다: {pdf_file}")

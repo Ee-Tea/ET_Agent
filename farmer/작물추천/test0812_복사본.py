@@ -15,7 +15,7 @@ from collections import defaultdict
 
 # ========== 2. 상태 및 글로벌 ==========
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_KEY1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EVAL_MODE = False   # 평가모드만 내부 로그 출력
 
 class RAGState(TypedDict, total=False):
@@ -81,7 +81,7 @@ def safe_cell_map(df: pd.DataFrame, func) -> pd.DataFrame:
 # ========== 4. 파일 불러오기 ==========
 def file_load_node(state: RAGState) -> RAGState:
     log("[Step1] file_load_node 함수 시작!")
-    folder_path = r"C:\FinalPrj\작물추천\Crop Recommedations DB"
+    folder_path = r"C:\Rookies_project\최종 프로젝트\Crop Recommedations DB"
     support_exts = [".csv", ".xlsx", ".pdf", ".txt", ".xml"]
     all_dfs, success_files, failed_files = [], [], []
     try:
@@ -525,22 +525,6 @@ def build_rag_graph():
     graph.set_entry_point("file_load")
     return graph.compile()
 
-def run(state: dict) -> dict:
-    """
-    작물추천_agent용 실행 함수.
-    입력: state["query"]에 사용자 질문이 들어옴.
-    출력: {"pred_answer": 답변 텍스트}
-    """
-    question = state.get("query", "")
-    # RAG 파이프라인 실행
-    app = build_rag_graph()
-    try:
-        result = app.invoke({"question": question})
-        answer = result.get("answer", "답변 생성 실패")
-    except Exception as e:
-        answer = f"작물추천_agent 실행 오류: {e}"
-    return {"pred_answer": answer}
-
 # ========== 12. 평가/실행 진입점 ==========
 def load_golden_dataset(file_path: str):
     return pd.read_csv(file_path, encoding='utf-8').to_dict('records')
@@ -548,41 +532,41 @@ def load_golden_dataset(file_path: str):
 if __name__ == "__main__":
     print("\n---농작물 챗봇 에이전트 시작---")
     app = build_rag_graph()
-    # mode = input("실행 모드를 선택하세요 (1=챗봇, 2=평가): ").strip()
+    mode = input("실행 모드를 선택하세요 (1=챗봇, 2=평가): ").strip()
 
-    # if mode == "2":
-    #     EVAL_MODE = True
-    #     golden_path = r"C:\Rookies_project\최종 프로젝트\Project_test\Goldenset_test1.csv"
-    #     print(f"[평가모드] 골든셋 CSV: {golden_path}")
-    #     try:
-    #         df_check = pd.read_csv(golden_path, encoding="utf-8")
-    #         print("\n[골든셋 CSV 컬럼 구조]:", list(df_check.columns))
-    #         print("[골든셋 샘플 데이터]")
-    #         print(df_check.head(3))
-    #     except Exception as e:
-    #         print("[오류] 골든셋 파일을 읽을 수 없습니다:", e)
-    #         exit(1)
-
-    #     golden_dataset = load_golden_dataset(golden_path)
-    #     # golden_dataset = golden_dataset[:5]
-    #     evaluate_chatbot(app, golden_dataset)
-
-    # else:
-    EVAL_MODE = False
-    warnings.filterwarnings("ignore")
-    while True:
-        user_question = input("\n질문을 입력하세요: ")
-        if user_question.lower() in ["exit", "quit"]:
-            print("챗봇을 종료합니다.")
-            break
-        if not user_question.strip():
-            print("질문을 입력해주세요.")
-            continue
+    if mode == "2":
+        EVAL_MODE = True
+        golden_path = r"C:\Rookies_project\최종 프로젝트\Project_test\Goldenset_test1.csv"
+        print(f"[평가모드] 골든셋 CSV: {golden_path}")
         try:
-            state = {"question": user_question}
-            final_state = app.invoke(state)
-            print(final_state["answer"])
+            df_check = pd.read_csv(golden_path, encoding="utf-8")
+            print("\n[골든셋 CSV 컬럼 구조]:", list(df_check.columns))
+            print("[골든셋 샘플 데이터]")
+            print(df_check.head(3))
         except Exception as e:
-            print(f"\n오류가 발생했습니다: {e}")
-            print("다시 시도해주세요.")
+            print("[오류] 골든셋 파일을 읽을 수 없습니다:", e)
+            exit(1)
+
+        golden_dataset = load_golden_dataset(golden_path)
+        # golden_dataset = golden_dataset[:5]
+        evaluate_chatbot(app, golden_dataset)
+
+    else:
+        EVAL_MODE = False
+        warnings.filterwarnings("ignore")
+        while True:
+            user_question = input("\n질문을 입력하세요: ")
+            if user_question.lower() in ["exit", "quit"]:
+                print("챗봇을 종료합니다.")
+                break
+            if not user_question.strip():
+                print("질문을 입력해주세요.")
+                continue
+            try:
+                state = {"question": user_question}
+                final_state = app.invoke(state)
+                print(final_state["answer"])
+            except Exception as e:
+                print(f"\n오류가 발생했습니다: {e}")
+                print("다시 시도해주세요.")
     print("\n---농작물 챗봇 에이전트 종료---")

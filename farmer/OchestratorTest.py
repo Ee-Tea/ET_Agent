@@ -3,10 +3,6 @@ import requests
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# 2) 임베딩 모델 로드 (jhgan/ko-sroberta-multitask)
-embedding_model = SentenceTransformer("jhgan/ko-sroberta-multitask")
-
-# 3) 에이전트 설명 정의 (임베딩 라우팅용)
 agent_descriptions = {
     "작물추천_agent": (
         "사용자의 재배 환경(계절, 토양, 기후 등), 목적, 특정 조건(수확 시기, 맛, 저장성 등)에 맞는 새로운 작물이나 품종을 추천합니다."
@@ -63,213 +59,72 @@ class GroqLLM:
         return result.strip()
 
 # 사용 예시 (api_key는 실제 발급받은 키로 입력)
-llm = GroqLLM(api_key = os.getenv("OPENAI_KEY2"))
+llm = GroqLLM(api_key = os.getenv("OPENAI_KEY1"))
 
-def embedding_router(text, model, agent_descriptions, threshold=0.5):
-    q_vec = model.encode(text, convert_to_tensor=True)
-    candidates = []
-    
-    # 유사도 점수와 에이전트 목록을 함께 저장
-    for agent, desc in agent_descriptions.items():
-        d_vec = model.encode(desc, convert_to_tensor=True)
-        sim = util.cos_sim(q_vec, d_vec).item()
-        print(f"[임베딩] {agent} 유사도: {sim:.4f}")
-        
-        # 임계값 이상의 후보만 리스트에 추가
-        if sim >= threshold:
-            candidates.append({"agent": agent, "score": sim})
-
-    if not candidates:
-        print("[임베딩] 임계값(0.5)을 넘는 후보 없음. LLM 라우팅으로 전환.")
-        return None
-        
-    # 점수가 높은 순으로 정렬
-    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
-    
-    print(f"[임베딩] 최종 선택 후보: {candidates}")
-    return candidates
-
-def llm_router(text, llm, embedding_hints=None):
-    hint_agents_str = ""
-    if embedding_hints:
-        hint_agents = [hint['agent'] for hint in embedding_hints]
-        hint_agents_str = ", ".join(hint_agents)
-    
-    prompt = f"""
-        너는 농업 상담 AI 오케스트레이터야. 
-        아래 선택지 중 사용자 질문에 가장 적합한 에이전트를 하나만 골라.
-
-        [규칙]
-        - 임베딩 라우터가 추천한 후보가 있으면 참조해서 그 목록 안에서 선택.
-        - 후보가 있어도 모두 관련 없으면 '5) 기타' 선택.
-        - 농업과 무관한 질문은 무조건 '5) 기타' 선택.
-        - 추천 목록이 없으면 전체 선택지 중에서 선택.
-        - 여러 에이전트가 필요할 거 같은 경우 여러 에이전트 선택.
-        - 대답할 땐 선택지 번호와 agent명만 간단히 작성
-
-        질문: "{text}"
-        임베딩 라우터 추천 후보: {hint_agents_str}
-
-        [에이전트 설명]
-        1) 작물추천_agent: 재배 환경에 맞는 새로운 작물/품종 추천
-        2) 작물재배_agent: 이미 결정된 작물의 재배/관리 정보 제공
-        3) 재해_agent: 기후 재해(폭염, 가뭄 등) 및 이상 기후 대비/관리 정보 제공
-        4) 판매처_agent: 농산물 판매처, 가격, 실시간 시세, 최근 가격 변동 안내
-        5) 기타: 농업과 무관하거나 후보 중 적합한 에이전트가 없을 때
-
-        [예시]
-        질문: "장마철 집중호우에 대비해 감자밭에서는 어떤 관리가 필요할까요?"
-        정답: 3) 재해_agent
-
-        질문: "여름에 키우기 좋은 작물 추천과 해당 작물을 키울 때 고려해야 할 점에 대해서 알고 싶어요."
-        정답: 1) 작물추천_agent, 2) 작물재배_agent
+def simple_agent_selector(user_question, llm):
     """
-    result = llm.invoke(prompt)
-    print(f"[LLM 라우터] 선택된 agent: {result}")
-    return result
-
-def build_agent_prompt(agent, user_question, context_info=None):
+    사용자 질문을 분석하여 필요한 에이전트를 선택하는 함수
     """
-    각 에이전트에게 명확한 역할과 경계를 제시하는 프롬프트 생성
-    """
-    base_prompts = {
-        "작물추천_agent": f"""너는 작물추천_agent입니다. 다음 규칙을 엄격히 따라주세요:
-
-[역할과 책임]
-- 재배 환경(계절, 토양, 기후, 지역)에 맞는 작물/품종을 3-5개 추천
-- 각 작물의 기본 특성(수확기, 맛, 저장성, 수익성) 정보 제공
-- 추천 작물 중 가장 적합한 1개를 선별하여 상세 정보 제공
-- 구체적인 재배 방법은 언급하지 말 것
-
-[추천 형식]
-1. [추천 작물 목록] - 3-5개 작물 나열
-2. [상세 분석 작물] - 가장 적합한 1개 작물 상세 설명
-3. [다른 작물 정보] - "다른 작물에 대한 정보도 궁금하시다면 질문해주세요" 안내
-
-[제한사항]
-- 재배 방법, 병해충 방제, 수확 방법 등은 절대 답변하지 말 것
-- 다른 에이전트가 담당할 내용이 질문에 포함되어 있으면 "이 부분은 작물재배_agent에게 문의하세요"라고 안내
-- 웹 검색이 필요한 경우 "추가 정보가 필요합니다. 웹 검색을 통해 최신 정보를 확인하겠습니다"라고 명시
-
-질문: {user_question}""",
-
-        "작물재배_agent": f"""너는 작물재배_agent입니다. 다음 규칙을 엄격히 따라주세요:
-
-[역할과 책임]
-- 이미 결정된 작물의 구체적인 재배/관리 방법만 담당
-- 씨앗/모종 심기, 이랑 만들기, 솎음, 시비, 병해충 방제, 수확 방법 등
-- 작물별 구체적인 관리 일정과 방법
-
-[제한사항]
-- 작물 추천은 하지 말 것
-- 가격, 판매처 정보는 언급하지 말 것
-- 기후 재해 대응은 기본적인 것만 언급하고, 전문적인 재해 대응은 재해_agent에게 안내
-- 웹 검색이 필요한 경우 "추가 정보가 필요합니다. 웹 검색을 통해 최신 정보를 확인하겠습니다"라고 명시
-
-질문: {user_question}""",
-
-        "재해_agent": f"""너는 재해_agent입니다. 다음 규칙을 엄격히 따라주세요:
-
-[역할과 책임]
-- 기후 재해(폭염, 한파, 가뭄, 집중호우, 홍수) 예방 및 대응 방법만 담당
-- 재해 발생 전/중/후의 구체적인 조치 방법
-- 작물별 재해 대응 전략
-
-[제한사항]
-- 작물 추천은 하지 말 것
-- 일반적인 재배 방법은 언급하지 말 것
-- 가격, 판매처 정보는 언급하지 말 것
-- 웹 검색이 필요한 경우 "추가 정보가 필요합니다. 웹 검색을 통해 최신 정보를 확인하겠습니다"라고 명시
-
-질문: {user_question}""",
-
-        "판매처_agent": f"""너는 판매처_agent입니다. 다음 규칙을 엄격히 따라주세요:
-
-[역할과 책임]
-- 농산물 판매처, 가격, 시세, 유통 정보만 담당
-- 실시간 시세, 가격 변동 추이, 거래 방법
-- 지역별 주요 판매처와 도매상 정보
-
-[제한사항]
-- 작물 추천은 하지 말 것
-- 재배 방법은 언급하지 말 것
-- 재해 대응은 언급하지 말 것
-- 웹 검색이 필요한 경우 "추가 정보가 필요합니다. 웹 검색을 통해 최신 정보를 확인하겠습니다"라고 명시
-
-질문: {user_question}"""
-    }
+    selection_prompt = f"""
+    다음 질문을 분석하여 필요한 에이전트를 선택해주세요.
     
-    prompt = base_prompts.get(agent, f"너는 {agent}입니다. 질문: {user_question}")
-    
-    # 컨텍스트 정보가 있으면 추가
-    if context_info:
-        prompt += f"\n\n[참고 정보]\n{context_info}"
-    
-    return prompt
-
-def split_question_by_agents(user_question, llm, embedding_model, agent_descriptions):
-    """
-    복합 질문을 각 에이전트가 담당할 부분으로 명확히 분리
-    """
-    # 1. 질문 분석하여 필요한 에이전트와 각각의 역할 파악
-    analysis_prompt = f"""
-    다음 사용자 질문을 분석하여 각 에이전트가 담당해야 할 부분을 명확히 분리해주세요.
-
     [에이전트 역할]
     1) 작물추천_agent: 재배 환경에 맞는 작물/품종 추천
     2) 작물재배_agent: 구체적인 재배/관리 방법
     3) 재해_agent: 기후 재해 예방 및 대응
     4) 판매처_agent: 판매처, 가격, 시세 정보
-
-    [분리 규칙]
-    - 각 에이전트가 담당할 구체적인 질문 부분을 명시
-    - 중복되는 부분이 있으면 명확히 구분
-    - 웹 검색이 필요한 부분이 있으면 명시
-
+    5) 기타: 농업과 무관한 질문
+    
+    [판매처 에이전트 세부 분류]
+    - 시세만: "가격", "시세", "얼마" 등의 키워드만 포함
+    - 판매처만: "판매처", "어디서", "장소" 등의 키워드만 포함  
+    - 둘 다: 시세와 판매처 관련 키워드가 모두 포함
+    
     질문: "{user_question}"
-
+    
     다음 JSON 형식으로 답변해주세요:
     {{
-        "selected_agents": ["에이전트명1", "에이전트명2"],
+        "selected_agents": ["에이전트명1"],
         "question_parts": {{
-            "에이전트명1": "해당 에이전트가 답변할 구체적인 질문",
-            "에이전트명2": "해당 에이전트가 답변할 구체적인 질문"
+            "에이전트명1": "해당 에이전트가 답변할 구체적인 질문"
         }},
-        "web_search_needed": ["웹 검색이 필요한 부분1", "웹 검색이 필요한 부분2"],
-        "execution_order": ["에이전트명1", "에이전트명2"]
+        "execution_order": ["에이전트명1"]
     }}
     """
     
     try:
-        analysis_result = llm.invoke(analysis_prompt)
-        # JSON 파싱 (간단한 파싱 로직)
+        result = llm.invoke(selection_prompt)
         import json
         import re
         
         # JSON 부분 추출
-        json_match = re.search(r'\{.*\}', analysis_result, re.DOTALL)
+        json_match = re.search(r'\{.*\}', result, re.DOTALL)
         if json_match:
-            parsed_result = json.loads(json_match.group())
-            return parsed_result
+            return json.loads(json_match.group())
         else:
-            # JSON 파싱 실패 시 기본 라우팅
+            # JSON 파싱 실패 시 기본값
             return {
                 "selected_agents": ["기타"],
                 "question_parts": {"기타": user_question},
-                "web_search_needed": [],
                 "execution_order": ["기타"]
             }
     except Exception as e:
-        print(f"질문 분석 실패: {e}")
-        # 기본 라우팅으로 fallback
+        print(f"에이전트 선택 실패: {e}")
         return {
             "selected_agents": ["기타"],
             "question_parts": {"기타": user_question},
-            "web_search_needed": [],
             "execution_order": ["기타"]
         }
 
-def execute_agent_with_boundaries(agent_name, question_part, llm, context_info=None):
+def build_agent_prompt(agent, user_question):
+    """
+    각 에이전트에게 질문만 전달
+    """
+    prompt = f"질문: {user_question}"
+    
+    return prompt
+
+def execute_agent_with_boundaries(agent_name, question_part, llm):
     """
     각 에이전트를 명확한 경계 내에서 실행
     """
@@ -278,7 +133,7 @@ def execute_agent_with_boundaries(agent_name, question_part, llm, context_info=N
         return f"{agent_name} 실행 함수가 연결되어 있지 않습니다."
     
     # 명확한 역할 제한이 포함된 프롬프트 생성
-    agent_prompt = build_agent_prompt(agent_name, question_part, context_info)
+    agent_prompt = build_agent_prompt(agent_name, question_part)
     
     try:
         agent_state = {"query": agent_prompt}
@@ -313,18 +168,78 @@ def execute_agent_with_boundaries(agent_name, question_part, llm, context_info=N
     except Exception as e:
         return f"에이전트 실행 중 오류: {e}"
 
+def web_search_with_tavily(query: str, api_key: str = None):
+    """
+    Tavily를 이용한 웹 검색
+    """
+    try:
+        from tavily import TavilyClient
+        
+        # API 키 설정
+        if not api_key:
+            api_key = os.getenv("TAVILY_API_KEY")
+        
+        if not api_key:
+            return "Tavily API 키가 설정되지 않았습니다."
+        
+        ***REMOVED*** 클라이언트 생성
+        client = TavilyClient(api_key=api_key)
+        
+        # 웹 검색 실행
+        search_result = client.search(
+            query=query,
+            search_depth="basic",
+            max_results=5
+        )
+        
+        # 결과 정리
+        if search_result and 'results' in search_result:
+            formatted_results = "=== 웹 검색 결과 ===\n\n"
+            for i, result in enumerate(search_result['results'][:5], 1):
+                formatted_results += f"{i}. {result.get('title', '제목 없음')}\n"
+                formatted_results += f"   URL: {result.get('url', 'URL 없음')}\n"
+                formatted_results += f"   내용: {result.get('content', '내용 없음')[:200]}...\n\n"
+            return formatted_results
+        else:
+            return "웹 검색 결과를 찾을 수 없습니다."
+            
+    except ImportError:
+        return "Tavily 라이브러리가 설치되지 않았습니다. 'pip install tavily-python'으로 설치해주세요."
+    except Exception as e:
+        return f"웹 검색 중 오류가 발생했습니다: {e}"
+
+def etc_agent_run(state: dict) -> dict:
+    """
+    기타 에이전트 - 웹 검색을 통한 답변
+    """
+    query = state.get("query", "")
+    
+    # 웹 검색 실행
+    print(f"[기타_agent] 웹 검색 시작: {query}")
+    web_result = web_search_with_tavily(query)
+    
+    # 결과 정리
+    if "오류" in web_result or "설정되지 않음" in web_result:
+        final_answer = f"질문: {query}\n\n{web_result}"
+    else:
+        final_answer = f"질문: {query}\n\n{web_result}\n\n※ 위 정보는 웹 검색을 통해 제공되었습니다."
+    
+    return {
+        "pred_answer": final_answer,
+        "source": "web_search"
+    }
+
 from 작물추천.crop65pdfllm import run as crop_recommend_run
 from 재배방법.crop_overall import run as crop_cultivation_run
 from 재해대응.verification_search import run as disaster_run
 from sales.SalesAgent import run as market_run
-# from agents.etc_agent import run as etc_run
 
 agent_functions = {
     "작물추천_agent": crop_recommend_run,
     "작물재배_agent": crop_cultivation_run,
     "재해_agent": disaster_run,
     "판매처_agent": market_run,
-#     "기타": etc_run
+    "기타": etc_agent_run
 }
 
 def hybrid_router(text, model, agent_desc, llm):
@@ -341,7 +256,6 @@ def hybrid_router(text, model, agent_desc, llm):
     
     # 2. 각 에이전트를 순서대로 실행
     all_answers = {}
-    context_info = ""
     
     for agent in question_analysis['execution_order']:
         if agent in question_analysis['question_parts']:
@@ -349,15 +263,8 @@ def hybrid_router(text, model, agent_desc, llm):
             print(f"\n=== {agent} 실행 ===")
             print(f"담당 질문: {question_part}")
             
-            # 이전 에이전트의 답변이 있으면 컨텍스트로 전달
-            if context_info:
-                print(f"컨텍스트 정보: {context_info[:100]}...")
-            
-            answer = execute_agent_with_boundaries(agent, question_part, llm, context_info)
+            answer = execute_agent_with_boundaries(agent, question_part, llm)
             all_answers[agent] = answer
-            
-            # 다음 에이전트를 위한 컨텍스트 업데이트
-            context_info += f"\n{agent} 답변: {answer[:200]}..."
     
     # 3. 웹 검색이 필요한 부분이 있으면 안내
     web_search_info = ""
@@ -395,13 +302,12 @@ def main():
         selected_agent = hybrid_router(user_input, embedding_model, agent_descriptions, llm)
         print(f"선택된 에이전트: {selected_agent}")
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph
 
 class RouterState(dict):
     query: str = ""
     selected_agents: list = []
     question_parts: dict = {}
-    web_search_needed: list = []
     execution_order: list = []
     crop_info: str = ""
     selected_crop: str = ""  # 선택된 단일 작물 추가
@@ -412,6 +318,9 @@ def select_single_crop_from_recommendations(crop_recommendations, llm):
     """
     작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
     """
+    print("\n=== �� 작물 추출 과정 시작 ===")
+    print(f"[원본 작물추천 응답]\n{crop_recommendations}")
+    
     selection_prompt = f"""
     다음은 작물추천 에이전트가 추천한 작물들입니다. 
     사용자의 질문과 상황을 고려하여 상세 분석할 작물 하나를 선택해주세요.
@@ -431,26 +340,34 @@ def select_single_crop_from_recommendations(crop_recommendations, llm):
     상세 분석할 작물: """
     
     try:
+        print("[1단계] LLM에게 작물 선택 요청...")
         selected_crop = llm.invoke(selection_prompt).strip()
+        print(f"[LLM 원본 응답] {selected_crop}")
         
         # 응답 정리 및 검증
+        print("[2단계] 작물명 정리 및 검증...")
         cleaned_crop = clean_crop_name(selected_crop)
+        print(f"[정리된 작물명] {cleaned_crop}")
         
         # 검증: 작물명이 너무 길거나 설명이 포함된 경우 재시도
         if len(cleaned_crop) > 10 or "에 대해" in cleaned_crop or "관련" in cleaned_crop:
             print(f"[경고] 첫 번째 시도 결과가 부적절함: '{cleaned_crop}'")
+            print("[3단계] 재시도 시작...")
             return retry_crop_selection(crop_recommendations, llm)
         
+        print(f"[✅ 최종 선택된 작물] {cleaned_crop}")
         return cleaned_crop
         
     except Exception as e:
-        print(f"작물 선택 중 오류: {e}")
+        print(f"[❌ 오류] 작물 선택 중 오류: {e}")
         return fallback_crop_selection(crop_recommendations)
 
 def clean_crop_name(crop_text):
     """
     작물명 텍스트를 정리하는 함수
     """
+    print(f"[정리 전] {crop_text}")
+    
     # 줄바꿈, 마침표, 쉼표 등으로 구분
     crop_text = crop_text.split('\n')[0].split('.')[0].split(',')[0].strip()
     
@@ -461,7 +378,9 @@ def clean_crop_name(crop_text):
     # 숫자나 단위 제거 (예: "무 1kg" -> "무")
     crop_text = re.sub(r'\s*\d+.*$', '', crop_text)
     
-    return crop_text.strip()
+    final_result = crop_text.strip()
+    print(f"[최종 정리 결과] {final_result}")
+    return final_result
 
 def retry_crop_selection(crop_recommendations, llm):
     """
@@ -491,7 +410,7 @@ def fallback_crop_selection(crop_recommendations):
     """
     모든 시도가 실패했을 때 사용하는 대체 방법
     """
-    print("[대체 방법] 텍스트에서 작물명 패턴 찾기")
+    print("\n=== �� 대체 방법: 패턴 매칭 시작 ===")
     
     # 텍스트에서 작물명 패턴 찾기
     import re
@@ -510,48 +429,47 @@ def fallback_crop_selection(crop_recommendations):
         r'([가-힣]*고구마)',   # 고구마, 밤고구마 등
     ]
     
-    for pattern in crop_patterns:
+    print("[패턴 매칭 시도...]")
+    for i, pattern in enumerate(crop_patterns):
         matches = re.findall(pattern, crop_recommendations)
         if matches:
             # 가장 긴 매치를 선택 (더 구체적인 작물명)
             selected = max(matches, key=len)
-            print(f"[대체 방법] 패턴 매치: {selected}")
+            print(f"[✅ 패턴 {i+1} 매치 성공] {selected}")
             return selected
     
     # 패턴 매치가 없는 경우, 첫 번째 한글 단어 반환
+    print("[패턴 매칭 실패, 한글 단어 추출 시도...]")
     korean_words = re.findall(r'[가-힣]+', crop_recommendations)
     if korean_words:
         fallback = korean_words[0]
-        print(f"[대체 방법] 첫 번째 한글 단어: {fallback}")
+        print(f"[✅ 첫 번째 한글 단어] {fallback}")
         return fallback
     
     # 최후의 수단
-    print("작물명 찾기 실패")
+    print("[❌ 모든 방법 실패]")
     return None
 
 def node_input(state: RouterState) -> RouterState:
-    user_input = input("\n사용자 입력 ('종료' 입력 시 종료): ").strip()
-    if user_input == "종료":
-        state["exit"] = True
-        return state
+    user_input = input("\n사용자 입력: ").strip()
+    
+    # 유효한 입력인 경우 상태에 저장하고 다음 단계로
     state["query"] = user_input
+    print(f"\n[사용자 입력] {user_input}")
+    
     return state
 
 def node_agent_select(state: RouterState) -> RouterState:
-    result = split_question_by_agents(state["query"], llm, embedding_model, agent_descriptions)
+    # 기존 복잡한 로직을 단순화된 함수로 교체
+    result = simple_agent_selector(state["query"], llm)
     state["selected_agents"] = result["selected_agents"]
     state["question_parts"] = result["question_parts"]
-    state["web_search_needed"] = result["web_search_needed"]
+    state["web_search_needed"] = []  # 웹 검색 필요성 제거
     state["execution_order"] = result["execution_order"]
     
     print("\n[선택된 에이전트]")
     for agent in state["selected_agents"]:
         print(f"- {agent}")
-    
-    if state["web_search_needed"]:
-        print(f"\n[웹 검색 필요]")
-        for item in state["web_search_needed"]:
-            print(f"- {item}")
     
     return state
 
@@ -589,48 +507,59 @@ def node_parallel_agents(state: RouterState) -> RouterState:
     
     # 선택된 작물 정보 확인
     selected_crop = state.get("selected_crop", "")
-    print(f"\n[병렬 실행] 선택된 작물: {selected_crop}")
+    print(f"\n=== 병렬 에이전트 실행 시작 ===")
+    print(f"[📌 선택된 작물] {selected_crop}")
     
     for agent in state.get("execution_order", []):
         if agent == "작물추천_agent":
             continue  # 이미 실행됨
         
         if agent in state.get("question_parts", {}):
-            question_part = state["question_parts"][agent]
-            print(f"\n{agent} 실행 - 원본 질문: {question_part}")
+            original_question = state["question_parts"][agent]
+            print(f"\n--- {agent} 실행 ---")
+            print(f"[📝 원본 질문] {original_question}")
             
-            # 작물추천 결과와 선택된 작물을 컨텍스트에 포함
-            context_info = ""
-            if state.get("crop_info"):
-                context_info += f"추천 작물 정보: {state['crop_info']}\n"
-            if selected_crop:
-                context_info += f"선택된 작물: {selected_crop}\n"
+            # 작물명이 유효하고 질문에 포함되지 않은 경우에만 추가
+            if (selected_crop and 
+                selected_crop not in ["I don't know", "None", ""] and 
+                selected_crop not in original_question):
                 
-                # 질문에 작물명이 명시되지 않은 경우 추가
-                if selected_crop not in question_part:
-                    # 에이전트별로 적절한 질문 형태로 수정
-                    if agent == "작물재배_agent":
-                        question_part = f"{selected_crop}의 재배 방법과 관리법에 대해 알려주세요."
-                    elif agent == "재해_agent":
-                        question_part = f"{selected_crop} 재배 시 발생할 수 있는 기후 재해와 대응 방법을 알려주세요."
-                    elif agent == "판매처_agent":
-                        question_part = f"{selected_crop}의 판매처와 시세 정보를 알려주세요."
-                    else:
-                        question_part = f"{selected_crop}에 대한 {question_part}"
+                print(f"[🔄 질문 수정 필요] 작물명 '{selected_crop}'이 질문에 포함되지 않음")
+                question_part = f"{selected_crop} {original_question}"
+                print(f"[🔧 질문 수정] 작물명 '{selected_crop}' 추가")
+            else:
+                print(f"[✅ 질문 수정 불필요] 원본 질문 사용")
+                question_part = original_question
             
-            print(f"컨텍스트 정보: {context_info}")
-            print(f"수정된 질문: {question_part}")
+            print(f"[🎯 최종 질문] {question_part}")
+            print(f"[📊 질문 길이] {len(question_part)}자")
             
             # 명확한 경계가 설정된 프롬프트로 실행
-            answer = execute_agent_with_boundaries(agent, question_part, llm, context_info)
+            print(f"[⚡ {agent} 실행 시작...]")
+            answer = execute_agent_with_boundaries(agent, question_part, llm)
             answers[agent] = answer
+            
+            print(f"[✅ {agent} 실행 완료]")
+            print(f"[ 답변 길이] {len(answer)}자")
+            print(f"[ 답변 미리보기] {answer[:100]}...")
+            
         else:
             answers[agent] = f"{agent}에 대한 구체적인 질문이 정의되지 않았습니다."
+            print(f"[⚠️ {agent}] 구체적인 질문이 정의되지 않음")
     
     state["agent_answers"] = answers
+    print(f"\n=== 모든 에이전트 실행 완료 ===")
     return state
 
 def node_merge_output(state: RouterState) -> RouterState:
+    print("\n=== 최종 응답 병합 시작 ===")
+    
+    # 실행 요약 출력
+    print(f"[ 실행 요약]")
+    print(f"  - 선택된 에이전트: {state.get('selected_agents', [])}")
+    print(f"  - 선택된 작물: {state.get('selected_crop', '없음')}")
+    print(f"  - 실행된 에이전트: {list(state.get('agent_answers', {}).keys())}")
+    
     output = ""
     
     # 작물추천 결과가 있으면 먼저 표시
@@ -640,7 +569,7 @@ def node_merge_output(state: RouterState) -> RouterState:
         # 선택된 작물 강조 표시
         if state.get("selected_crop"):
             output += f"\n[상세 분석 작물]\n{state['selected_crop']}\n"
-            print(f"\n[상세 분석 작물 확인] {state['selected_crop']}")
+            print(f"[ 상세 분석 작물] {state['selected_crop']}")
     
     # 다른 에이전트들의 답변 표시
     for agent, answer in state.get("agent_answers", {}).items():
@@ -649,15 +578,10 @@ def node_merge_output(state: RouterState) -> RouterState:
             selected_crop = state.get("selected_crop", "")
             if selected_crop and selected_crop in answer:
                 output += f"[{agent} 결과 - {selected_crop} 관련]\n{answer}\n"
+                print(f"[✅ {agent}] {selected_crop} 관련 답변 일치")
             else:
                 output += f"[{agent} 결과]\n{answer}\n"
-    
-    # 웹 검색이 필요한 부분이 있으면 안내
-    if state.get("web_search_needed"):
-        output += f"\n[웹 검색 필요]\n"
-        for item in state["web_search_needed"]:
-            output += f"- {item}\n"
-        output += "웹 검색 노드를 통해 최신 정보를 확인하겠습니다.\n"
+                print(f"[⚠️ {agent}] {selected_crop} 관련 답변 불일치")
     
     # 다른 작물 정보 안내 추가
     if state.get("crop_info") and state.get("selected_crop"):
@@ -666,20 +590,31 @@ def node_merge_output(state: RouterState) -> RouterState:
         output += f"'{state['selected_crop']} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
     
     merged_output = output.strip()
-    print("\n=== 최종 응답(병합 전) ===\n" + merged_output)
-
+    
     # LLM에게 전체 응답을 정리하도록 요청
+    print("\n[🤖 LLM 요약 시작...]")
     summary_prompt = (
         "아래는 여러 농업 에이전트의 답변입니다. 사용자가 이해하기 쉽도록 정리해서 알려주세요.\n\n"
-        f"{merged_output}"
+        f"{merged_output}\n\n"
+        "간결하고 명확하게 정리해주세요."
     )
+    
     try:
         summary = llm.invoke(summary_prompt)
+        print(f"[✅ LLM 요약 완료] {len(summary)}자")
     except Exception as e:
         summary = f"요약 중 오류: {e}"
-
+        print(f"[❌ LLM 요약 실패] {e}")
+    
     state["output"] = summary.strip()
-    print("\n=== 최종 응답(요약) ===\n" + state["output"])
+    
+    # 최종 요약된 응답만 출력 (중복 제거)
+    print("\n=== 🎯 최종 응답(요약) ===")
+    print(f"[📊 요약 길이] {len(state['output'])}자")
+    print("=" * 50)
+    print(state["output"])
+    print("=" * 50)
+    
     return state
 
 def judge_branch(state: RouterState) -> str:
@@ -711,41 +646,20 @@ graph.add_conditional_edges(
 )
 graph.add_edge("crop_recommend", "parallel_agents")
 graph.add_edge("parallel_agents", "merge_output")
-graph.add_edge("merge_output", END)
+graph.add_edge("merge_output", "input")
 graph.set_entry_point("input")
 
 def run_orchestrator_langgraph():
     app = graph.compile()
-    while True:
-        state = RouterState()
-        app.invoke(state)
-        if state.get("exit"):
-            print("종료합니다.")
-            break
-
-def test_improved_routing():
-    """개선된 라우팅 시스템 테스트"""
-    print("=== 개선된 라우팅 시스템 테스트 ===")
-    
-    test_questions = [
-        "여름에 키우기 좋은 작물 추천과 해당 작물을 키울 때 고려해야 할 점에 대해서 알고 싶어요.",
-        "장마철 집중호우에 대비해 감자밭에서는 어떤 관리가 필요할까요?",
-        "토마토를 재배하고 있는데, 수확 후 어디에 팔면 좋을지 가격도 함께 알려주세요."
-    ]
-    
-    for i, question in enumerate(test_questions, 1):
-        print(f"\n--- 테스트 {i} ---")
-        print(f"질문: {question}")
-        
-        # 개선된 라우팅 시스템 테스트
-        result = hybrid_router(question, embedding_model, agent_descriptions, llm)
-        print(f"\n결과:\n{result}")
-        print("-" * 50)
+    try:
+        graph_image_path = "ochestrator_workflow.png"
+        with open(graph_image_path, "wb") as f:
+            f.write(app.get_graph().draw_mermaid_png())
+        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        print(f"그래프 시각화 중 오류 발생: {e}")
+    state = RouterState()
+    app.invoke(state)
 
 if __name__ == "__main__":
-    # 테스트 모드와 일반 모드 선택
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        test_improved_routing()
-    else:
         run_orchestrator_langgraph()

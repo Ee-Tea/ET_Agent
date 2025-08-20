@@ -895,7 +895,7 @@ if __name__ == "__main__":
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     except Exception as e:
         print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "무 시세"})
+    result_state = app.invoke({"query": ""})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

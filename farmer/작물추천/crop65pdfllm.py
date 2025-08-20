@@ -2,10 +2,22 @@
 import os
 from typing import TypedDict, Optional, Any, Dict, List
 from dotenv import load_dotenv, find_dotenv
+from pathlib import Path
 load_dotenv(find_dotenv()) 
 
+# 실행 중인 .py 파일이 있는 폴더
+BASE_DIR = Path(__file__).resolve().parent  
+
+# 상대경로로 벡터DB 지정
+VECTOR_DB_PATH = BASE_DIR / "Crop Recommedations DB/faiss_pdf_db"
+
+print("실행 스크립트 위치(BASE_DIR):", BASE_DIR)
+print("벡터DB 경로(VECTOR_DB_PATH):", VECTOR_DB_PATH.resolve())
+print("index.faiss 존재:", (VECTOR_DB_PATH / "index.faiss").exists())
+print("index.pkl 존재:", (VECTOR_DB_PATH / "index.pkl").exists())
+
 # === 설정 ===
-VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "faiss_pdf_db")
+VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "Crop Recommedations DB/faiss_pdf_db")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

@@ -323,7 +323,7 @@ class SolutionAgent(BaseAgent):
         
         # 그래프 시각화
         try:
-            graph_image_path = ".solution_agent_workflow.png"
+            graph_image_path = "solution_agent_workflow.png"
             with open(graph_image_path, "wb") as f:
                 f.write(self.graph.get_graph().draw_mermaid_png())
             print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
     # 그래프 시각화 (선택)
     try:
-        graph_image_path = ".solution_agent_workflow.png"
+        graph_image_path = "solution_agent_workflow.png"
         with open(graph_image_path, "wb") as f:
             f.write(agent.graph.get_graph().draw_mermaid_png())
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")

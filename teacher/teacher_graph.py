@@ -1296,7 +1296,7 @@ class Orchestrator:
             output_path = os.path.join(base_dir, f"{safe_uq}_분석리포트{suffix}.pdf")
 
             # 템플릿 일부는 반환값이 None
-            generator.generate_analysis_report(analysis_data, output_path, f"{safe_uq} 분석 리포트")
+            generator.generate_analysis_report(analysis_data["problems"], output_path, f"{safe_uq} 분석 리포트")
             print(f"✅ 분석 리포트 PDF 생성 완료: {output_path}")
 
             new_state["artifacts"].setdefault("generated_pdfs", []).append(output_path)

@@ -3,23 +3,35 @@ import os
 from typing import TypedDict, Optional, Any, Dict, List
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
+from langchain_core.runnables.graph import MermaidDrawMethod 
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 load_dotenv(find_dotenv()) 
 
 # 실행 중인 .py 파일이 있는 폴더
 BASE_DIR = Path(__file__).resolve().parent  
 
 # 상대경로로 벡터DB 지정
-VECTOR_DB_PATH = BASE_DIR / "Crop Recommedations DB/faiss_pdf_db"
+# 1) 경로 지정 (forward slash)
+VECTOR_DB_PATH = Path("faiss_pdf_db")
 
-print("실행 스크립트 위치(BASE_DIR):", BASE_DIR)
-print("벡터DB 경로(VECTOR_DB_PATH):", VECTOR_DB_PATH.resolve())
+print("CWD:", Path.cwd())
+print("VECTOR_DB_PATH (relative):", VECTOR_DB_PATH.as_posix())
 print("index.faiss 존재:", (VECTOR_DB_PATH / "index.faiss").exists())
-print("index.pkl 존재:", (VECTOR_DB_PATH / "index.pkl").exists())
+print("index.pkl   존재:", (VECTOR_DB_PATH / "index.pkl").exists())
+
+# 2) 임베딩 + 로드
+EMBED_MODEL_NAME = "jhgan/ko-sroberta-multitask"
+embeddings = HuggingFaceEmbeddings(model_name=os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask"))
+
+vectorstore = FAISS.load_local(
+    VECTOR_DB_PATH.as_posix(),
+    embeddings,
+    allow_dangerous_deserialization=True,
+)
+print("✅ FAISS 벡터스토어 로드 완료")
 
 # === 설정 ===
-VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "Crop Recommedations DB/faiss_pdf_db")
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
@@ -120,6 +132,34 @@ def build_graph():
 if __name__ == "__main__":
     print("💬 LangGraph RAG 시작 (exit/quit 종료)")
     app = build_graph()
+
+    # ── 그래프 시각화 ───────────────────────────────────────────
+    try:
+        graph_image_path = BASE_DIR / "agent_workflow_llm.png"
+        png_bytes = app.get_graph().draw_mermaid_png(
+            # 기본값은 Mermaid.ink API 사용. 오프라인/방화벽 환경이면 PYPPETEER가 더 안전.
+            draw_method=MermaidDrawMethod.API
+            # draw_method=MermaidDrawMethod.PYPPETEER,  # pyppeteer 설치 시 대안
+        )
+        with open(graph_image_path, "wb") as f:
+            f.write(png_bytes)
+        print(f"\n✅ LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        # 실패 시: ASCII 다이어그램 출력 + Mermaid 소스 .mmd로 저장 (백업)
+        print(f"⚠️ 그래프 시각화 중 오류 발생: {e}")
+        try:
+            ascii_map = app.get_graph().draw_ascii()
+            print("\n[ASCII Graph]")
+            print(ascii_map)
+            mermaid_src = app.get_graph().draw_mermaid()
+            mmd_path = BASE_DIR / "agent_workflow.mmd"
+            with open(mmd_path, "w", encoding="utf-8") as f:
+                f.write(mermaid_src)
+            print(f"📝 Mermaid 소스를 '{mmd_path}'로 저장했습니다. (mermaid.live 등에서 렌더 가능)")
+        except Exception as e2:
+            print(f"추가 백업도 실패: {e2}")
+    # ───────────────────────────────────────────────────────────
+
     while True:
         q = input("질문> ").strip()
         if q.lower() in ("exit", "quit"):

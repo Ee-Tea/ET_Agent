@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 *.[Pp][Dd][Ff]
+
+# cropinfo 폴더 전체 무시
+Rookies_project/cropinfo/
+
+# 혹은 PDF만 무시
+Rookies_project/cropinfo/**/*.pdf

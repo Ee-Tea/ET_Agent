@@ -3,4 +3,10 @@ cd farmer\작물추천 -> CMD 경로 들어가서 Crop65pdfllm.py 파일 실행
 cd farmer\작물추천\Goldenset_test -> Goldenset_test.py 파일 실행 <- 골든셋 평가 실행 log 기록
 
 cd farmer\작물추천\csv_change_need> -> pdf 변경
-pip install reportlab pillow pandas openpyxl pypdf
+
+
+vectordb 위치 
+C:/Rookies_project/ET_Agent/Crop_Recommendations_DB/faiss_pdf_db
+
+pdf load 경로 
+

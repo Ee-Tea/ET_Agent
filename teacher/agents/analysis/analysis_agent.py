@@ -1,11 +1,23 @@
 import json
 import os
-from typing import Dict, List, TypedDict, Annotated, Any, Literal, Union, TypeGuard
+from typing import Dict, List, TypedDict, Annotated, Any, Literal, Union, TypeGuard, Optional
+from dotenv import load_dotenv
+load_dotenv()
+
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from groq import Groq
+from openai import OpenAI
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 from ..base_agent import BaseAgent
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 class AnalysisState(TypedDict):
     """LangGraph 노드 간에 주고받는 분석 상태 컨테이너
@@ -70,8 +82,11 @@ class AnalysisAgent(BaseAgent):
         return "학습자 답안을 분석하고 개인화된 피드백을 생성합니다"
     
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "moonshotai/kimi-k2-instruct"
+        self.client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
+        )
+        self.model = OPENAI_LLM_MODEL
         self.graph = self._create_graph()
     
     def _create_graph(self) -> StateGraph:
@@ -198,8 +213,8 @@ subject 는 각 문항의 과목명(문자열)입니다.
 모든 내용은 한국어로 작성."""
                     }
                 ],
-                temperature=0,
-                max_completion_tokens=4096,
+                temperature=LLM_TEMPERATURE,
+                max_completion_tokens=LLM_MAX_TOKENS,
                 top_p=1,
                 stream=False,
                 response_format={"type": "json_object"},
@@ -251,7 +266,7 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
 """
                     }
                 ],
-                temperature=0,
+                temperature=LLM_TEMPERATURE,
                 max_completion_tokens=1024,
                 top_p=1,
                 stream=False,
@@ -270,7 +285,7 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
         state["messages"].append(AIMessage(content="분석 및 피드백 생성 완료"))
         return state
 
-    def execute(self, input_data: Dict) -> AnalysisResult:
+    def invoke(self, input_data: Dict) -> AnalysisResult:
         """메인 실행
         1) 입력 검증: 필수 필드 유무/길이 일치 확인
         2) 상태 구성: grade_result는 ScoreEngine의 results([0,1]) 사용

@@ -39,6 +39,7 @@ class PDFPreprocessor:
 
     def __init__(self):
         self.use_pdfplumber = PDFPLUMBER_AVAILABLE
+    
 
     def _pre_normalize_text(self, text: str) -> str:
         """
@@ -144,6 +145,7 @@ class PDFPreprocessor:
         )
 
         text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"(?m)^\s*-\s*\d+\s*$", "", text)
         return text
 
 
@@ -188,6 +190,7 @@ class PDFPreprocessor:
                 for page_num, page in enumerate(pdf.pages, 1):
                     print(f"🔄 페이지 {page_num} 처리 중...")
                     left_col, right_col = self._split_page_into_columns(page)
+                    left_col, right_col = self._merge_column_spillover(left_col, right_col)
                     left_column_text += f"\n\n--- 페이지 {page_num} 왼쪽 ---\n{left_col}"
                     right_column_text += f"\n\n--- 페이지 {page_num} 오른쪽 ---\n{right_col}"
                 left_column_text  = self._pre_normalize_text(left_column_text)
@@ -258,41 +261,92 @@ class PDFPreprocessor:
     def _split_page_into_columns(self, page) -> Tuple[str, str]:
         """1단계: 페이지를 왼쪽/오른쪽 컬럼으로 분리"""
         try:
-            # 페이지의 텍스트 객체들을 가져옴
-            text_objects = page.extract_words()
+            # 줄 흐름을 고려해 단어 추출
+            text_objects = page.extract_words(use_text_flow=True) or []
             if not text_objects:
                 return "", ""
-            
-            # x 좌표 기준으로 정렬
-            text_objects.sort(key=lambda x: x['x0'])
-            
-            # 페이지 중간점 계산
-            x_coords = [obj['x0'] for obj in text_objects]
-            if not x_coords:
-                return "", ""
-            
-            mid_x = sum(x_coords) / len(x_coords)
-            
-            left_text = ""
-            right_text = ""
-            
-            # y 좌표 기준으로 정렬 (위에서 아래로)
-            text_objects.sort(key=lambda x: x['top'])
-            
-            for obj in text_objects:
-                text = obj['text']
-                x0 = obj['x0']
-                
-                if x0 < mid_x:
-                    left_text += text + " "
-                else:
-                    right_text += text + " "
-            
-            return left_text.strip(), right_text.strip()
-            
+
+            # ✅ 읽기 순서: 위→아래, 왼→오
+            text_objects.sort(key=lambda w: (round(w.get("top", 0.0), 1), w.get("x0", 0.0)))
+
+            # ✅ 컬럼 경계는 '단어 x 평균'이 아니라 '페이지 폭의 정확한 절반'
+            page_width = float(page.width or 0.0)
+            if page_width <= 0:
+                # width가 없으면 보수적으로 단어 x1의 최대값을 사용
+                page_width = max((float(w.get("x1", 0.0)) for w in text_objects), default=0.0)
+            mid_x = page_width / 2.0
+
+            # 같은 줄 단위로 모아서 합치면 공백 품질이 좋아짐
+            from itertools import groupby
+            left_lines, right_lines = [], []
+            for _, line_words in groupby(text_objects, key=lambda w: round(w.get("top", 0.0), 1)):
+                line_words = sorted(list(line_words), key=lambda w: w.get("x0", 0.0))
+                left_buf, right_buf = [], []
+                for w in line_words:
+                    (left_buf if float(w.get("x0", 0.0)) < mid_x else right_buf).append(w.get("text", ""))
+
+                left_line = " ".join(t for t in left_buf if t).strip()
+                right_line = " ".join(t for t in right_buf if t).strip()
+                if left_line:
+                    left_lines.append(left_line)
+                if right_line:
+                    right_lines.append(right_line)
+
+            left_text = "\n".join(left_lines).strip()
+            right_text = "\n".join(right_lines).strip()
+            return left_text, right_text
+
         except Exception as e:
             print(f"⚠️ 컬럼 분리 실패: {e}")
             return "", ""
+
+    def _merge_column_spillover(self, left: str, right: str):
+        """
+        좌측 컬럼 끝에서 문장이 끊긴 채, 우측 컬럼 앞에서 이어지는 경우
+        또는 우측 컬럼이 보기(①/1)/…)로 시작하는 경우 → 우측 선두 블록을 좌측으로 붙인다.
+        반환: (merged_left, trimmed_right)
+        """
+        import re
+        if not right:
+            return left, right
+
+        # 문제 시작 패턴(다음 문항 헤드)
+        qpat = r'(?m)^\s*(?:\d{1,3}\s*[.)]|\(\d{1,3}\))\s+'
+        # 보기 머리표시 패턴 (파일 상단 정의한 _OPTION_HEAD 재사용)
+        optpat = _OPTION_HEAD
+
+        L = (left or "").rstrip()
+        R = (right or "").lstrip()
+        L = re.sub(r'\s*-\s*\d+\s*$', '', (L or '').rstrip())
+        R = re.sub(r'^\s*-\s*\d+\s*', '', (R or '').lstrip())
+
+        # (A) 우측이 보기로 시작 → 보기 블록 전체를 좌측에 붙인다(다음 문제 시작 전까지)
+        if re.match(r'^\s*' + optpat, R):
+            mnext = re.search(qpat, R)
+            end = mnext.start() if mnext else len(R)
+            moved = R[:end].rstrip()
+            R = R[end:].lstrip()
+            if moved:
+                L = f"{L}\n{moved}" if L else moved
+            return L, R
+
+        # (B) 우측이 '문제 시작'이 아니라면 → 이어짐 텍스트로 간주, 다음 문제 전까지 좌측에 붙임
+        if not re.match(qpat, R):
+            mnext = re.search(qpat, R)
+            cut = mnext.start() if mnext else len(R)
+            prefix = R[:cut].rstrip()
+            R = R[cut:].lstrip()
+            if prefix:
+                # 하이픈 줄바꿈 등 이어붙임
+                if L and (L.endswith('-') or not L.endswith(('\n', ' '))):
+                    L = L + prefix
+                else:
+                    L = f"{L} {prefix}".strip()
+            return L, R
+
+        # (C) 우측이 바로 '문제 시작'이면 이동 없음
+        return L, R
+
 
     def _split_text_by_problems(self, text: str) -> List[str]:
         if not text:

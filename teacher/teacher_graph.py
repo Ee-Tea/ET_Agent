@@ -1085,7 +1085,8 @@ class Orchestrator:
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
             suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
-            output_path = os.path.join(base_dir, f"{safe_uq}_문제집{suffix}.pdf")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 밀리초까지
+            output_path = os.path.join(base_dir, f"{safe_uq}_분석리포트{suffix}_{ts}.pdf")
 
             # 일부 구현은 반환값이 None → 변수에 안 받습니다.
             generator.generate_problem_booklet(problems, output_path, f"{safe_uq} 문제집")
@@ -1170,7 +1171,8 @@ class Orchestrator:
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
             suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
-            output_path = os.path.join(base_dir, f"{safe_uq}_답안집{suffix}.pdf")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 밀리초까지
+            output_path = os.path.join(base_dir, f"{safe_uq}_답안집{suffix}_{ts}.pdf")
 
             # 일부 구현은 반환값이 None → 변수에 안 받습니다.
             generator.generate_answer_booklet(problems, output_path, f"{safe_uq} 답안집")
@@ -1185,7 +1187,7 @@ class Orchestrator:
     def generate_analysis_pdf(self, state: TeacherState) -> TeacherState:
         """
         분석 리포트 PDF 생성 노드 (방금 추가된 범위만 출력)
-        - generator가 dict형 문제 구조를 기대하는 경우를 대비해 payload를 정규화
+        - analysis 에이전트의 결과(payload['analysis'])를 함께 전달
         """
         print("📄 분석 리포트 PDF 생성 노드 실행")
         new_state: TeacherState = ensure_shared({**state})
@@ -1208,83 +1210,65 @@ class Orchestrator:
 
             # 범위 결정 (방금 추가된 범위 우선)
             start, end = 0, total_n - 1
-            c = arts.get("pdf_added_count")
-            s = arts.get("pdf_added_start_index")
-            e = arts.get("pdf_added_end_index")
+            c = arts.get("pdf_added_count"); s = arts.get("pdf_added_start_index"); e = arts.get("pdf_added_end_index")
             if isinstance(c, int) and c > 0:
                 if isinstance(s, int) and isinstance(e, int) and 0 <= s <= e < total_n:
                     start, end = s, e
                 else:
                     start = max(0, total_n - c); end = total_n - 1
 
-            # 슬라이스
-            sub_q    = questions[start:end + 1]
-            sub_opts = options_list[start:end + 1] if options_list else [[]] * (end - start + 1)
-            sub_user = user_answer[start:end + 1] if len(user_answer) >= end + 1 else user_answer[:]
-            sub_sol  = solution_answers[start:end + 1]
-            sub_exp  = explanations[start:end + 1] if explanations else [""] * (end - start + 1)
-
-            # 옵션 정규화
+            # 슬라이스 + 정규화
             def _norm_opts(x):
                 if isinstance(x, str):
                     return [t.strip() for t in x.splitlines() if t.strip()]
                 if isinstance(x, list):
                     return [str(t).strip() for t in x if str(t).strip()]
                 return []
-            sub_opts = [_norm_opts(o) for o in sub_opts]
 
-            # 문제 dict로 정규화 (템플릿 호환)
+            sub_q    = questions[start:end + 1]
+            sub_opts = [ _norm_opts(o) for o in (options_list[start:end + 1] if options_list else [[]]*(end-start+1)) ]
+            sub_user = user_answer[start:end + 1] if len(user_answer) >= end + 1 else user_answer[:]
+            sub_sol  = solution_answers[start:end + 1]
+            sub_exp  = (explanations[start:end + 1] if explanations else [""] * (end - start + 1))
+
             problems = []
-            for q, opts, u, s, ex in zip(sub_q, sub_opts, sub_user, sub_sol, sub_exp):
+            for q, opts, u, s_, ex in zip(sub_q, sub_opts, sub_user, sub_sol, sub_exp):
                 problems.append({
                     "question": str(q),
                     "options": opts,
                     "user_answer": str(u),
-                    "generated_answer": str(s),
+                    "generated_answer": str(s_),
                     "generated_explanation": str(ex),
                 })
 
-            # 결과 요약 (score_result 없을 때 대비)
+            # score_result 없을 때 정확도 계산 폴백
             import re
-            def _norm_num(x):
-                if isinstance(x, (int, float)) and not isinstance(x, bool): return str(int(x))
-                s = str(x or "").strip().replace("정답", "").replace("답", "").rstrip("번").rstrip(".")
-                m = re.search(r"\d+", s)
-                return m.group(0) if m else ""
-            results = [1 if (_norm_num(u) and _norm_num(s) and _norm_num(u) == _norm_num(s)) else 0
-                    for u, s in zip(sub_user, sub_sol)]
+            def _num(x):
+                m = re.search(r'\d+', str(x))
+                return m.group(0) if m else None
+            auto_results = [1 if (_num(u) and _num(s_) and _num(u) == _num(s_)) else 0 for u, s_ in zip(sub_user, sub_sol)]
             score_result = sh.get("score_result")
-            if not isinstance(score_result, dict) or "correct_count" not in score_result:
+            if not isinstance(score_result, dict) or "total_count" not in score_result:
                 score_result = {
-                    "correct_count": sum(results),
-                    "total_count": len(results),
-                    "accuracy": (sum(results) / len(results)) if results else 0.0,
+                    "correct_count": sum(auto_results),
+                    "total_count": len(auto_results),
+                    "accuracy": (sum(auto_results) / len(auto_results)) if auto_results else 0.0,
                 }
 
-            # weak_types도 dict 리스트로 호환
-            weak_types_norm = [{"label": str(w)} for w in (weak_type if isinstance(weak_type, list) else [weak_type])]
+            # analysis 에이전트 결과(상세/총평)도 함께 전달
+            analysis_payload = (new_state.get("analysis") or {}).get("analysis")
 
-            # 템플릿 호환을 위한 payload (questions도 dict 리스트로 제공)
             analysis_data = {
-                "problems": problems,  # ← 핵심: 아이템에 .get 사용해도 안전
-                "questions": [{"text": str(q)} for q in sub_q],  # 백워드 호환
-                "user_answers": [str(u) for u in sub_user],
-                "correct_answers": [str(s) for s in sub_sol],
-                "explanations": [str(ex) for ex in sub_exp],
-                "weak_types": weak_types_norm,
+                "problems": problems,
+                "weak_types": weak_type,                 # ['문자'] 또는 [{'label':..}] 모두 허용
                 "score_result": score_result,
+                "analysis": analysis_payload,            # ★ 상세/총평 전달
                 "range": {"start_index": start, "end_index": end},
             }
-
-            # 디버그
-            print(f"[DBG] problems={len(analysis_data['problems'])}, weak_types={len(analysis_data['weak_types'])}")
-            if analysis_data["problems"]:
-                print(f"[DBG] first problem keys={list(analysis_data['problems'][0].keys())}")
 
             from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
-            import os
             base_dir = os.path.abspath(os.path.join(
                 os.path.dirname(__file__), "agents", "solution", "pdf_outputs"
             ))
@@ -1293,10 +1277,10 @@ class Orchestrator:
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
             suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
-            output_path = os.path.join(base_dir, f"{safe_uq}_분석리포트{suffix}.pdf")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 밀리초까지
+            output_path = os.path.join(base_dir, f"{safe_uq}_분석리포트{suffix}_{ts}.pdf")
 
-            # 템플릿 일부는 반환값이 None
-            generator.generate_analysis_report(analysis_data["problems"], output_path, f"{safe_uq} 분석 리포트")
+            generator.generate_analysis_report(analysis_data, output_path, f"{safe_uq} 분석 리포트")
             print(f"✅ 분석 리포트 PDF 생성 완료: {output_path}")
 
             new_state["artifacts"].setdefault("generated_pdfs", []).append(output_path)
@@ -1305,6 +1289,7 @@ class Orchestrator:
             print(f"❌ 분석 리포트 PDF 생성 중 오류: {e}")
 
         return new_state
+
 
 
 
@@ -1480,14 +1465,6 @@ class Orchestrator:
             {
                 "analysis": "analysis",
                 "generate_answer_pdf": "generate_answer_pdf",  # 채점 후 답안집 PDF 생성
-            },
-        )
-        builder.add_conditional_edges(
-            "analysis",
-            self.post_analysis_route,
-            {
-                "generate_analysis_pdf": "generate_analysis_pdf",
-                "persist_state": "persist_state",
             },
         )
 

@@ -1,5 +1,7 @@
 from sentence_transformers import SentenceTransformer, util
 import requests
+import re
+import json
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -75,44 +77,80 @@ def simple_agent_selector(user_question, llm):
     4) 판매처_agent: 판매처, 가격, 시세 정보
     5) 기타: 농업과 무관한 질문
     
-    [판매처 에이전트 세부 분류]
-    - 시세만: "가격", "시세", "얼마" 등의 키워드만 포함
-    - 판매처만: "판매처", "어디서", "장소" 등의 키워드만 포함  
-    - 둘 다: 시세와 판매처 관련 키워드가 모두 포함
-    
     질문: "{user_question}"
     
+    [응답 규칙]
+    - 에이전트가 1개만 필요한 경우: 에이전트명만 선택
+    - 에이전트가 2개 이상 필요한 경우: 각 에이전트가 담당할 질문 부분도 함께 분류
+    
     다음 JSON 형식으로 답변해주세요:
+    
+    [1개 에이전트인 경우]
     {{
-        "selected_agents": ["에이전트명1"],
+        "selected_agents": ["에이전트명"],
+        "execution_order": ["에이전트명"]
+    }}
+    
+    [2개 이상 에이전트인 경우]
+    {{
+        "selected_agents": ["에이전트명1", "에이전트명2"],
         "question_parts": {{
-            "에이전트명1": "해당 에이전트가 답변할 구체적인 질문"
+            "에이전트명1": "담당할 질문 부분",
+            "에이전트명2": "담당할 질문 부분"
         }},
-        "execution_order": ["에이전트명1"]
+        "execution_order": ["에이전트명1", "에이전트명2"]
     }}
     """
     
     try:
         result = llm.invoke(selection_prompt)
-        import json
-        import re
         
         # JSON 부분 추출
         json_match = re.search(r'\{.*\}', result, re.DOTALL)
         if json_match:
-            return json.loads(json_match.group())
+            parsed_result = json.loads(json_match.group())
+            selected_agents = parsed_result.get("selected_agents", [])
+            
+            # 에이전트가 1개인 경우
+            if len(selected_agents) == 1:
+                return {
+                    "selected_agents": selected_agents,
+                    "question_parts": None,  # 질문 분류 없음
+                    "execution_order": parsed_result["execution_order"]
+                }
+            # 에이전트가 2개 이상인 경우
+            elif len(selected_agents) >= 2:
+                # question_parts가 있는지 확인
+                if "question_parts" in parsed_result:
+                    return parsed_result
+                else:
+                    # question_parts가 없는 경우 기본값 사용
+                    print(f"[⚠️ 질문 분류 누락 - 기본값 사용]")
+                    question_parts = {agent: user_question for agent in selected_agents}
+                    return {
+                        "selected_agents": selected_agents,
+                        "question_parts": question_parts,
+                        "execution_order": parsed_result["execution_order"]
+                    }
+            else:
+                # 에이전트가 0개인 경우
+                return {
+                    "selected_agents": ["기타"],
+                    "question_parts": None,
+                    "execution_order": ["기타"]
+                }
         else:
             # JSON 파싱 실패 시 기본값
             return {
                 "selected_agents": ["기타"],
-                "question_parts": {"기타": user_question},
+                "question_parts": None,
                 "execution_order": ["기타"]
             }
     except Exception as e:
         print(f"에이전트 선택 실패: {e}")
         return {
             "selected_agents": ["기타"],
-            "question_parts": {"기타": user_question},
+            "question_parts": None,
             "execution_order": ["기타"]
         }
 
@@ -126,43 +164,21 @@ def build_agent_prompt(agent, user_question):
 
 def execute_agent_with_boundaries(agent_name, question_part, llm):
     """
-    각 에이전트를 명확한 경계 내에서 실행
+    각 에이전트를 실행하고 답변만 반환
     """
     agent_func = agent_functions.get(agent_name)
     if not agent_func:
         return f"{agent_name} 실행 함수가 연결되어 있지 않습니다."
     
-    # 명확한 역할 제한이 포함된 프롬프트 생성
-    agent_prompt = build_agent_prompt(agent_name, question_part)
+    # 간단한 프롬프트로 에이전트 실행
+    agent_prompt = f"질문: {question_part}"
     
     try:
         agent_state = {"query": agent_prompt}
         agent_result = agent_func(agent_state)
         answer = agent_result.get("pred_answer", "답변 생성 실패")
         
-        # 답변에서 다른 에이전트 영역 침범 여부 확인
-        boundary_check_prompt = f"""
-        다음 답변이 {agent_name}의 역할 범위를 벗어나지 않았는지 확인해주세요.
-        
-        [에이전트 역할]
-        {agent_name}: {agent_descriptions.get(agent_name, '')}
-        
-        [답변 내용]
-        {answer}
-        
-        [확인 사항]
-        1. 답변이 {agent_name}의 전문 영역에만 집중했는가?
-        2. 다른 에이전트가 담당해야 할 내용을 포함하지 않았는가?
-        3. 웹 검색이 필요한 부분을 명시했는가?
-        
-        문제가 있다면 수정된 답변을 제공하고, 문제가 없다면 "OK"라고 답변해주세요.
-        """
-        
-        boundary_check = llm.invoke(boundary_check_prompt)
-        if "OK" not in boundary_check:
-            # 경계를 벗어난 답변 수정
-            answer = boundary_check
-        
+        # 답변 그대로 반환 (추가 검증 없음)
         return answer
         
     except Exception as e:
@@ -318,7 +334,7 @@ def select_single_crop_from_recommendations(crop_recommendations, llm):
     """
     작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
     """
-    print("\n=== �� 작물 추출 과정 시작 ===")
+    print("\n=== 작물 추출 과정 시작 ===")
     print(f"[원본 작물추천 응답]\n{crop_recommendations}")
     
     selection_prompt = f"""
@@ -328,127 +344,34 @@ def select_single_crop_from_recommendations(crop_recommendations, llm):
     [추천 작물 목록]
     {crop_recommendations}
     
-    [선택 규칙]
-    1. 사용자 질문과 가장 관련성이 높은 작물 선택
-    2. 계절, 지역, 재배 난이도 등을 고려
-    3. 반드시 작물명만 간단하게 답변
-    4. 설명이나 다른 문장은 포함하지 말 것
-    
-    [응답 형식]
-    상세 분석할 작물명만 작성하세요. 예시: 무, 토마토, 고추, 오이
+    [요구사항]
+    - 작물명만 작성 (예: 무, 토마토, 고추, 오이)
+    - 설명이나 문장은 절대 포함하지 말 것
+    - 한 단어로 된 작물명만
+    - 작물을 찾을 수 없으면 "없음"이라고만 답변
     
     상세 분석할 작물: """
     
     try:
-        print("[1단계] LLM에게 작물 선택 요청...")
+        print("[1단계] LLM에게 작물 추출 요청...")
         selected_crop = llm.invoke(selection_prompt).strip()
         print(f"[LLM 원본 응답] {selected_crop}")
         
-        # 응답 정리 및 검증
-        print("[2단계] 작물명 정리 및 검증...")
-        cleaned_crop = clean_crop_name(selected_crop)
+        # "없음"이거나 빈 문자열인 경우 공백 반환
+        if selected_crop in ["없음", "", "None", "null"]:
+            print(f"[⚠️ 작물을 찾을 수 없음 - 공백 반환]")
+            return ""
+        
+        # 간단한 정리만 수행 (clean_crop_name 함수 사용 안함)
+        cleaned_crop = selected_crop.split('\n')[0].split('.')[0].split(',')[0].strip()
         print(f"[정리된 작물명] {cleaned_crop}")
         
-        # 검증: 작물명이 너무 길거나 설명이 포함된 경우 재시도
-        if len(cleaned_crop) > 10 or "에 대해" in cleaned_crop or "관련" in cleaned_crop:
-            print(f"[경고] 첫 번째 시도 결과가 부적절함: '{cleaned_crop}'")
-            print("[3단계] 재시도 시작...")
-            return retry_crop_selection(crop_recommendations, llm)
-        
-        print(f"[✅ 최종 선택된 작물] {cleaned_crop}")
+        print(f"[✅ 최종 추출된 작물] {cleaned_crop}")
         return cleaned_crop
         
     except Exception as e:
-        print(f"[❌ 오류] 작물 선택 중 오류: {e}")
-        return fallback_crop_selection(crop_recommendations)
-
-def clean_crop_name(crop_text):
-    """
-    작물명 텍스트를 정리하는 함수
-    """
-    print(f"[정리 전] {crop_text}")
-    
-    # 줄바꿈, 마침표, 쉼표 등으로 구분
-    crop_text = crop_text.split('\n')[0].split('.')[0].split(',')[0].strip()
-    
-    # 괄호나 특수문자 제거
-    import re
-    crop_text = re.sub(r'[\(\)\[\]\{\}]', '', crop_text)
-    
-    # 숫자나 단위 제거 (예: "무 1kg" -> "무")
-    crop_text = re.sub(r'\s*\d+.*$', '', crop_text)
-    
-    final_result = crop_text.strip()
-    print(f"[최종 정리 결과] {final_result}")
-    return final_result
-
-def retry_crop_selection(crop_recommendations, llm):
-    """
-    첫 번째 시도가 실패했을 때 재시도하는 함수
-    """
-    retry_prompt = f"""
-    위의 작물 추천 결과에서 가장 적합한 작물명 하나만 정확히 추출해주세요.
-    
-    [작물 추천 내용]
-    {crop_recommendations}
-    
-    [요구사항]
-    - 작물명만 작성 (예: 무, 토마토, 고추)
-    - 설명이나 문장은 절대 포함하지 말 것
-    - 한 단어로 된 작물명만
-    
-    작물명: """
-    
-    try:
-        retry_result = llm.invoke(retry_prompt).strip()
-        return clean_crop_name(retry_result)
-    except Exception as e:
-        print(f"재시도 실패: {e}")
-        return fallback_crop_selection(crop_recommendations)
-
-def fallback_crop_selection(crop_recommendations):
-    """
-    모든 시도가 실패했을 때 사용하는 대체 방법
-    """
-    print("\n=== �� 대체 방법: 패턴 매칭 시작 ===")
-    
-    # 텍스트에서 작물명 패턴 찾기
-    import re
-    
-    # 일반적인 작물명 패턴 (한글 + 영문)
-    crop_patterns = [
-        r'([가-힣]+무)',      # 무, 봄무, 가을무 등
-        r'([가-힣]+토마토)',   # 토마토, 방울토마토 등
-        r'([가-힣]*고추)',     # 고추, 풋고추, 빨간고추 등
-        r'([가-힣]*오이)',     # 오이, 가시오이 등
-        r'([가-힣]*상추)',     # 상추, 적상추 등
-        r'([가-힣]*배추)',     # 배추, 김장배추 등
-        r'([가-힣]*양파)',     # 양파, 적양파 등
-        r'([가-힣]*마늘)',     # 마늘, 단마늘 등
-        r'([가-힣]*감자)',     # 감자, 새감자 등
-        r'([가-힣]*고구마)',   # 고구마, 밤고구마 등
-    ]
-    
-    print("[패턴 매칭 시도...]")
-    for i, pattern in enumerate(crop_patterns):
-        matches = re.findall(pattern, crop_recommendations)
-        if matches:
-            # 가장 긴 매치를 선택 (더 구체적인 작물명)
-            selected = max(matches, key=len)
-            print(f"[✅ 패턴 {i+1} 매치 성공] {selected}")
-            return selected
-    
-    # 패턴 매치가 없는 경우, 첫 번째 한글 단어 반환
-    print("[패턴 매칭 실패, 한글 단어 추출 시도...]")
-    korean_words = re.findall(r'[가-힣]+', crop_recommendations)
-    if korean_words:
-        fallback = korean_words[0]
-        print(f"[✅ 첫 번째 한글 단어] {fallback}")
-        return fallback
-    
-    # 최후의 수단
-    print("[❌ 모든 방법 실패]")
-    return None
+        print(f"[❌ LLM 호출 오류 - 공백 반환] {e}")
+        return ""
 
 def node_input(state: RouterState) -> RouterState:
     user_input = input("\n사용자 입력: ").strip()
@@ -463,7 +386,7 @@ def node_agent_select(state: RouterState) -> RouterState:
     # 기존 복잡한 로직을 단순화된 함수로 교체
     result = simple_agent_selector(state["query"], llm)
     state["selected_agents"] = result["selected_agents"]
-    state["question_parts"] = result["question_parts"]
+    state["question_parts"] = result.get("question_parts", {})  # None이면 빈 딕셔너리
     state["web_search_needed"] = []  # 웹 검색 필요성 제거
     state["execution_order"] = result["execution_order"]
     
@@ -478,7 +401,18 @@ def node_crop_recommend(state: RouterState) -> RouterState:
         return state
     
     print("\n=== 작물추천_agent 실행 ===")
-    question_part = state["question_parts"].get("작물추천_agent", state["query"])
+    
+    # question_parts가 None인 경우 안전하게 처리
+    question_parts = state.get("question_parts")
+    if question_parts is None:
+        # 단일 에이전트인 경우 원본 질문 사용
+        question_part = state["query"]
+        print(f"[�� 단일 에이전트 - 원본 질문 사용] {question_part}")
+    else:
+        # 다중 에이전트인 경우 분류된 질문 사용
+        question_part = question_parts.get("작물추천_agent", state["query"])
+        print(f"[📝 다중 에이전트 - 분류된 질문 사용] {question_part}")
+    
     print(f"담당 질문: {question_part}")
     
     # 명확한 경계가 설정된 프롬프트로 실행
@@ -492,8 +426,8 @@ def node_crop_recommend(state: RouterState) -> RouterState:
     state["crop_info"] = answer
     state["selected_crop"] = selected_crop  # 선택된 단일 작물 저장
     
-    print(f"\n[선택된 작물] {selected_crop}")
-    print(f"[작물 선택 완료]")
+    print(f"\n[추출된 작물] {selected_crop}")
+    print(f"[작물 추출 완료]")
     
     # agent_answers에 추가
     if "agent_answers" not in state:
@@ -503,51 +437,73 @@ def node_crop_recommend(state: RouterState) -> RouterState:
     return state
 
 def node_parallel_agents(state: RouterState) -> RouterState:
+    # 기존 agent_answers 보존
+    existing_answers = state.get("agent_answers", {})
     answers = {}
     
-    # 선택된 작물 정보 확인
-    selected_crop = state.get("selected_crop", "")
-    print(f"\n=== 병렬 에이전트 실행 시작 ===")
-    print(f"[📌 선택된 작물] {selected_crop}")
-    
-    for agent in state.get("execution_order", []):
-        if agent == "작물추천_agent":
-            continue  # 이미 실행됨
-        
-        if agent in state.get("question_parts", {}):
-            original_question = state["question_parts"][agent]
-            print(f"\n--- {agent} 실행 ---")
-            print(f"[📝 원본 질문] {original_question}")
-            
-            # 작물명이 유효하고 질문에 포함되지 않은 경우에만 추가
-            if (selected_crop and 
-                selected_crop not in ["I don't know", "None", ""] and 
-                selected_crop not in original_question):
-                
-                print(f"[🔄 질문 수정 필요] 작물명 '{selected_crop}'이 질문에 포함되지 않음")
-                question_part = f"{selected_crop} {original_question}"
-                print(f"[🔧 질문 수정] 작물명 '{selected_crop}' 추가")
-            else:
-                print(f"[✅ 질문 수정 불필요] 원본 질문 사용")
-                question_part = original_question
-            
-            print(f"[🎯 최종 질문] {question_part}")
-            print(f"[📊 질문 길이] {len(question_part)}자")
-            
-            # 명확한 경계가 설정된 프롬프트로 실행
-            print(f"[⚡ {agent} 실행 시작...]")
-            answer = execute_agent_with_boundaries(agent, question_part, llm)
+    # 선택된 에이전트가 하나뿐인 경우 단순 처리
+    selected_agents = state.get("execution_order", [])
+    if len(selected_agents) == 1:
+        agent = selected_agents[0]
+        if agent != "작물추천_agent":
+            print(f"\n=== 단일 에이전트 실행: {agent} ===")
+            answer = execute_agent_with_boundaries(agent, state["query"], llm)
             answers[agent] = answer
-            
             print(f"[✅ {agent} 실행 완료]")
-            print(f"[ 답변 길이] {len(answer)}자")
-            print(f"[ 답변 미리보기] {answer[:100]}...")
-            
         else:
-            answers[agent] = f"{agent}에 대한 구체적인 질문이 정의되지 않았습니다."
-            print(f"[⚠️ {agent}] 구체적인 질문이 정의되지 않음")
+            # 작물추천_agent는 이미 실행됨 - 기존 결과 사용
+            print(f"\n=== 작물추천_agent 이미 실행됨 - 결과 재사용 ===")
+            if "작물추천_agent" in existing_answers:
+                answers["작물추천_agent"] = existing_answers["작물추천_agent"]
+                print(f"[✅ 작물추천_agent 결과 재사용]")
+            else:
+                print(f"[⚠️ 작물추천_agent 결과를 찾을 수 없음]")
+                answers["작물추천_agent"] = "작물추천_agent 실행 결과를 찾을 수 없습니다."
+    else:
+        # 여러 에이전트가 있는 경우 기존 로직 유지
+        selected_crop = state.get("selected_crop", "")
+        print(f"\n=== 병렬 에이전트 실행 시작 ===")
+        print(f"[📌 선택된 작물] {selected_crop}")
+        
+        for agent in selected_agents:
+            if agent == "작물추천_agent":
+                continue  # 이미 실행됨
+            
+            if agent in state.get("question_parts", {}):
+                original_question = state["question_parts"][agent]
+                print(f"\n--- {agent} 실행 ---")
+                print(f"[📝 원본 질문] {original_question}")
+                
+                # 작물명이 유효하고 질문에 포함되지 않은 경우에만 추가
+                if (selected_crop and 
+                    selected_crop not in ["I don't know", "None", ""] and 
+                    selected_crop not in original_question):
+                    
+                    print(f"[🔄 질문 수정 필요] 작물명 '{selected_crop}'이 질문에 포함되지 않음")
+                    question_part = f"{selected_crop} {original_question}"
+                    print(f"[🔧 질문 수정] 작물명 '{selected_crop}' 추가")
+                else:
+                    print(f"[✅ 질문 수정 불필요] 원본 질문 사용")
+                    question_part = original_question
+                
+                print(f"[🎯 최종 질문] {question_part}")
+                print(f"[📊 질문 길이] {len(question_part)}자")
+                
+                # 명확한 경계가 설정된 프롬프트로 실행
+                print(f"[⚡ {agent} 실행 시작...]")
+                answer = execute_agent_with_boundaries(agent, question_part, llm)
+                answers[agent] = answer
+                
+                print(f"[✅ {agent} 실행 완료]")
+                print(f"[ 답변 길이] {len(answer)}자")
+                print(f"[ 답변 미리보기] {answer[:100]}...")
+                
+            else:
+                answers[agent] = f"{agent}에 대한 구체적인 질문이 정의되지 않았습니다."
+                print(f"[⚠️ {agent}] 구체적인 질문이 정의되지 않음")
     
-    state["agent_answers"] = answers
+    # 기존 agent_answers와 새 answers 병합 (덮어쓰지 않음!)
+    state["agent_answers"] = {**existing_answers, **answers}
     print(f"\n=== 모든 에이전트 실행 완료 ===")
     return state
 
@@ -555,48 +511,68 @@ def node_merge_output(state: RouterState) -> RouterState:
     print("\n=== 최종 응답 병합 시작 ===")
     
     # 실행 요약 출력
+    selected_agents = state.get("selected_agents", [])
     print(f"[ 실행 요약]")
-    print(f"  - 선택된 에이전트: {state.get('selected_agents', [])}")
+    print(f"  - 선택된 에이전트: {selected_agents}")
     print(f"  - 선택된 작물: {state.get('selected_crop', '없음')}")
     print(f"  - 실행된 에이전트: {list(state.get('agent_answers', {}).keys())}")
     
     output = ""
     
-    # 작물추천 결과가 있으면 먼저 표시
-    if state.get("crop_info"):
-        output += f"[작물추천 결과]\n{state['crop_info']}\n"
+    # 에이전트가 하나뿐인 경우 단순 처리
+    if len(selected_agents) == 1:
+        agent = selected_agents[0]
+        if agent in state.get("agent_answers", {}):
+            output = state["agent_answers"][agent]
+            print(f"[✅ 단일 에이전트 응답 완료] {agent}")
+        else:
+            output = f"{agent} 실행 결과를 찾을 수 없습니다."
+            print(f"[❌ {agent} 응답 없음]")
+    else:
+        # 여러 에이전트가 있는 경우 기존 로직 유지
+        # 작물추천 결과가 있으면 먼저 표시
+        if state.get("crop_info"):
+            output += f"[작물추천 결과]\n{state['crop_info']}\n"
+            
+            # 선택된 작물 강조 표시
+            if state.get("selected_crop"):
+                output += f"\n[상세 분석 작물]\n{state['selected_crop']}\n"
+                print(f"[ 상세 분석 작물] {state['selected_crop']}")
         
-        # 선택된 작물 강조 표시
-        if state.get("selected_crop"):
-            output += f"\n[상세 분석 작물]\n{state['selected_crop']}\n"
-            print(f"[ 상세 분석 작물] {state['selected_crop']}")
-    
-    # 다른 에이전트들의 답변 표시
-    for agent, answer in state.get("agent_answers", {}).items():
-        if agent != "작물추천_agent":  # 이미 표시됨
-            # 선택된 작물과 답변의 일관성 확인
-            selected_crop = state.get("selected_crop", "")
-            if selected_crop and selected_crop in answer:
-                output += f"[{agent} 결과 - {selected_crop} 관련]\n{answer}\n"
-                print(f"[✅ {agent}] {selected_crop} 관련 답변 일치")
-            else:
-                output += f"[{agent} 결과]\n{answer}\n"
-                print(f"[⚠️ {agent}] {selected_crop} 관련 답변 불일치")
-    
-    # 다른 작물 정보 안내 추가
-    if state.get("crop_info") and state.get("selected_crop"):
-        output += f"\n[추가 정보 안내]\n"
-        output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
-        output += f"'{state['selected_crop']} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
+        # 다른 에이전트들의 답변 표시
+        for agent, answer in state.get("agent_answers", {}).items():
+            if agent != "작물추천_agent":  # 이미 표시됨
+                # 선택된 작물과 답변의 일관성 확인
+                selected_crop = state.get("selected_crop", "")
+                if selected_crop and selected_crop in answer:
+                    output += f"[{agent} 결과 - {selected_crop} 관련]\n{answer}\n"
+                    print(f"[✅ {agent}] {selected_crop} 관련 답변 일치")
+                else:
+                    output += f"[{agent} 결과]\n{answer}\n"
+                    print(f"[⚠️ {agent}] {selected_crop} 관련 답변 불일치")
+        
+        # 다른 작물 정보 안내 추가
+        if state.get("crop_info") and state.get("selected_crop"):
+            output += f"\n[추가 정보 안내]\n"
+            output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
+            output += f"'{state['selected_crop']} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
     
     merged_output = output.strip()
     
-    # LLM에게 전체 응답을 정리하도록 요청
+    # 에이전트가 하나뿐인 경우 LLM 요약 생략
+    if len(selected_agents) == 1:
+        state["output"] = merged_output
+        print("\n=== 🎯 최종 응답(단일 에이전트) ===")
+        print("=" * 50)
+        print(state["output"])
+        print("=" * 50)
+        return state
+    
+    # 여러 에이전트가 있는 경우에만 LLM 요약
     print("\n[🤖 LLM 요약 시작...]")
     summary_prompt = (
-        "아래는 여러 농업 에이전트의 답변입니다. 사용자가 이해하기 쉽도록 정리해서 알려주세요.\n\n"
+        "아래는 여러 농업 에이전트의 답변입니다. 사용자에게 명확하고 자세하게 정리해서 한국어로만 알려주세요.\n\n"
         f"{merged_output}\n\n"
-        "간결하고 명확하게 정리해주세요."
     )
     
     try:

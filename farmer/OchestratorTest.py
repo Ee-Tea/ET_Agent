@@ -2,12 +2,41 @@ from sentence_transformers import SentenceTransformer, util
 import requests
 import re
 import json
+from langgraph.graph import StateGraph, END
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 from groq import Groq
+from typing import TypedDict, Annotated, List, Dict
+from tavily import TavilyClient
+import operator
 from dotenv import load_dotenv
 import os
 load_dotenv()
+
+def merge_dicts(left: dict, right: dict) -> dict:
+    """딕셔너리 병합 함수 - LangGraph용"""
+    if not left:
+        return right or {}
+    if not right:
+        return left or {}
+    merged = left.copy()
+    merged.update(right)
+    return merged
+
+def merge_lists_unique(left: list, right: list) -> list:
+    """리스트 병합 함수 - 중복 제거 - LangGraph용"""
+    if not left:
+        return right or []
+    if not right:
+        return left or []
+    # 순서를 유지하면서 중복 제거
+    seen = set()
+    result = []
+    for item in left + right:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
 
 agent_descriptions = {
     "작물추천_agent": (
@@ -157,33 +186,19 @@ def simple_agent_selector(user_question, llm):
             "execution_order": ["기타"]
         }
 
-def build_agent_prompt(agent, user_question):
-    """
-    각 에이전트에게 질문만 전달
-    """
-    prompt = f"질문: {user_question}"
-    
-    return prompt
-
 def execute_agent_with_boundaries(agent_name, question_part, llm):
-    """
-    각 에이전트를 실행하고 답변만 반환
-    """
     agent_func = agent_functions.get(agent_name)
     if not agent_func:
         return f"{agent_name} 실행 함수가 연결되어 있지 않습니다."
-    
-    # 간단한 프롬프트로 에이전트 실행
+
     agent_prompt = f"질문: {question_part}"
-    
+
     try:
         agent_state = {"query": agent_prompt}
         agent_result = agent_func(agent_state)
         answer = agent_result.get("pred_answer", "답변 생성 실패")
-        
-        # 답변 그대로 반환 (추가 검증 없음)
         return answer
-        
+
     except Exception as e:
         return f"에이전트 실행 중 오류: {e}"
 
@@ -192,8 +207,6 @@ def web_search_with_tavily(query: str, api_key: str = None):
     Tavily를 이용한 웹 검색
     """
     try:
-        from tavily import TavilyClient
-        
         # API 키 설정
         if not api_key:
             api_key = os.getenv("TAVILY_API_KEY")
@@ -261,84 +274,24 @@ agent_functions = {
     "기타": etc_agent_run
 }
 
-def hybrid_router(text, model, agent_desc, llm):
-    print("=== 개선된 라우팅 시스템 ===")
-    
-    # 1. 질문을 각 에이전트가 담당할 부분으로 분리
-    question_analysis = split_question_by_agents(text, llm, model, agent_desc)
-    
-    print(f"[질문 분석 결과]")
-    print(f"선택된 에이전트: {question_analysis['selected_agents']}")
-    print(f"질문 분리: {question_analysis['question_parts']}")
-    if question_analysis['web_search_needed']:
-        print(f"웹 검색 필요: {question_analysis['web_search_needed']}")
-    
-    # 2. 각 에이전트를 순서대로 실행
-    all_answers = {}
-    
-    for agent in question_analysis['execution_order']:
-        if agent in question_analysis['question_parts']:
-            question_part = question_analysis['question_parts'][agent]
-            print(f"\n=== {agent} 실행 ===")
-            print(f"담당 질문: {question_part}")
-            
-            answer = execute_agent_with_boundaries(agent, question_part, llm)
-            all_answers[agent] = answer
-    
-    # 3. 웹 검색이 필요한 부분이 있으면 안내
-    web_search_info = ""
-    if question_analysis['web_search_needed']:
-        web_search_info = f"\n\n[웹 검색 필요]\n"
-        for item in question_analysis['web_search_needed']:
-            web_search_info += f"- {item}\n"
-        web_search_info += "웹 검색 노드를 통해 최신 정보를 확인하겠습니다."
-    
-    # 4. 최종 응답 구성
-    final_response = "=== 에이전트별 답변 ===\n"
-    for agent, answer in all_answers.items():
-        final_response += f"\n[{agent}]\n{answer}\n"
-    
-    final_response += web_search_info
-    
-    return final_response
-
-def get_user_input():
-    """사용자 입력을 받아 검증하는 함수"""
-    while True:
-        user_input = input("\n사용자 입력 ('종료' 입력 시 종료): ").strip()
-        if not user_input:
-            print("입력이 비어 있습니다. 다시 입력해주세요.")
-            continue
-        return user_input
-
-def main():
-    print("=== 하이브리드 라우터 데모 ===")
-    while True:
-        user_input = get_user_input()
-        if user_input == "종료":
-            print("종료합니다.")
-            break
-        selected_agent = hybrid_router(user_input, embedding_model, agent_descriptions, llm)
-        print(f"선택된 에이전트: {selected_agent}")
-
-from langgraph.graph import StateGraph
-
 class RouterState(dict):
-    query: str = ""
-    selected_agents: list = []
-    question_parts: dict = {}
-    execution_order: list = []
-    crop_info: str = ""
-    selected_crop: str = ""  # 선택된 단일 작물 추가
-    agent_answers: dict = {}
-    output: str = ""
+    query: Annotated[List[str], operator.add] = ""
+    selected_agents: Annotated[List[str], merge_lists_unique] = []
+    question_parts: Annotated[Dict[str, str], merge_dicts] = {}
+    execution_order: Annotated[List[str], merge_lists_unique] = []
+    crop_info: Annotated[List[str], operator.add] = []
+    selected_crop: Annotated[List[str], merge_lists_unique] = []
+    crop_grow_agent_result: Annotated[List[str], operator.add] = []
+    disaster_agent_result: Annotated[List[str], operator.add] = []
+    sales_agent_result: Annotated[List[str], operator.add] = []
+    etc_result: Annotated[List[str], operator.add] = []
+    output: Annotated[List[str], operator.add] = []
 
 def select_single_crop_from_recommendations(crop_recommendations, llm):
     """
     작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
     """
     print("\n=== 작물 추출 과정 시작 ===")
-    print(f"[원본 작물추천 응답]\n{crop_recommendations}")
     
     selection_prompt = f"""
     다음은 작물추천 에이전트가 추천한 작물들입니다. 
@@ -377,30 +330,42 @@ def select_single_crop_from_recommendations(crop_recommendations, llm):
         return ""
 
 def node_input(state: RouterState) -> RouterState:
-    user_input = input("\n사용자 입력: ").strip()
-    
+    while True:
+        user_input = input("\n사용자 입력: ").strip()
+        
+        # 빈 입력인 경우 다시 요청
+        if not user_input:
+            print("❌ 입력이 비어 있습니다. 다시 입력해주세요.")
+            continue
+            
+        # 유효한 입력인 경우 루프 종료
+        break
+
     # 모든 상태 초기화
-    state["crop_info"] = ""
-    state["selected_crop"] = ""
-    state["agent_answers"] = {}
+    state["crop_info"] = []
+    state["selected_crop"] = []
     state["selected_agents"] = []
     state["question_parts"] = {}
     state["execution_order"] = []
-    state["output"] = ""
+    state["crop_grow_agent_result"] = []
+    state["disaster_agent_result"] = []
+    state["sales_agent_result"] = []
+    state["etc_result"] = []
+    state["output"] = []
 
-    # 유효한 입력인 경우 상태에 저장하고 다음 단계로
-    state["query"] = user_input
+    # 유효한 입력인 경우 상태에 저장하고 다음 단계로 (리스트로 저장)
+    state["query"] = [user_input]
     print(f"\n[질문] {user_input}")
     
     return state
 
 def node_agent_select(state: RouterState) -> RouterState:
     # 기존 복잡한 로직을 단순화된 함수로 교체
-    result = simple_agent_selector(state["query"], llm)
-    state["selected_agents"] = result["selected_agents"]
-    state["question_parts"] = result.get("question_parts", {})  # None이면 빈 딕셔너리
-    state["web_search_needed"] = []  # 웹 검색 필요성 제거
-    state["execution_order"] = result["execution_order"]
+    result = simple_agent_selector(state["query"][0] if state["query"] else "", llm)
+    # 기존 selected_agents 덮어쓰기 (중복 방지)
+    state["selected_agents"] = result["selected_agents"] if isinstance(result["selected_agents"], list) else [result["selected_agents"]]
+    state["question_parts"] = result.get("question_parts", {}) if result.get("question_parts") is not None else {}
+    state["execution_order"] = result["execution_order"] if isinstance(result["execution_order"], list) else [result["execution_order"]]
     
     print("\n[선택된 에이전트]")
     for agent in state["selected_agents"]:
@@ -418,11 +383,11 @@ def node_crop_recommend(state: RouterState) -> RouterState:
     question_parts = state.get("question_parts")
     if question_parts is None:
         # 단일 에이전트인 경우 원본 질문 사용
-        question_part = state["query"]
+        question_part = state["query"][0] if state["query"] else ""
         print(f"[�� 단일 에이전트 - 원본 질문 사용] {question_part}")
     else:
         # 다중 에이전트인 경우 분류된 질문 사용
-        question_part = question_parts.get("작물추천_agent", state["query"])
+        question_part = question_parts.get("작물추천_agent", state["query"][0] if state["query"] else "")
         print(f"[📝 다중 에이전트 - 분류된 질문 사용] {question_part}")
     
     print(f"담당 질문: {question_part}")
@@ -435,107 +400,183 @@ def node_crop_recommend(state: RouterState) -> RouterState:
     # 작물추천 결과에서 하나의 작물 선택
     selected_crop = select_single_crop_from_recommendations(answer, llm)
     
-    state["crop_info"] = answer
-    state["selected_crop"] = selected_crop  # 선택된 단일 작물 저장
+    state["crop_info"] = [answer]
+    state["selected_crop"] = [selected_crop]  # 선택된 단일 작물 저장
     
     print(f"\n[추출된 작물] {selected_crop}")
     print(f"[작물 추출 완료]")
     
-    # agent_answers에 추가
-    if "agent_answers" not in state:
-        state["agent_answers"] = {}
-    state["agent_answers"]["작물추천_agent"] = answer
-    
     return state
 
-def node_parallel_agents(state: RouterState) -> RouterState:
-    # 기존 agent_answers 보존
-    existing_answers = state.get("agent_answers", {})
-    answers = {}
+# 각 에이전트별로 개별 노드 생성
+def node_crop_grow_agent(state: RouterState) -> RouterState:
+    """작물재배_agent 전용 노드"""
+    if "작물재배_agent" not in state.get("selected_agents", []):
+        return state
     
-    # 선택된 에이전트가 하나뿐인 경우 단순 처리
-    selected_agents = state.get("execution_order", [])
-    if len(selected_agents) == 1:
-        agent = selected_agents[0]
-        if agent != "작물추천_agent":
-            print(f"\n=== 단일 에이전트 실행: {agent} ===")
-            answer = execute_agent_with_boundaries(agent, state["query"], llm)
-            answers[agent] = answer
-            print(f"[✅ {agent} 실행 완료]")
-        else:
-            # 작물추천_agent는 이미 실행됨 - 기존 결과 사용
-            print(f"\n=== 작물추천_agent 이미 실행됨 - 결과 재사용 ===")
-            if "작물추천_agent" in existing_answers:
-                answers["작물추천_agent"] = existing_answers["작물추천_agent"]
-                print(f"[✅ 작물추천_agent 결과 재사용]")
-            else:
-                print(f"[⚠️ 작물추천_agent 결과를 찾을 수 없음]")
-                answers["작물추천_agent"] = "작물추천_agent 실행 결과를 찾을 수 없습니다."
+    print(f"\n=== 🚀 작물재배_agent 병렬 실행 ===")
+    
+    # 질문 부분 가져오기
+    question_parts = state.get("question_parts", {})
+    if question_parts and "작물재배_agent" in question_parts:
+        question_part = question_parts["작물재배_agent"]
     else:
-        # 여러 에이전트가 있는 경우 기존 로직 유지
-        selected_crop = state.get("selected_crop", "")
-        print(f"\n=== 병렬 에이전트 실행 시작 ===")
-        print(f"[📌 선택된 작물] {selected_crop}")
-        
-        for agent in selected_agents:
-            if agent == "작물추천_agent":
-                continue  # 이미 실행됨
-            
-            if agent in state.get("question_parts", {}):
-                original_question = state["question_parts"][agent]
-                print(f"\n--- {agent} 실행 ---")
-                print(f"[📝 원본 질문] {original_question}")
-                
-                # 작물명이 유효하고 질문에 포함되지 않은 경우에만 추가
-                if (selected_crop and 
-                    selected_crop not in ["I don't know", "None", ""] and 
-                    selected_crop not in original_question):
-                    
-                    print(f"[🔄 질문 수정 필요] 작물명 '{selected_crop}'이 질문에 포함되지 않음")
-                    question_part = f"{selected_crop} {original_question}"
-                    print(f"[🔧 질문 수정] 작물명 '{selected_crop}' 추가")
-                else:
-                    print(f"[✅ 질문 수정 불필요] 원본 질문 사용")
-                    question_part = original_question
-                
-                print(f"[🎯 최종 질문] {question_part}")
-                print(f"[📊 질문 길이] {len(question_part)}자")
-                
-                # 명확한 경계가 설정된 프롬프트로 실행
-                print(f"[⚡ {agent} 실행 시작...]")
-                answer = execute_agent_with_boundaries(agent, question_part, llm)
-                answers[agent] = answer
-                
-                print(f"[✅ {agent} 실행 완료]")
-                print(f"[ 답변 길이] {len(answer)}자")
-                print(f"[ 답변 미리보기] {answer[:100]}...")
-                
-            else:
-                answers[agent] = f"{agent}에 대한 구체적인 질문이 정의되지 않았습니다."
-                print(f"[⚠️ {agent}] 구체적인 질문이 정의되지 않음")
+        question_part = state["query"][0] if state["query"] else ""
     
-    # 기존 agent_answers와 새 answers 병합 (덮어쓰지 않음!)
-    state["agent_answers"] = {**existing_answers, **answers}
-    print(f"\n=== 모든 에이전트 실행 완료 ===")
+    print(f"[📝 담당 질문] {question_part}")
+    
+    # 작물재배_agent 전용 작물명 처리
+    selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
+    if selected_crop and selected_crop not in question_part:
+        question_part = f"{selected_crop} {question_part}"
+        print(f"[🔄 수정된 질문 ] {question_part}")
+
+    # 에이전트 실행
+    answer = execute_agent_with_boundaries("작물재배_agent", question_part, llm)
+    
+    # 전용 키에 답변 저장
+    state["crop_grow_agent_result"] = [answer]
+    
+    print(f"[✅ 작물재배_agent 병렬 실행 완료]")
+    print(f"[📤 응답 원본] {answer[:200]}...")
+    return state
+
+def node_disaster_agent(state: RouterState) -> RouterState:
+    """재해_agent 전용 노드"""
+    if "재해_agent" not in state.get("selected_agents", []):
+        return state
+    
+    print(f"\n=== 🚀 재해_agent 병렬 실행 ===")
+    
+    # 질문 부분 가져오기
+    question_parts = state.get("question_parts", {})
+    if question_parts and "재해_agent" in question_parts:
+        question_part = question_parts["재해_agent"]
+    else:
+        question_part = state["query"][0] if state["query"] else ""
+    
+    print(f"[📝 담당 질문] {question_part}")
+    
+    # 재해_agent 전용 작물명 처리
+    selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
+    if selected_crop and selected_crop not in question_part:
+        question_part = f"{selected_crop}를 재배 중, {question_part}"
+        print(f"[🔄 수정된 질문 ] {question_part}")
+    
+    # 에이전트 실행
+    answer = execute_agent_with_boundaries("재해_agent", question_part, llm)
+    
+    # 전용 키에 답변 저장
+    state["disaster_agent_result"] = [answer]
+    
+    print(f"[✅ 재해_agent 병렬 실행 완료]")
+    print(f"[📤 응답 원본] {answer[:200]}...")
+    return state
+
+def node_sales_agent(state: RouterState) -> RouterState:
+    """판매처_agent 전용 노드"""
+    if "판매처_agent" not in state.get("selected_agents", []):
+        return state
+    
+    print(f"\n=== �� 판매처_agent 병렬 실행 ===")
+    
+    # 질문 부분 가져오기
+    question_parts = state.get("question_parts", {})
+    if question_parts and "판매처_agent" in question_parts:
+        question_part = question_parts["판매처_agent"]
+    else:
+        question_part = state["query"][0] if state["query"] else ""
+    
+    print(f"[📝 담당 질문] {question_part}")
+    
+    # 판매처_agent 전용 작물명 처리
+    selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
+    if selected_crop and selected_crop not in question_part:
+        question_part = f"{selected_crop} {question_part}"
+        print(f"[🔄 수정된 질문 ] {question_part}")
+    
+    # 에이전트 실행
+    answer = execute_agent_with_boundaries("판매처_agent", question_part, llm)
+    
+    # 전용 키에 답변 저장
+    state["sales_agent_result"] = [answer]
+    
+    print(f"[✅ 판매처_agent 병렬 실행 완료]")
+    print(f"[📤 응답 원본] {answer[:200]}...")
+    return state
+
+def node_etc(state: RouterState) -> RouterState:
+    """기타 에이전트 전용 노드"""
+    if "기타" not in state.get("selected_agents", []):
+        return state
+    
+    print(f"\n=== �� 기타_agent 웹검색 실행 ===")
+    
+    # 원본 질문 사용
+    question_part = state["query"][0] if state["query"] else ""
+    print(f"[📝 담당 질문] {question_part}")
+    
+    # 에이전트 실행
+    answer = execute_agent_with_boundaries("기타", question_part, llm)
+    
+    # 전용 키에 답변 저장
+    state["etc_result"] = [answer]
+    
+    print(f"[✅ 기타_agent 웹검색 실행 완료]")
+    print(f"[📤 응답 원본] {answer[:200]}...")
+    return state
+
+# 병렬 처리 노드 (기존 로직 단순화)
+def node_parallel_agents(state: RouterState) -> RouterState:
+    """병렬 에이전트 실행을 조정하는 노드"""
+    selected_agents = state.get("execution_order", [])
+    
+    # 작물추천_agent만 있는 경우
+    if len(selected_agents) == 1 and "작물추천_agent" in selected_agents:
+        print(f"\n=== 🎯 작물추천_agent만 선택됨 - 병렬 처리 건너뜀 ===")
+        return state
+    
+    # 여러 에이전트가 있는 경우 병렬 처리 준비
+    print(f"\n=== 🚀 병렬 에이전트 실행 준비 완료 ===")
+    print(f"[📋 실행될 에이전트] {[agent for agent in selected_agents if agent != '작물추천_agent']}")
+    
     return state
 
 def node_merge_output(state: RouterState) -> RouterState:
     print("\n=== 최종 응답 병합 시작 ===")
     
+    # 각 에이전트 결과 수집 (전용 키에서)
+    agent_results = {}
+    
+    if state.get("crop_info"):
+        agent_results["작물추천_agent"] = state["crop_info"][0] if state["crop_info"] else ""
+
+    if state.get("crop_grow_agent_result"):
+        agent_results["작물재배_agent"] = state["crop_grow_agent_result"][0] if state["crop_grow_agent_result"] else ""
+    
+    if state.get("disaster_agent_result"):
+        agent_results["재해_agent"] = state["disaster_agent_result"][0] if state["disaster_agent_result"] else ""
+    
+    if state.get("sales_agent_result"):
+        agent_results["판매처_agent"] = state["sales_agent_result"][0] if state["sales_agent_result"] else ""
+    
+    if state.get("etc_result"):
+        agent_results["기타"] = state["etc_result"][0] if state["etc_result"] else ""
+    
     # 실행 요약 출력
     selected_agents = state.get("selected_agents", [])
     print(f"[ 실행 요약]")
     print(f"  - 선택된 에이전트: {selected_agents}")
-    print(f"  - 선택된 작물: {state.get('selected_crop', '없음')}")
-    print(f"  - 실행된 에이전트: {list(state.get('agent_answers', {}).keys())}")
+    print(f"  - 선택된 작물: {state.get('selected_crop', [''])[0] if state.get('selected_crop') else ''}")
+    print(f"  - 실행된 에이전트: {list(agent_results.keys())}")
     
     output = ""
     
     # 에이전트가 하나뿐인 경우 단순 처리
     if len(selected_agents) == 1:
         agent = selected_agents[0]
-        if agent in state.get("agent_answers", {}):
-            output = state["agent_answers"][agent]
+        if agent in agent_results:
+            output = agent_results[agent]
             print(f"[✅ 단일 에이전트 응답 완료] {agent}")
         else:
             output = f"{agent} 실행 결과를 찾을 수 없습니다."
@@ -551,32 +592,26 @@ def node_merge_output(state: RouterState) -> RouterState:
                 output += f"\n[상세 분석 작물]\n{state['selected_crop']}\n"
                 print(f"[ 상세 분석 작물] {state['selected_crop']}")
         
-        # 다른 에이전트들의 답변 표시
-        for agent, answer in state.get("agent_answers", {}).items():
+        # 다른 에이전트들의 답변 표시 (전용 키에서 수집한 결과 사용)
+        for agent, answer in agent_results.items():
             if agent != "작물추천_agent":  # 이미 표시됨
-                # 선택된 작물과 답변의 일관성 확인
-                selected_crop = state.get("selected_crop", "")
-                if selected_crop and selected_crop in answer:
-                    output += f"[{agent} 결과 - {selected_crop} 관련]\n{answer}\n"
-                    print(f"[✅ {agent}] {selected_crop} 관련 답변 일치")
-                else:
-                    output += f"[{agent} 결과]\n{answer}\n"
-                    print(f"[⚠️ {agent}] {selected_crop} 관련 답변 불일치")
+                # 에이전트 결과 추가
+                output += f"[{agent} 결과]\n{answer}\n"
         
         # 다른 작물 정보 안내 추가
         if state.get("crop_info") and state.get("selected_crop"):
             output += f"\n[추가 정보 안내]\n"
             output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
-            output += f"'{state['selected_crop']} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
+            output += f"'{state['selected_crop'][0] if state['selected_crop'] else ''} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
     
     merged_output = output.strip()
     
     # 에이전트가 하나뿐인 경우 LLM 요약 생략
     if len(selected_agents) == 1:
-        state["output"] = merged_output
+        state["output"] = [merged_output]
         print("\n=== 🎯 최종 응답(단일 에이전트) ===")
         print("=" * 50)
-        print(state["output"])
+        print(state["output"][0] if state["output"] else "")
         print("=" * 50)
         return state
     
@@ -594,60 +629,123 @@ def node_merge_output(state: RouterState) -> RouterState:
         summary = f"요약 중 오류: {e}"
         print(f"[❌ LLM 요약 실패] {e}")
     
-    state["output"] = summary.strip()
+    state["output"] = [summary.strip()]
     
     # 최종 요약된 응답만 출력 (중복 제거)
     print("\n=== 🎯 최종 응답(요약) ===")
-    print(f"[📊 요약 길이] {len(state['output'])}자")
+    print(f"[📊 요약 길이] {len(state['output'][0]) if state['output'] else 0}자")
     print("=" * 50)
-    print(state["output"])
+    print(state["output"][0] if state["output"] else "")
     print("=" * 50)
     
     return state
 
-def judge_branch(state: RouterState) -> str:
-    # 작물추천_agent가 선택된 경우 분기
-    if "작물추천_agent" in state.get("selected_agents", []):
-        return "crop_recommend"
-    else:
-        return "parallel_agents"
+# 워크플로우 그래프
+def create_workflow():
+    """완전한 조건부 분기 워크플로우"""
+    workflow = StateGraph(RouterState)
+    
+    # 노드 추가
+    workflow.add_node("input", node_input)
+    workflow.add_node("agent_select", node_agent_select)
+    workflow.add_node("crop_recommend", node_crop_recommend)
+    workflow.add_node("parallel_execution", node_parallel_agents)
+    workflow.add_node("crop_grow_agent", node_crop_grow_agent)
+    workflow.add_node("disaster_agent", node_disaster_agent)
+    workflow.add_node("sales_agent", node_sales_agent)
+    workflow.add_node("etc", node_etc)
+    workflow.add_node("merge_output", node_merge_output)
+    
+    # 기본 엣지
+    workflow.add_edge("input", "agent_select")
+    
+    # agent_select에서 조건부 분기 (etc 제거)
+    def agent_select_branch_condition(state):
+        selected_agents = state.get("selected_agents", [])
+        
+        # 작물추천_agent가 선택된 경우
+        if "작물추천_agent" in selected_agents:
+            return "crop_recommend"
+        # 단일 에이전트가 선택된 경우 (작물추천_agent 제외)
+        elif len(selected_agents) == 1:
+            agent = selected_agents[0]
+            if agent == "작물재배_agent":
+                return "crop_grow_agent"
+            elif agent == "재해_agent":
+                return "disaster_agent"
+            elif agent == "판매처_agent":
+                return "sales_agent"
+            elif agent == "기타":
+                return "etc"
+        # 여러 에이전트가 선택된 경우
+        elif len([agent for agent in selected_agents if agent != "작물추천_agent"]) > 0:
+            return "parallel_execution"
+        # 아무것도 선택되지 않은 경우
+        else:
+            return "etc"
 
-# 그래프 구조 정의
-graph = StateGraph(RouterState)
-
-# 노드 추가
-graph.add_node("input", node_input)
-graph.add_node("agent_select", node_agent_select)
-graph.add_node("crop_recommend", node_crop_recommend)
-graph.add_node("parallel_agents", node_parallel_agents)
-graph.add_node("merge_output", node_merge_output)
-
-# 엣지 추가 - 조건부 분기를 명확하게
-graph.add_edge("input", "agent_select")
-graph.add_conditional_edges(
-    "agent_select",
-    judge_branch,
-    {
-        "crop_recommend": "crop_recommend",
-        "parallel_agents": "parallel_agents"
-    }
-)
-graph.add_edge("crop_recommend", "parallel_agents")
-graph.add_edge("parallel_agents", "merge_output")
-graph.add_edge("merge_output", "input")
-graph.set_entry_point("input")
+    workflow.add_conditional_edges(
+        "agent_select",
+        agent_select_branch_condition,
+        {
+            "crop_recommend": "crop_recommend",
+            "crop_grow_agent": "crop_grow_agent",
+            "disaster_agent": "disaster_agent", 
+            "sales_agent": "sales_agent",
+            "parallel_execution": "parallel_execution",
+            "etc": "etc"
+        }
+    )
+    
+    # crop_recommend에서 조건부 분기
+    workflow.add_conditional_edges(
+        "crop_recommend",
+        lambda state: "parallel_execution" if len([agent for agent in state.get("selected_agents", []) if agent != "작물추천_agent"]) > 0 else "merge_output",
+        {
+            "parallel_execution": "parallel_execution",
+            "merge_output": "merge_output"
+        }
+    )
+    
+    # 병렬 에이전트 실행
+    workflow.add_edge("parallel_execution", "crop_grow_agent")
+    workflow.add_edge("parallel_execution", "disaster_agent")
+    workflow.add_edge("parallel_execution", "sales_agent")
+    
+    # 모든 에이전트 노드에서 병합 노드로
+    workflow.add_edge("crop_grow_agent", "merge_output")
+    workflow.add_edge("disaster_agent", "merge_output")
+    workflow.add_edge("sales_agent", "merge_output")
+    workflow.add_edge("etc", "merge_output")
+    
+    # 병합 노드에서 다시 입력으로
+    workflow.add_edge("merge_output", END)
+    
+    workflow.set_entry_point("input")
+    
+    return workflow.compile()
 
 def run_orchestrator_langgraph():
-    app = graph.compile()
+    graph = create_workflow()
     try:
         graph_image_path = "ochestrator_workflow.png"
         with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
+            f.write(graph.get_graph().draw_mermaid_png())
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     except Exception as e:
         print(f"그래프 시각화 중 오류 발생: {e}")
-    state = RouterState()
-    app.invoke(state)
+
+    while True:
+        try:
+            state = RouterState()
+            result = graph.invoke(state)
+            
+        except KeyboardInterrupt:
+            print("\n\n프로그램을 종료합니다.")
+            break
+        except Exception as e:
+            print(f"\n오류가 발생했습니다: {e}")
+            continue
 
 if __name__ == "__main__":
         run_orchestrator_langgraph()

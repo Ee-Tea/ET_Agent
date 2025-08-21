@@ -30,7 +30,7 @@ collection_name = "market_price_docs"
 
 
 # CSV 파일 임베딩 및 Milvus에 저장
-def embed_and_store_csv(csv_path="data/info_20240812.csv"):
+def embed_and_store_csv(csv_path="sales/info_20240812.csv"):
     df = pd.read_csv(csv_path, encoding="euc-kr")
     df['품목'] = df['품목'].fillna("정보 없음")
     docs = []
@@ -80,14 +80,14 @@ def classify_question_simple(query: str) -> str:
     query_lower = query.lower()
     
     # 핵심 의도 키워드 (가장 중요한 것들만)
-    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있']
+    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있', '팔까']
     price_intent = ['가격', '시세', '얼마', '값', '원']
     location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳']
     
     # "농작물"이 포함된 경우 특별 처리
     if "농작물" in query_lower:
         if any(keyword in query_lower for keyword in selling_intent):
-            return "판매처"  # "농작물을 팔고 싶어" → 판매처
+            return "판매처" # "농작물을 팔고 싶어" → 판매처
         elif any(keyword in query_lower for keyword in price_intent):
             return "정보 부족"  # "농작물 가격" (농작물은 구체적이지 않음)
         else:
@@ -871,6 +871,14 @@ def run(state):
     판매처 에이전트의 워크플로우를 실행합니다.
     오케스트레이터에서 전달받은 상태를 바탕으로 LangGraph를 실행합니다.
     """
+    # 컬렉션 초기화 추가
+    try:
+        check_collection()
+        print("✅ Milvus 컬렉션 초기화 완료")
+    except Exception as e:
+        print(f"❌ Milvus 컬렉션 초기화 실패: {e}")
+        # 컬렉션 초기화 실패 시에도 계속 진행
+    
     app = graph.compile()
     
     # LangGraph가 TypedDict를 기반으로 작동하기 때문에, 일반 Dict를 TypedDict로 변환

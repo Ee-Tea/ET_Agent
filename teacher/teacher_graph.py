@@ -37,6 +37,7 @@ from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_a
 from agents.solution.solution_agent import SolutionAgent as solution_agent
 from teacher_nodes import get_user_answer, parse_generator_input
 from file_path_mapper import FilePathMapper
+from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ========== 타입/프로토콜 ==========
@@ -189,8 +190,8 @@ class Orchestrator:
             self.memory = SimpleMemory()
         
         # PDF 전처리기 초기화
-        from pdf_preprocessor import PDFPreprocessor
-        self.pdf_preprocessor = PDFPreprocessor()
+        from unified_pdf_preprocessor import UnifiedPDFPreprocessor
+        self.pdf_preprocessor = UnifiedPDFPreprocessor()
         
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
         if init_agents:
@@ -402,258 +403,175 @@ class Orchestrator:
     def preprocess(self, state: TeacherState) -> TeacherState:
         """
         PDF 파일에서 문제 추출하는 전처리 노드
+        - 인덱스 기록을 'extend 이전' 길이로 고정해 올바른 범위를 남깁니다.
+        - 불필요한 장황 로그를 줄였습니다.
         """
         print("📄 PDF 문제 추출 전처리 노드 실행")
-        
-        artifacts = state.get("artifacts", {})
+
+        artifacts = state.get("artifacts", {}) or {}
         file_mapper = FilePathMapper()
         external_file_paths = file_mapper.map_artifacts_to_paths(artifacts)
-        
-        print(f"🔍 전처리할 파일: {external_file_paths}")
-        
+
         if not external_file_paths:
             print("⚠️ 전처리할 파일이 없습니다.")
             return state
-            
-        # PDF에서 문제 추출 로직
+
         try:
             extracted_problems = self._extract_problems_from_pdf(external_file_paths)
-            
-            new_state = {**state}
-            new_state = ensure_shared(new_state)
+
+            new_state = ensure_shared({**state})
             shared = new_state["shared"]
-            
-            questions = []
-            options = []
-            
-            for problem in extracted_problems:
-                if isinstance(problem, dict):
-                    questions.append(problem.get("question", ""))
-                    options.append(problem.get("options", []))
-            
-            # 기존 shared state에 PDF 문제 추가
-            existing_questions = shared.get("question", [])
-            existing_options = shared.get("options", [])
-            
-            # PDF 문제를 shared에 추가
-            shared["question"].extend(questions)
-            shared["options"].extend(options)
-            
-            # 추가된 문제 수를 artifacts에 기록
-            added_count = len(questions)
-            new_state["artifacts"]["pdf_added_count"] = added_count
-            new_state["artifacts"]["pdf_added_start_index"] = len(existing_questions)
-            
-            print(f"📄 PDF 문제를 shared state에 추가: {added_count}개 문제")
-            print(f"📂 shared state 총 문제 수: {len(existing_questions)}개 → {len(shared['question'])}개")
-            print(f"🔢 추가된 문제 인덱스: {len(existing_questions)} ~ {len(shared['question']) - 1}")
-            
-            # PDF 전처리 전용 state에도 저장 (백업용)
-            new_state["pdf_extracted"] = {
-                "question": questions,
-                "options": options,
-                "source_files": external_file_paths,
-                "extracted_count": added_count
-            }
-            
-            print(f"✅ {added_count}개 문제 추출 및 shared state 추가 완료")
+
+            # extend 이전 길이를 고정 저장
+            start_index = len(shared.get("question", []))
+
+            questions: List[str] = []
+            options: List[List[str]] = []
+
+            for problem in extracted_problems or []:
+                if not isinstance(problem, dict):
+                    continue
+                q = str(problem.get("question", "")).strip()
+                opt = problem.get("options", [])
+                if isinstance(opt, str):
+                    opt = [x.strip() for x in opt.splitlines() if x.strip()]
+                if not isinstance(opt, list):
+                    opt = []
+                opt = [str(x).strip() for x in opt if str(x).strip()]
+                if q and opt:
+                    questions.append(q)
+                    options.append(opt)
+
+            # 실제 반영
+            if questions:
+                prev_cnt = len(shared["question"])
+                shared["question"].extend(questions)
+                shared["options"].extend(options)
+                new_cnt = len(shared["question"])
+
+                added_count = len(questions)
+                end_index = start_index + added_count - 1
+
+                arts = new_state.setdefault("artifacts", {})
+                arts["pdf_added_count"] = added_count
+                arts["pdf_added_start_index"] = start_index
+                arts["pdf_added_end_index"] = end_index
+
+                print(f"📄 PDF 문제를 shared state에 추가: {added_count}개")
+                print(f"📂 shared state 총 문제 수: {prev_cnt}개 → {new_cnt}개")
+                print(f"🔢 추가된 문제 인덱스: {start_index} ~ {end_index}")
+            else:
+                print("⚠️ 유효한 문제를 찾지 못했습니다.")
+
             return new_state
-            
+
         except Exception as e:
             print(f"❌ PDF 문제 추출 중 오류: {e}")
             return state
 
+
     @traceable(name="teacher.solution")
     def solution(self, state: TeacherState) -> TeacherState:
         """
-        문제 풀이 노드 - PDF에서 추가된 문제들을 solution_agent로 처리
+        문제 풀이 노드 - PDF에서 추가된 문제들만 solution_agent로 처리
+        - preprocess에서 기록한 인덱스를 정확히 사용
+        - agent가 요구하는 입력 키들의 변종과 호환(user_problems / pdf_extracted / problems)
+        - 자동 답안집 PDF 생성(구식 호출) 제거
         """
         print("🔧 문제 풀이 노드 실행")
-        new_state: TeacherState = {**state}
-        new_state = ensure_shared(new_state)
+        new_state: TeacherState = ensure_shared({**state})
         new_state.setdefault("solution", {})
-        
-        # artifacts에서 PDF 추가 정보 확인
-        artifacts = state.get("artifacts", {})
-        pdf_added_count = artifacts.get("pdf_added_count", 0)
-        pdf_added_start_index = artifacts.get("pdf_added_start_index", 0)
-        
-        print(f"📊 [Solution] PDF 추가 정보: {pdf_added_count}개 문제, 시작 인덱스: {pdf_added_start_index}")
-        
-        if pdf_added_count == 0:
-            print("⚠️ PDF에서 추가된 문제가 없습니다.")
-            return new_state
-        
-        # shared state에서 뒤에서부터 PDF 추가된 문제들 추출
+
+        artifacts = new_state.get("artifacts", {}) or {}
         shared = new_state["shared"]
+
+        pdf_added_count = int(artifacts.get("pdf_added_count", 0) or 0)
+        start_index = artifacts.get("pdf_added_start_index", None)
+        end_index = artifacts.get("pdf_added_end_index", None)
+
+        if pdf_added_count <= 0 or start_index is None or end_index is None or end_index < start_index:
+            print("⚠️ PDF에서 추가된 문제가 없거나 인덱스가 유효하지 않습니다.")
+            return new_state
+
         all_questions = shared.get("question", [])
         all_options = shared.get("options", [])
-        
-        if len(all_questions) < pdf_added_count:
-            print(f"⚠️ shared state의 문제 수({len(all_questions)})가 PDF 추가 수({pdf_added_count})보다 적습니다.")
-            return new_state
-        
-        # 뒤에서부터 PDF 추가된 문제들 추출
-        start_idx = len(all_questions) - pdf_added_count
-        end_idx = len(all_questions)
-        
-        pdf_questions = all_questions[start_idx:end_idx]
-        pdf_options = all_options[start_idx:end_idx]
-        
-        print(f"🎯 [Solution] 처리할 문제: 인덱스 {start_idx}~{end_idx-1} ({len(pdf_questions)}개)")
-        
-        # solution_agent 실행
+
+        # 범위 보정
+        start = max(0, min(int(start_index), len(all_questions)))
+        end = min(int(end_index), len(all_questions) - 1)
+
+        pdf_questions = all_questions[start:end + 1]
+        pdf_options = all_options[start:end + 1]
+
+        print(f"🎯 [Solution] 처리할 문제: 인덱스 {start}~{end} ({len(pdf_questions)}개)")
+
         agent = self.solution_runner
         if agent is None:
             raise RuntimeError("solution_runner is not initialized (init_agents=False).")
-        
-        generated_answers = []
-        generated_explanations = []
-        
-        # 각 문제를 개별적으로 solution_agent에 전달
-        all_user_problems = []
-        for question, options in zip(pdf_questions, pdf_options):
-            if isinstance(options, str):
-                options = [x.strip() for x in options.splitlines() if x.strip()] or [options.strip()]
-            all_user_problems.append({"question": question, "options": options})
-        
-        print(f"📝 [Solution] 총 {len(all_user_problems)}개 문제를 개별적으로 처리 중...")
-        
-        try:
-            # 각 문제를 개별적으로 처리
-            for i, problem_data in enumerate(all_user_problems):
-                print(f"🔄 [Solution] 문제 {i+1}/{len(all_user_problems)} 처리 중...")
-                
-                agent_input_state = {
-                    "user_input_txt": state.get("user_query", ""),
-                    "user_problems": [problem_data],  # 한 번에 하나씩만 전달
-                    "user_problem": problem_data["question"],
-                    "user_problem_options": problem_data["options"],
-                    "source_type": "external",  # PDF 데이터이므로 external
-                    "input_kind": "file",
-                }
-                
-                # subgraph로 실행
-                agent_result = agent.invoke(agent_input_state)
-            
-                if agent_result:
-                    # results 배열에서 문제의 답과 해설을 추출
-                    if "results" in agent_result and agent_result["results"]:
-                        results = agent_result["results"]
-                        if results:  # 결과가 있으면
-                            result = results[0]  # 첫 번째(유일한) 결과
-                            answer = result.get("generated_answer", "")
-                            explanation = result.get("generated_explanation", "")
-                            
-                            generated_answers.append(answer)
-                            generated_explanations.append(explanation)
-                            
-                            print(f"   - 문제 {i+1}: 답안 {'✅' if answer else '❌'}, 해설 {'✅' if explanation else '❌'}")
-                        else:
-                            print(f"   - 문제 {i+1}: 결과 없음")
-                            generated_answers.append("")
-                            generated_explanations.append("")
-                    
-                    # results가 없거나 비어있으면 기존 방식으로 처리 (호환성)
-                    elif "generated_answer" in agent_result or "generated_explanation" in agent_result:
-                        print(f"   - 문제 {i+1}: 기존 방식으로 처리")
-                        if "generated_answer" in agent_result:
-                            generated_answers.append(agent_result["generated_answer"])
-                        else:
-                            generated_answers.append("")
-                            
-                        if "generated_explanation" in agent_result:
-                            generated_explanations.append(agent_result["generated_explanation"])
-                        else:
-                            generated_explanations.append("")
-                    
-                    # 아무것도 없으면 빈 값으로 채움
-                    else:
-                        print(f"   - 문제 {i+1}: 결과 없음, 빈 값으로 처리")
-                        generated_answers.append("")
-                        generated_explanations.append("")
-                else:
-                    print(f"   - 문제 {i+1}: agent_result가 None")
-                    generated_answers.append("")
-                    generated_explanations.append("")
-            
-            print(f"✅ [Solution] 총 {len(all_user_problems)}개 문제 처리 완료")
-            
-        except Exception as e:
-            print(f"❌ [Solution] 문제 처리 실패: {e}")
-            # 오류 시 빈 값으로 채움
-            generated_answers = [""] * len(all_user_problems)
-            generated_explanations = [""] * len(all_user_problems)
-        
-        # 결과를 shared state에 추가
-        if generated_answers:
-            shared.setdefault("answer", [])
-            shared["answer"].extend(generated_answers)
-            print(f"📝 [Solution] {len(generated_answers)}개 정답 추가")
-        
-        if generated_explanations:
-            shared.setdefault("explanation", [])
-            shared["explanation"].extend(generated_explanations)
-            print(f"📝 [Solution] {len(generated_explanations)}개 해설 추가")
-        
-        # subject 정보도 추가
-        if not shared.get("subject") or len(shared.get("subject", [])) < len(pdf_questions):
-            shared.setdefault("subject", [])
-            needed = len(pdf_questions) - len(shared["subject"])
-            shared["subject"].extend(["일반"] * needed)
-        
-        validate_qas(shared)
-        
-        # 풀이 생성 후 자동으로 답안집 PDF 생성
-        if shared.get("question") and shared.get("options") and shared.get("answer") and shared.get("explanation"):
-            print("[AUTO-PDF] 풀이 생성 완료 → 답안집 PDF 자동 생성 시작")
+
+        generated_answers: List[str] = []
+        generated_explanations: List[str] = []
+
+        for i, (q, opts) in enumerate(zip(pdf_questions, pdf_options), start=1):
+            # 옵션 정규화
+            if isinstance(opts, str):
+                opts = [x.strip() for x in opts.splitlines() if x.strip()]
+            opts = [str(x).strip() for x in (opts or []) if str(x).strip()]
+
+            if not q or not opts:
+                generated_answers.append("")
+                generated_explanations.append("")
+                continue
+
+            problem_payload = {"question": q, "options": opts}
+
+            # 여러 구현과 호환을 위해 가능한 키들을 모두 전달
+            agent_input_state = {
+                "user_input_txt": state.get("user_query", ""),
+                "source_type": "external",
+                "input_kind": "file",
+                "user_problems": [problem_payload],
+                "pdf_extracted": [problem_payload],
+                "problems": [problem_payload],
+            }
+
             try:
-                from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
-                generator = ComprehensivePDFGenerator()
-                
-                problems = []
-                questions = shared["question"]
-                options_list = shared["options"]
-                answers = shared["answer"]
-                explanations = shared["explanation"]
-                count = min(len(questions), len(options_list))
-                
-                for i in range(count):
-                    q = questions[i] if i < len(questions) else ""
-                    opts = options_list[i] if i < len(options_list) else []
-                    if isinstance(opts, str):
-                        opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
-                    ans = answers[i] if i < len(answers) else ""
-                    exp = explanations[i] if i < len(explanations) else ""
-                    problems.append({
-                        "question": q,
-                        "options": opts,
-                        "generated_answer": ans,
-                        "generated_explanation": exp,
-                    })
-                
-                # 출력 디렉토리
-                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
-                os.makedirs(base_dir, exist_ok=True)
-                
-                uq = (state.get("user_query") or "exam").strip()
-                safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
-                base_filename = os.path.join(base_dir, f"{safe_uq}_답안집")
-                
-                # 답안집 PDF 생성
-                answer_pdf = generator.generate_answer_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 답안집")
-                print(f"[AUTO-PDF] 답안집 PDF 자동 생성 완료 → {answer_pdf}")
-                
-                # artifacts에 기록
-                arts = new_state.setdefault("artifacts", {})
-                generated_list = arts.setdefault("generated_pdfs", [])
-                generated_list.append(f"{base_filename}.pdf")
-                
+                agent_result = agent.invoke(agent_input_state)
             except Exception as e:
-                print(f"[AUTO-PDF] 답안집 PDF 자동 생성 중 오류: {e}")
-        
-        print(f"✅ [Solution] 총 {len(pdf_questions)}개 문제 처리 완료")
+                print(f"❌ SolutionAgent invoke 실행 실패({i}/{len(pdf_questions)}): {e}")
+                agent_result = None
+
+            ans, exp = "", ""
+            if agent_result:
+                if isinstance(agent_result, dict) and agent_result.get("results"):
+                    r0 = agent_result["results"][0]
+                    ans = r0.get("generated_answer", "")
+                    exp = r0.get("generated_explanation", "")
+                else:
+                    ans = agent_result.get("generated_answer", "")
+                    exp = agent_result.get("generated_explanation", "")
+
+            generated_answers.append(ans or "")
+            generated_explanations.append(exp or "")
+
+        # 결과 반영
+        shared.setdefault("answer", [])
+        shared.setdefault("explanation", [])
+        shared["answer"].extend(generated_answers)
+        shared["explanation"].extend(generated_explanations)
+
+        # subject 패딩
+        need = len(shared["question"]) - len(shared.get("subject", []))
+        if need > 0:
+            shared.setdefault("subject", []).extend(["일반"] * need)
+
+        validate_qas(shared)
+
+        # (중요) 여기서 예전처럼 자동으로 답안집을 바로 만들지 않습니다.
+        # 라우팅에 의해 generate_answer_pdf 노드가 실행되도록 둡니다.
+
         return new_state
+
 
     @traceable(name="teacher.generator")
     def generator(self, state: TeacherState) -> TeacherState:
@@ -1022,62 +940,63 @@ class Orchestrator:
     def generate_answer_pdf(self, state: TeacherState) -> TeacherState:
         """
         답안집 PDF 생성 노드
+        - 반환값(None)을 그대로 출력하지 않도록 메시지 정리
         """
         print("📄 답안집 PDF 생성 노드 실행")
         new_state: TeacherState = {**state}
-        
+
         try:
             shared = new_state.get("shared", {})
             questions = shared.get("question", [])
             options_list = shared.get("options", [])
             answers = shared.get("answer", [])
             explanations = shared.get("explanation", [])
-            
+
             if not questions or not options_list or not answers or not explanations:
                 print("⚠️ 답안집 PDF 생성에 필요한 데이터가 부족합니다.")
                 return new_state
-            
+
             from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
-            
+
             problems = []
             count = min(len(questions), len(options_list), len(answers), len(explanations))
-            
+
             for i in range(count):
                 q = questions[i] if i < len(questions) else ""
                 opts = options_list[i] if i < len(options_list) else []
                 if isinstance(opts, str):
-                    opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
+                    opts = [x.strip() for x in opts.splitlines() if x.strip()]
                 ans = answers[i] if i < len(answers) else ""
                 exp = explanations[i] if i < len(explanations) else ""
                 problems.append({
                     "question": q,
-                    "options": opts,
+                    "options": [str(x).strip() for x in (opts or []) if str(x).strip()],
                     "generated_answer": ans,
                     "generated_explanation": exp,
                 })
-            
-            # 출력 디렉토리
+
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
             os.makedirs(base_dir, exist_ok=True)
-            
+
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
             base_filename = os.path.join(base_dir, f"{safe_uq}_답안집")
-            
-            # 답안집 PDF 생성
-            answer_pdf = generator.generate_answer_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 답안집")
-            print(f"✅ 답안집 PDF 생성 완료: {answer_pdf}")
-            
-            # artifacts에 기록
+            output_path = f"{base_filename}.pdf"
+
+            # 일부 구현은 반환값이 None이므로 변수에 받지 않고 호출만 합니다.
+            generator.generate_answer_booklet(problems, output_path, f"{safe_uq} 답안집")
+            print(f"✅ 답안집 PDF 생성 완료: {output_path}")
+
             arts = new_state.setdefault("artifacts", {})
             generated_list = arts.setdefault("generated_pdfs", [])
-            generated_list.append(f"{base_filename}.pdf")
-            
+            generated_list.append(output_path)
+
         except Exception as e:
             print(f"❌ 답안집 PDF 생성 중 오류: {e}")
-        
+
         return new_state
+
 
     @traceable(name="teacher.generate_analysis_pdf")
     def generate_analysis_pdf(self, state: TeacherState) -> TeacherState:
@@ -1162,31 +1081,15 @@ class Orchestrator:
 
     def _extract_problems_from_pdf(self, file_paths: List[str]) -> List[Dict]:
         """PDF 파일에서 문제 추출 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor.extract_problems_from_pdf(file_paths)
-    
-    def _split_problem_blocks(self, raw_text: str) -> List[str]:
-        """텍스트를 문제 블록으로 분할 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._split_problem_blocks(raw_text)
-    
-    def _process_pdf_text(self, raw_text: str, pdf_path: str) -> List[str]:
-        """PDF 텍스트를 1단/2단 구분하여 처리 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._process_pdf_text(raw_text, pdf_path)
-    
-    def _reorder_two_columns_with_pdfminer(self, pdf_path: str) -> str:
-        """PDFMiner를 사용하여 2단 PDF를 1단으로 재정렬 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._reorder_two_columns_with_pdfminer(pdf_path)
-    
-    def _split_problem_blocks_without_keyword(self, text: str) -> List[str]:
-        """문제 키워드 없는 시험지에서 번호로 문항 분할 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._split_problem_blocks_without_keyword(text)
-    
-    def normalize_docling_markdown(self, md: str) -> str:
-        """Docling 마크다운 정규화 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor.normalize_docling_markdown(md)
-    
-    def _parse_block_with_llm(self, block_text: str, llm) -> Optional[Dict]:
-        """LLM으로 블록을 문제 형태로 파싱 (pdf_preprocessor 사용)"""
-        return self.pdf_preprocessor._parse_block_with_llm(block_text, llm)
+        results: List[Dict] = []
+        for p in file_paths:
+            try:
+                items = self.pdf_preprocessor.extract(p)  # [{question, options}]
+                if isinstance(items, list):
+                    results.extend(items)
+            except Exception as e:
+                print(f"[WARN] PDF 추출 실패({p}): {e}")
+        return results
 
     @traceable(name="teacher.retrieve")
     def retrieve(self, state: TeacherState) -> TeacherState:

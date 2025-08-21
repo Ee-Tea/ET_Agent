@@ -281,10 +281,7 @@ class RouterState(dict):
     execution_order: Annotated[List[str], merge_lists_unique] = []
     crop_info: Annotated[List[str], operator.add] = []
     selected_crop: Annotated[List[str], merge_lists_unique] = []
-    crop_grow_agent_result: Annotated[List[str], operator.add] = []
-    disaster_agent_result: Annotated[List[str], operator.add] = []
-    sales_agent_result: Annotated[List[str], operator.add] = []
-    etc_result: Annotated[List[str], operator.add] = []
+    agent_results: Annotated[Dict[str, str], merge_dicts] = {}
     output: Annotated[List[str], operator.add] = []
 
 def select_single_crop_from_recommendations(crop_recommendations, llm):
@@ -347,10 +344,7 @@ def node_input(state: RouterState) -> RouterState:
     state["selected_agents"] = []
     state["question_parts"] = {}
     state["execution_order"] = []
-    state["crop_grow_agent_result"] = []
-    state["disaster_agent_result"] = []
-    state["sales_agent_result"] = []
-    state["etc_result"] = []
+    state["agent_results"] = {} # 에이전트별 결과 딕셔너리 초기화
     state["output"] = []
 
     # 유효한 입력인 경우 상태에 저장하고 다음 단계로 (리스트로 저장)
@@ -435,7 +429,7 @@ def node_crop_grow_agent(state: RouterState) -> RouterState:
     answer = execute_agent_with_boundaries("작물재배_agent", question_part, llm)
     
     # 전용 키에 답변 저장
-    state["crop_grow_agent_result"] = [answer]
+    state["agent_results"]["작물재배_agent"] = answer
     
     print(f"[✅ 작물재배_agent 병렬 실행 완료]")
     print(f"[📤 응답 원본] {answer[:200]}...")
@@ -460,14 +454,14 @@ def node_disaster_agent(state: RouterState) -> RouterState:
     # 재해_agent 전용 작물명 처리
     selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
     if selected_crop and selected_crop not in question_part:
-        question_part = f"{selected_crop}를 재배 중, {question_part}"
+        question_part = f"{selected_crop} 재배 중, {question_part}"
         print(f"[🔄 수정된 질문 ] {question_part}")
     
     # 에이전트 실행
     answer = execute_agent_with_boundaries("재해_agent", question_part, llm)
     
     # 전용 키에 답변 저장
-    state["disaster_agent_result"] = [answer]
+    state["agent_results"]["재해_agent"] = answer
     
     print(f"[✅ 재해_agent 병렬 실행 완료]")
     print(f"[📤 응답 원본] {answer[:200]}...")
@@ -499,7 +493,7 @@ def node_sales_agent(state: RouterState) -> RouterState:
     answer = execute_agent_with_boundaries("판매처_agent", question_part, llm)
     
     # 전용 키에 답변 저장
-    state["sales_agent_result"] = [answer]
+    state["agent_results"]["판매처_agent"] = answer
     
     print(f"[✅ 판매처_agent 병렬 실행 완료]")
     print(f"[📤 응답 원본] {answer[:200]}...")
@@ -520,7 +514,7 @@ def node_etc(state: RouterState) -> RouterState:
     answer = execute_agent_with_boundaries("기타", question_part, llm)
     
     # 전용 키에 답변 저장
-    state["etc_result"] = [answer]
+    state["agent_results"]["기타"] = answer
     
     print(f"[✅ 기타_agent 웹검색 실행 완료]")
     print(f"[📤 응답 원본] {answer[:200]}...")
@@ -545,23 +539,14 @@ def node_parallel_agents(state: RouterState) -> RouterState:
 def node_merge_output(state: RouterState) -> RouterState:
     print("\n=== 최종 응답 병합 시작 ===")
     
-    # 각 에이전트 결과 수집 (전용 키에서)
+    # 각 에이전트 결과 수집
     agent_results = {}
     
     if state.get("crop_info"):
         agent_results["작물추천_agent"] = state["crop_info"][0] if state["crop_info"] else ""
 
-    if state.get("crop_grow_agent_result"):
-        agent_results["작물재배_agent"] = state["crop_grow_agent_result"][0] if state["crop_grow_agent_result"] else ""
-    
-    if state.get("disaster_agent_result"):
-        agent_results["재해_agent"] = state["disaster_agent_result"][0] if state["disaster_agent_result"] else ""
-    
-    if state.get("sales_agent_result"):
-        agent_results["판매처_agent"] = state["sales_agent_result"][0] if state["sales_agent_result"] else ""
-    
-    if state.get("etc_result"):
-        agent_results["기타"] = state["etc_result"][0] if state["etc_result"] else ""
+    if state.get("agent_results"):
+        agent_results.update(state["agent_results"])
     
     # 실행 요약 출력
     selected_agents = state.get("selected_agents", [])
@@ -592,7 +577,7 @@ def node_merge_output(state: RouterState) -> RouterState:
                 output += f"\n[상세 분석 작물]\n{state['selected_crop']}\n"
                 print(f"[ 상세 분석 작물] {state['selected_crop']}")
         
-        # 다른 에이전트들의 답변 표시 (전용 키에서 수집한 결과 사용)
+        # 다른 에이전트들의 답변 표시
         for agent, answer in agent_results.items():
             if agent != "작물추천_agent":  # 이미 표시됨
                 # 에이전트 결과 추가

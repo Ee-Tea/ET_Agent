@@ -21,8 +21,8 @@ Unified PDF Preprocessor (robust import)
 ---------
 from unified_pdf_preprocessor import UnifiedPDFPreprocessor
 pre = UnifiedPDFPreprocessor()
-problems = pre.extract("example.pdf")
-print(problems[0]["question"], problems[0]["options"])    
+problems = pre.extract("your_pdf_file.pdf")
+print(problems[0]["question"], problems[0]["question"])    
 """
 
 from __future__ import annotations

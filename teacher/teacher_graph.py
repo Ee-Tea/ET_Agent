@@ -63,6 +63,7 @@ class SharedState(TypedDict):
     weak_type: NotRequired[List[str]]
     retrieve_answer: NotRequired[str]
     user_answer: NotRequired[List[str]]  # 사용자가 실제 제출한 답
+    score_result: NotRequired[dict]
 
 class TeacherState(TypedDict):
     user_query: str
@@ -760,16 +761,34 @@ class Orchestrator:
         # 사용자 답안 입력 받기
         shared = new_state["shared"]
         questions = shared.get("question", [])
+        user_query = new_state.get("user_query", "")
+        
+        # ===== 채점 시작 전 데이터 확인 =====
+        print("\n🔍 [Score] 채점 시작 전 데이터 확인:")
+        print(f"  - 문제 수: {len(questions)}")
+        print(f"  - 사용자 질문: {user_query}")
+        print(f"  - 기존 정답: {len(shared.get('answer', []))}개")
+        print(f"  - 기존 해설: {len(shared.get('explanation', []))}개")
+        print(f"  - 기존 과목: {len(shared.get('subject', []))}개")
+        
+        if questions:
+            print(f"  - 첫 번째 문제: {questions[0][:100]}{'...' if len(questions[0]) > 100 else ''}")
         
         if not questions:
             print("⚠️ 채점할 문제가 없습니다.")
             return new_state
         
         # 사용자 답안 입력 받기
-        user_answer = get_user_answer(questions)
+        user_answer = get_user_answer(user_query)
         if not user_answer:
             print("⚠️ 사용자 답안을 입력받지 못했습니다.")
             return new_state
+        
+        # ===== 사용자 답안 파싱 결과 확인 =====
+        print(f"\n📝 [Score] 사용자 답안 파싱 결과:")
+        print(f"  - 원본 입력: {user_query}")
+        print(f"  - 파싱된 답안: {user_answer}")
+        print(f"  - 답안 개수: {len(user_answer) if isinstance(user_answer, list) else 'N/A'}")
         
         # shared state에 사용자 답안 저장
         shared["user_answer"] = user_answer
@@ -779,6 +798,13 @@ class Orchestrator:
         if not solution_answers:
             print("⚠️ 정답이 없어서 채점할 수 없습니다.")
             return new_state
+        
+        # ===== 채점 실행 전 최종 데이터 확인 =====
+        print(f"\n🎯 [Score] 채점 실행 전 최종 데이터:")
+        print(f"  - 문제 수: {len(questions)}")
+        print(f"  - 사용자 답안: {len(user_answer) if isinstance(user_answer, list) else 'N/A'}")
+        print(f"  - 정답 수: {len(solution_answers)}")
+        print(f"  - 답안 수: {len(shared.get('explanation', []))}")
         
         # score_agent 실행
         agent = self.score_runner
@@ -797,19 +823,53 @@ class Orchestrator:
                 "shared": sh
             })
             
+            # ===== 채점 결과 확인 =====
+            print(f"\n✅ [Score] 채점 결과:")
+            print(f"  - agent_result 타입: {type(agent_result)}")
+            print(f"  - agent_result 키: {list(agent_result.keys()) if isinstance(agent_result, dict) else 'N/A'}")
+            print(f"  - agent_result 전체 내용: {agent_result}")
+            
             if agent_result:
                 # 채점 결과를 score state에 저장
                 new_state["score"].update(agent_result)
+                print(f"  - new_state['score'] 업데이트 후: {new_state['score']}")
                 
                 # shared state에 채점 결과 추가
                 if "score_result" in agent_result:
                     shared["score_result"] = agent_result["score_result"]
+                    print(f"  - shared['score_result'] 설정: {shared['score_result']}")
+                else:
+                    # score_result가 없으면 기본 구조 생성
+                    shared["score_result"] = {
+                        "correct_count": shared.get("correct_count", 0),
+                        "total_count": shared.get("total_count", 0),
+                        "accuracy": shared.get("correct_count", 0) / max(shared.get("total_count", 1), 1)
+                    }
+                    print(f"  - shared['score_result'] 기본값 설정: {shared['score_result']}")
                 
                 if "correct_count" in agent_result:
                     shared["correct_count"] = agent_result["correct_count"]
+                    print(f"  - shared['correct_count'] 설정: {shared['correct_count']}")
                 
                 if "total_count" in agent_result:
                     shared["total_count"] = agent_result["total_count"]
+                    print(f"  - shared['total_count'] 설정: {shared['total_count']}")
+                
+                # score_agent의 결과 구조에 따른 추가 처리
+                if "results" in agent_result:
+                    # ScoreEngine의 표준 결과 형태
+                    results = agent_result["results"]
+                    if isinstance(results, list):
+                        correct_count = sum(1 for r in results if r == 1)
+                        total_count = len(results)
+                        shared["correct_count"] = correct_count
+                        shared["total_count"] = total_count
+                        print(f"  - results에서 계산된 정답 수: {correct_count}")
+                        print(f"  - results에서 계산된 총 문제 수: {total_count}")
+                
+                print(f"  - 최종 정답 수: {shared.get('correct_count', 0)}")
+                print(f"  - 최종 총 문제 수: {shared.get('total_count', 0)}")
+                print(f"  - 정답률: {shared.get('correct_count', 0)}/{shared.get('total_count', 0)}")
                 
                 print(f"✅ [Score] 채점 완료: {shared.get('correct_count', 0)}/{shared.get('total_count', 0)} 정답")
             else:
@@ -818,14 +878,19 @@ class Orchestrator:
         except Exception as e:
             print(f"❌ [Score] 채점 중 오류: {e}")
         
+        # ===== 채점 완료 후 최종 상태 확인 =====
+        print(f"\n🔍 [Score] 채점 완료 후 최종 상태:")
+        print(f"  - shared['user_answer']: {len(shared.get('user_answer', []))}개")
+        print(f"  - shared['correct_count']: {shared.get('correct_count', 'N/A')}")
+        print(f"  - shared['total_count']: {shared.get('total_count', 'N/A')}")
+        print(f"  - shared['score_result']: {'있음' if 'score_result' in shared else '없음'}")
+        
         return new_state
 
     @traceable(name="teacher.analysis")
     def analysis(self, state: TeacherState) -> TeacherState:
-        """
-        분석 노드 - analysis_agent로 답안 분석
-        """
-        print("🔍 분석 노드 실행")
+        """분석 노드 - analysis_agent로 답안 분석"""
+        print("�� 분석 노드 실행")
         new_state: TeacherState = {**state}
         new_state = ensure_shared(new_state)
         new_state.setdefault("analysis", {})
@@ -833,12 +898,63 @@ class Orchestrator:
         # 분석에 필요한 데이터 확인
         shared = new_state["shared"]
         questions = shared.get("question", [])
+        problem_types = shared.get("subject", [])
         user_answer = shared.get("user_answer", [])
         solution_answers = shared.get("answer", [])
+        solution = shared.get("explanation", [])
+        score_result = shared.get("score_result", {})
+        
+        # ===== 분석 시작 전 데이터 확인 =====
+        print("\n�� [Analysis] 분석 시작 전 데이터 확인:")
+        print(f"  - 문제 수: {len(questions)}")
+        print(f"  - 과목 수: {len(problem_types)}")
+        print(f"  - 사용자 답안: {len(user_answer) if isinstance(user_answer, list) else 'N/A'}")
+        print(f"  - 정답 수: {len(solution_answers)}")
+        print(f"  - 채점 결과: {shared.get('correct_count', 'N/A')}/{shared.get('total_count', 'N/A')}")
+        print(f"  - score state: {new_state.get('score', {})}")
+        print(f"  - shared state 키들: {list(shared.keys())}")
+        
+        # 채점 결과 상세 확인
+        score_state = new_state.get('score', {})
+        if score_state:
+            print(f"  - score state 키들: {list(score_state.keys())}")
+            if 'results' in score_state:
+                results = score_state['results']
+                print(f"  - score results: {results}")
+                if isinstance(results, list):
+                    print(f"  - score results 길이: {len(results)}")
+                    print(f"  - score results 내용: {results[:10]}...")  # 처음 10개만
+        
+        if questions:
+            print(f"  - 첫 번째 문제: {questions[0][:100]}{'...' if len(questions[0]) > 100 else ''}")
+        
+        if problem_types:
+            print(f"  - 첫 번째 과목: {problem_types[0] if problem_types[0] else 'N/A'}")
+        
+        if user_answer:
+            print(f"  - 첫 번째 사용자 답안: {user_answer[0] if isinstance(user_answer, list) and user_answer else 'N/A'}")
         
         if not questions or not user_answer or not solution_answers:
             print("⚠️ 분석에 필요한 데이터가 부족합니다.")
+            print(f"    - questions: {'있음' if questions else '없음'}")
+            print(f"    - user_answer: {'있음' if user_answer else '없음'}")
+            print(f"    - solution_answers: {'있음' if solution_answers else '없음'}")
             return new_state
+        
+        # ===== 분석 실행 전 최종 데이터 검증 =====
+        print(f"\n�� [Analysis] 분석 실행 전 최종 데이터 검증:")
+        print(f"  - 문제와 답안 개수 일치: {'✅' if len(questions) == len(user_answer) else '❌'}")
+        print(f"  - 문제와 정답 개수 일치: {'✅' if len(questions) == len(solution_answers) else '❌'}")
+        print(f"  - 문제와 과목 개수 일치: {'✅' if len(questions) == len(problem_types) else '❌'}")
+        
+        if len(questions) != len(user_answer):
+            print(f"    ⚠️ 문제 수({len(questions)})와 답안 수({len(user_answer)})가 일치하지 않습니다.")
+        
+        if len(questions) != len(solution_answers):
+            print(f"    ⚠️ 문제 수({len(questions)})와 정답 수({len(solution_answers)})가 일치하지 않습니다.")
+        
+        if len(questions) != len(problem_types):
+            print(f"    ⚠️ 문제 수({len(questions)})와 과목 수({len(problem_types)})가 일치하지 않습니다.")
         
         # analysis_agent 실행
         agent = self.analyst_runner
@@ -849,15 +965,29 @@ class Orchestrator:
             user_query = state.get("user_query", "")
             sh = shared
             
+            # ===== analysis_agent 호출 전 최종 데이터 확인 =====
+            print(f"\n🚀 [Analysis] analysis_agent 호출 전 최종 데이터:")
+            print(f"  - problem: {len(questions)}개")
+            print(f"  - user_answer: {len(user_answer)}개")
+            print(f"  - problem_types: {len(problem_types)}개")
+            print(f"  - solution_answer: {len(solution_answers)}개")
+            print(f"  - user_query: {user_query}")
+            
             # analysis_agent를 subgraph로 실행
             agent_result = agent.invoke({
                 "problem": sh.get("question", []) or [],
                 "user_answer": user_answer,
-                "solution_answer": sh.get("answer", []) or [],
-                "solution": sh.get("explanation", []) or [],
+                "problem_types": problem_types,  # ✅ 과목 정보 전달
+                "solution_answer": solution_answers,
                 "user_query": user_query,
-                "shared": sh
+                "solution": solution,
+                "results": score_result
             })
+            
+            # ===== 분석 결과 확인 =====
+            print(f"\n✅ [Analysis] 분석 결과:")
+            print(f"  - agent_result 타입: {type(agent_result)}")
+            print(f"  - agent_result 키: {list(agent_result.keys()) if isinstance(agent_result, dict) else 'N/A'}")
             
             if agent_result:
                 # 분석 결과를 analysis state에 저장
@@ -866,191 +996,315 @@ class Orchestrator:
                 # shared state에 분석 결과 추가
                 if "weak_type" in agent_result:
                     shared["weak_type"] = agent_result["weak_type"]
+                    print(f"  - 약점 유형: {len(agent_result['weak_type'])}개")
                 
-                if "analysis_result" in agent_result:
-                    shared["analysis_result"] = agent_result["analysis_result"]
+                if "wrong_question" in agent_result:
+                    shared["wrong_question"] = agent_result["wrong_question"]
+                    print(f"  - 오답 문제: {len(agent_result['wrong_question'])}개")
                 
-                print(f"✅ [Analysis] 분석 완료: 취약 유형 {len(shared.get('weak_type', []))}개")
+                print("✅ [Analysis] 분석 완료")
             else:
                 print("⚠️ [Analysis] 분석 실패")
                 
         except Exception as e:
             print(f"❌ [Analysis] 분석 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # ===== 분석 완료 후 최종 상태 확인 =====
+        print(f"\n�� [Analysis] 분석 완료 후 최종 상태:")
+        print(f"  - shared['weak_type']: {len(shared.get('weak_type', []))}개")
+        print(f"  - shared['wrong_question']: {len(shared.get('wrong_question', []))}개")
+        print(f"  - analysis state 키: {list(new_state.get('analysis', {}).keys())}")
         
         return new_state
 
     @traceable(name="teacher.generate_problem_pdf")
     def generate_problem_pdf(self, state: TeacherState) -> TeacherState:
         """
-        문제집 PDF 생성 노드
+        문제집 PDF 생성 노드 (방금 추가된 범위만 출력)
+        - artifacts.pdf_added_start_index / end_index / count 를 우선 사용
+        - 인덱스 정보가 없거나 비정상이면 전체로 폴백
         """
         print("📄 문제집 PDF 생성 노드 실행")
         new_state: TeacherState = {**state}
-        
         try:
-            shared = new_state.get("shared", {})
-            questions = shared.get("question", [])
-            options_list = shared.get("options", [])
-            
-            if not questions or not options_list:
-                print("⚠️ PDF 생성할 문제가 없습니다.")
+            new_state = ensure_shared(new_state)
+            shared = new_state["shared"]
+            arts = new_state.setdefault("artifacts", {})
+
+            questions = shared.get("question", []) or []
+            options_list = shared.get("options", []) or []
+            total_n = min(len(questions), len(options_list))
+
+            if total_n == 0:
+                print("⚠️ 문제집 PDF 생성할 문제가 없습니다.")
                 return new_state
-            
+
+            # 기본값(전체)
+            start, end = 0, total_n - 1
+
+            # 방금 추가 범위 시도
+            s = arts.get("pdf_added_start_index")
+            e = arts.get("pdf_added_end_index")
+            c = arts.get("pdf_added_count")
+
+            if isinstance(c, int) and c > 0:
+                if isinstance(s, int) and isinstance(e, int) and 0 <= s <= e < total_n:
+                    start, end = s, e
+                else:
+                    # 인덱스 기록이 비정상인 경우: "마지막 c개"로 폴백
+                    start = max(0, total_n - c)
+                    end = total_n - 1
+
+            problems = []
+            for i in range(start, end + 1):
+                q = questions[i]
+                opts = options_list[i]
+                if isinstance(opts, str):
+                    opts = [x.strip() for x in opts.splitlines() if x.strip()]
+                if not isinstance(opts, list):
+                    opts = []
+                opts = [str(x).strip() for x in opts if str(x).strip()]
+                problems.append({"question": q, "options": opts})
+
+            if not problems:
+                print("⚠️ 문제집 PDF 생성할 문제가 없습니다.")
+                return new_state
+
             from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
-            
-            problems = []
-            count = min(len(questions), len(options_list))
-            
-            for i in range(count):
-                q = questions[i] if i < len(questions) else ""
-                opts = options_list[i] if i < len(options_list) else []
-                if isinstance(opts, str):
-                    opts = [x.strip() for x in opts.splitlines() if x.strip()] or [opts.strip()]
-                problems.append({
-                    "question": q,
-                    "options": opts,
-                })
-            
-            # 출력 디렉토리
-            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+
+            base_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs")
+            )
             os.makedirs(base_dir, exist_ok=True)
-            
+
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
-            base_filename = os.path.join(base_dir, f"{safe_uq}_문제집")
-            
-            # 문제집 PDF 생성
-            problem_pdf = generator.generate_problem_booklet(problems, f"{base_filename}.pdf", f"{safe_uq} 문제집")
-            print(f"✅ 문제집 PDF 생성 완료: {problem_pdf}")
-            
-            # artifacts에 기록
-            arts = new_state.setdefault("artifacts", {})
-            generated_list = arts.setdefault("generated_pdfs", [])
-            generated_list.append(f"{base_filename}.pdf")
-            
+            suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
+            output_path = os.path.join(base_dir, f"{safe_uq}_문제집{suffix}.pdf")
+
+            # 일부 구현은 반환값이 None → 변수에 안 받습니다.
+            generator.generate_problem_booklet(problems, output_path, f"{safe_uq} 문제집")
+            print(f"✅ 문제집 PDF 생성 완료: {output_path}")
+
+            arts.setdefault("generated_pdfs", []).append(output_path)
         except Exception as e:
             print(f"❌ 문제집 PDF 생성 중 오류: {e}")
-        
         return new_state
+
 
     @traceable(name="teacher.generate_answer_pdf")
     def generate_answer_pdf(self, state: TeacherState) -> TeacherState:
         """
-        답안집 PDF 생성 노드
-        - 반환값(None)을 그대로 출력하지 않도록 메시지 정리
+        답안집 PDF 생성 노드 (방금 추가된 범위만 출력)
+        - artifacts.pdf_added_start_index / end_index / count 를 우선 사용
+        - 인덱스 정보가 없거나 비정상이면 전체로 폴백
         """
         print("📄 답안집 PDF 생성 노드 실행")
         new_state: TeacherState = {**state}
-
         try:
-            shared = new_state.get("shared", {})
-            questions = shared.get("question", [])
-            options_list = shared.get("options", [])
-            answers = shared.get("answer", [])
-            explanations = shared.get("explanation", [])
+            new_state = ensure_shared(new_state)
+            shared = new_state["shared"]
+            arts = new_state.setdefault("artifacts", {})
 
-            if not questions or not options_list or not answers or not explanations:
-                print("⚠️ 답안집 PDF 생성에 필요한 데이터가 부족합니다.")
+            questions     = shared.get("question", []) or []
+            options_list  = shared.get("options", []) or []
+            answers       = shared.get("answer", []) or []
+            explanations  = shared.get("explanation", []) or []
+            total_n = min(len(questions), len(options_list), len(answers), len(explanations))
+
+            if total_n == 0:
+                print("⚠️ 답안집 PDF 생성에 필요한 데이터가 없습니다.")
                 return new_state
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
-            generator = ComprehensivePDFGenerator()
+            # 기본값(전체)
+            start, end = 0, total_n - 1
+
+            # 방금 추가 범위 시도
+            s = arts.get("pdf_added_start_index")
+            e = arts.get("pdf_added_end_index")
+            c = arts.get("pdf_added_count")
+
+            if isinstance(c, int) and c > 0:
+                if isinstance(s, int) and isinstance(e, int) and 0 <= s <= e < total_n:
+                    start, end = s, e
+                else:
+                    # 인덱스 기록이 비정상인 경우: "마지막 c개"로 폴백
+                    start = max(0, total_n - c)
+                    end = total_n - 1
 
             problems = []
-            count = min(len(questions), len(options_list), len(answers), len(explanations))
-
-            for i in range(count):
-                q = questions[i] if i < len(questions) else ""
-                opts = options_list[i] if i < len(options_list) else []
+            for i in range(start, end + 1):
+                q = questions[i]
+                opts = options_list[i]
                 if isinstance(opts, str):
                     opts = [x.strip() for x in opts.splitlines() if x.strip()]
-                ans = answers[i] if i < len(answers) else ""
-                exp = explanations[i] if i < len(explanations) else ""
+                if not isinstance(opts, list):
+                    opts = []
+                opts = [str(x).strip() for x in opts if str(x).strip()]
+                ans = answers[i]
+                exp = explanations[i]
                 problems.append({
                     "question": q,
-                    "options": [str(x).strip() for x in (opts or []) if str(x).strip()],
+                    "options": opts,
                     "generated_answer": ans,
                     "generated_explanation": exp,
                 })
 
-            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+            if not problems:
+                print("⚠️ 답안집 PDF 생성할 문제가 없습니다.")
+                return new_state
+
+            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            generator = ComprehensivePDFGenerator()
+
+            base_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs")
+            )
             os.makedirs(base_dir, exist_ok=True)
 
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
-            base_filename = os.path.join(base_dir, f"{safe_uq}_답안집")
-            output_path = f"{base_filename}.pdf"
+            suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
+            output_path = os.path.join(base_dir, f"{safe_uq}_답안집{suffix}.pdf")
 
-            # 일부 구현은 반환값이 None이므로 변수에 받지 않고 호출만 합니다.
+            # 일부 구현은 반환값이 None → 변수에 안 받습니다.
             generator.generate_answer_booklet(problems, output_path, f"{safe_uq} 답안집")
             print(f"✅ 답안집 PDF 생성 완료: {output_path}")
 
-            arts = new_state.setdefault("artifacts", {})
-            generated_list = arts.setdefault("generated_pdfs", [])
-            generated_list.append(output_path)
-
+            arts.setdefault("generated_pdfs", []).append(output_path)
         except Exception as e:
             print(f"❌ 답안집 PDF 생성 중 오류: {e}")
-
         return new_state
-
-
+    
     @traceable(name="teacher.generate_analysis_pdf")
     def generate_analysis_pdf(self, state: TeacherState) -> TeacherState:
         """
-        분석 리포트 PDF 생성 노드
+        분석 리포트 PDF 생성 노드 (방금 추가된 범위만 출력)
+        - generator가 dict형 문제 구조를 기대하는 경우를 대비해 payload를 정규화
         """
         print("📄 분석 리포트 PDF 생성 노드 실행")
-        new_state: TeacherState = {**state}
-        
+        new_state: TeacherState = ensure_shared({**state})
+
         try:
-            shared = new_state.get("shared", {})
-            questions = shared.get("question", [])
-            user_answer = shared.get("user_answer", [])
-            solution_answers = shared.get("answer", [])
-            explanations = shared.get("explanation", [])
-            score_result = shared.get("score_result", {})
-            weak_type = shared.get("weak_type", [])
-            
-            if not questions or not user_answer or not solution_answers:
+            sh   = new_state["shared"]
+            arts = new_state.setdefault("artifacts", {})
+
+            questions        = sh.get("question", []) or []
+            options_list     = sh.get("options", []) or []
+            user_answer      = sh.get("user_answer", []) or []
+            solution_answers = sh.get("answer", []) or []
+            explanations     = sh.get("explanation", []) or []
+            weak_type        = sh.get("weak_type", []) or []
+
+            total_n = min(len(questions), len(solution_answers), len(user_answer))
+            if total_n == 0:
                 print("⚠️ 분석 리포트 PDF 생성에 필요한 데이터가 부족합니다.")
                 return new_state
-            
+
+            # 범위 결정 (방금 추가된 범위 우선)
+            start, end = 0, total_n - 1
+            c = arts.get("pdf_added_count")
+            s = arts.get("pdf_added_start_index")
+            e = arts.get("pdf_added_end_index")
+            if isinstance(c, int) and c > 0:
+                if isinstance(s, int) and isinstance(e, int) and 0 <= s <= e < total_n:
+                    start, end = s, e
+                else:
+                    start = max(0, total_n - c); end = total_n - 1
+
+            # 슬라이스
+            sub_q    = questions[start:end + 1]
+            sub_opts = options_list[start:end + 1] if options_list else [[]] * (end - start + 1)
+            sub_user = user_answer[start:end + 1] if len(user_answer) >= end + 1 else user_answer[:]
+            sub_sol  = solution_answers[start:end + 1]
+            sub_exp  = explanations[start:end + 1] if explanations else [""] * (end - start + 1)
+
+            # 옵션 정규화
+            def _norm_opts(x):
+                if isinstance(x, str):
+                    return [t.strip() for t in x.splitlines() if t.strip()]
+                if isinstance(x, list):
+                    return [str(t).strip() for t in x if str(t).strip()]
+                return []
+            sub_opts = [_norm_opts(o) for o in sub_opts]
+
+            # 문제 dict로 정규화 (템플릿 호환)
+            problems = []
+            for q, opts, u, s, ex in zip(sub_q, sub_opts, sub_user, sub_sol, sub_exp):
+                problems.append({
+                    "question": str(q),
+                    "options": opts,
+                    "user_answer": str(u),
+                    "generated_answer": str(s),
+                    "generated_explanation": str(ex),
+                })
+
+            # 결과 요약 (score_result 없을 때 대비)
+            import re
+            def _norm_num(x):
+                if isinstance(x, (int, float)) and not isinstance(x, bool): return str(int(x))
+                s = str(x or "").strip().replace("정답", "").replace("답", "").rstrip("번").rstrip(".")
+                m = re.search(r"\d+", s)
+                return m.group(0) if m else ""
+            results = [1 if (_norm_num(u) and _norm_num(s) and _norm_num(u) == _norm_num(s)) else 0
+                    for u, s in zip(sub_user, sub_sol)]
+            score_result = sh.get("score_result")
+            if not isinstance(score_result, dict) or "correct_count" not in score_result:
+                score_result = {
+                    "correct_count": sum(results),
+                    "total_count": len(results),
+                    "accuracy": (sum(results) / len(results)) if results else 0.0,
+                }
+
+            # weak_types도 dict 리스트로 호환
+            weak_types_norm = [{"label": str(w)} for w in (weak_type if isinstance(weak_type, list) else [weak_type])]
+
+            # 템플릿 호환을 위한 payload (questions도 dict 리스트로 제공)
+            analysis_data = {
+                "problems": problems,  # ← 핵심: 아이템에 .get 사용해도 안전
+                "questions": [{"text": str(q)} for q in sub_q],  # 백워드 호환
+                "user_answers": [str(u) for u in sub_user],
+                "correct_answers": [str(s) for s in sub_sol],
+                "explanations": [str(ex) for ex in sub_exp],
+                "weak_types": weak_types_norm,
+                "score_result": score_result,
+                "range": {"start_index": start, "end_index": end},
+            }
+
+            # 디버그
+            print(f"[DBG] problems={len(analysis_data['problems'])}, weak_types={len(analysis_data['weak_types'])}")
+            if analysis_data["problems"]:
+                print(f"[DBG] first problem keys={list(analysis_data['problems'][0].keys())}")
+
             from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
-            
-            # 분석 데이터 구성
-            analysis_data = {
-                "questions": questions,
-                "user_answers": user_answer,
-                "correct_answers": solution_answers,
-                "explanations": explanations,
-                "score_result": score_result,
-                "weak_types": weak_type
-            }
-            
-            # 출력 디렉토리
-            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "agents", "solution", "pdf_outputs"))
+
+            import os
+            base_dir = os.path.abspath(os.path.join(
+                os.path.dirname(__file__), "agents", "solution", "pdf_outputs"
+            ))
             os.makedirs(base_dir, exist_ok=True)
-            
+
             uq = (state.get("user_query") or "exam").strip()
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
-            base_filename = os.path.join(base_dir, f"{safe_uq}_분석리포트")
-            
-            # 분석 리포트 PDF 생성
-            analysis_pdf = generator.generate_analysis_report(analysis_data, f"{base_filename}.pdf", f"{safe_uq} 분석 리포트")
-            print(f"✅ 분석 리포트 PDF 생성 완료: {analysis_pdf}")
-            
-            # artifacts에 기록
-            arts = new_state.setdefault("artifacts", {})
-            generated_list = arts.setdefault("generated_pdfs", [])
-            generated_list.append(f"{base_filename}.pdf")
-            
+            suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
+            output_path = os.path.join(base_dir, f"{safe_uq}_분석리포트{suffix}.pdf")
+
+            # 템플릿 일부는 반환값이 None
+            generator.generate_analysis_report(analysis_data, output_path, f"{safe_uq} 분석 리포트")
+            print(f"✅ 분석 리포트 PDF 생성 완료: {output_path}")
+
+            new_state["artifacts"].setdefault("generated_pdfs", []).append(output_path)
+
         except Exception as e:
             print(f"❌ 분석 리포트 PDF 생성 중 오류: {e}")
-        
+
         return new_state
+
+
 
     @traceable(name="teacher.generate_pdfs")
     def generate_pdfs(self, state: TeacherState) -> TeacherState:
@@ -1288,8 +1542,7 @@ if __name__ == "__main__":
                 "user_query": user_query,
                 "intent": "",
                 # artifacts는 intent_classifier에서 사용자 입력을 기반으로 동적으로 설정됩니다
-                # 기본값으로 테스트용 PDF만 포함
-                "artifacts": {"pdf_ids": ["2024년3회_정보처리기사필기기출문제.pdf"]},
+                "artifacts": {},
             }
 
             try:

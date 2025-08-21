@@ -19,10 +19,21 @@ def test_solution_agent_with_file():
     # Solution Agent 생성
     agent = SolutionAgent()
     
-    # 테스트용 파일 경로 (실제 존재하는 파일로 수정 필요)
-    test_file_paths = [
-        os.path.join("agents", "TestGenerator", "data", "1. 2024년3회_정보처리기사필기기출문제.pdf")
-    ]
+    # 테스트용 파일 경로 (사용자가 직접 지정하거나 환경변수에서 가져옴)
+    test_file_paths = []
+    
+    # 환경변수에서 테스트 파일 경로 가져오기
+    test_file_env = os.getenv("TEST_PDF_FILE")
+    if test_file_env and os.path.exists(test_file_env):
+        test_file_paths.append(test_file_env)
+        print(f"✅ 환경변수에서 테스트 파일 발견: {test_file_env}")
+    
+    # 기본 테스트 파일이 없으면 안내
+    if not test_file_paths:
+        print("⚠️ 테스트할 PDF 파일이 없습니다.")
+        print("   환경변수 TEST_PDF_FILE을 설정하거나 직접 파일 경로를 지정해주세요.")
+        print("   예시: export TEST_PDF_FILE='path/to/your/test.pdf'")
+        return
     
     # 파일 존재 여부 확인
     existing_files = []

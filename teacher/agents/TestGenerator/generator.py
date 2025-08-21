@@ -341,7 +341,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     "    {{\n"
                     "      \"question\": \"문제 내용을 여기에 작성\",\n"
                     "      \"options\": [\"선택지1\", \"선택지2\", \"선택지3\", \"선택지4\"],\n"
-                    "      \"answer\": \"1\",\n"
+                    "      \"answer\": \"1\",선택지의 숫자만 출력해야 함\n"
                     "      \"explanation\": \"정답에 대한 간단한 해설\"\n"
                     "    }}\n"
                     "  ]\n"

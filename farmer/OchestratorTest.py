@@ -4,6 +4,10 @@ import re
 import json
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
+from groq import Groq
+from dotenv import load_dotenv
+import os
+load_dotenv()
 
 agent_descriptions = {
     "작물추천_agent": (
@@ -26,11 +30,6 @@ agent_descriptions = {
 }
 
 # 4) LLM
-from groq import Groq
-from dotenv import load_dotenv
-import os
-load_dotenv()
-
 class GroqLLM:
     def __init__(self, model="openai/gpt-oss-20b", api_key=None):
         if api_key:
@@ -70,12 +69,16 @@ def simple_agent_selector(user_question, llm):
     selection_prompt = f"""
     다음 질문을 분석하여 필요한 에이전트를 선택해주세요.
     
-    [에이전트 역할]
-    1) 작물추천_agent: 재배 환경에 맞는 작물/품종 추천
-    2) 작물재배_agent: 구체적인 재배/관리 방법
-    3) 재해_agent: 기후 재해 예방 및 대응
-    4) 판매처_agent: 판매처, 가격, 시세 정보
-    5) 기타: 농업과 무관한 질문
+    [에이전트 역할 및 설명]
+    1) 작물추천_agent: {agent_descriptions["작물추천_agent"]}
+    
+    2) 작물재배_agent: {agent_descriptions["작물재배_agent"]}
+    
+    3) 재해_agent: {agent_descriptions["재해_agent"]}
+    
+    4) 판매처_agent: {agent_descriptions["판매처_agent"]}
+    
+    5) 기타: {agent_descriptions["기타"]}
     
     질문: "{user_question}"
     
@@ -377,13 +380,8 @@ def node_input(state: RouterState) -> RouterState:
     user_input = input("\n사용자 입력: ").strip()
     
     # 모든 상태 초기화
-    state["crop_info"] = ""
-    state["selected_crop"] = ""
-    state["agent_answers"] = {}
-    state["selected_agents"] = []
-    state["question_parts"] = {}
-    state["execution_order"] = []
-    state["output"] = ""
+    state.clear()
+    state["query"] = user_input
 
     # 유효한 입력인 경우 상태에 저장하고 다음 단계로
     state["query"] = user_input

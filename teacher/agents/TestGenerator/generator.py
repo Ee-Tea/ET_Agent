@@ -4,7 +4,7 @@ from typing import List, Dict, Any, TypedDict
 from abc import ABC, abstractmethod
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Milvus
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langgraph.graph import StateGraph, END
@@ -27,6 +27,11 @@ from base_agent import BaseAgent
 # Groq 관련 임포트
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# Milvus 설정
+MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
+MILVUS_COLLECTION_NAME = os.getenv("MILVUS_COLLECTION_NAME", "info_processing_exam")
 
 # .env 파일 로드
 load_dotenv()
@@ -98,8 +103,32 @@ class InfoProcessingExamAgent(BaseAgent):
 
         if groq_api_key:
             os.environ["GROQ_API_KEY"] = groq_api_key
-        elif not os.getenv("GROQ_API_KEY"):
-            raise ValueError("Groq API 키가 필요합니다.")
+        
+        # FixedResponseSystem 초기화
+        try:
+            # 절대 경로로 verifier.py 임포트 (TestGenerator -> agents -> teacher -> retrieve/nodes)
+            verifier_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'retrieve', 'nodes', 'verifier.py')
+            print(f"🔍 verifier.py 경로: {verifier_path}")
+            print(f"🔍 파일 존재: {os.path.exists(verifier_path)}")
+            
+            # sys.path에 경로 추가
+            nodes_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'retrieve', 'nodes')
+            if nodes_path not in sys.path:
+                sys.path.insert(0, nodes_path)
+            
+            from verifier import FixedResponseSystem
+            self.fixed_response_system = FixedResponseSystem()
+            print("✅ FixedResponseSystem 초기화 성공!")
+        except ImportError as e:
+            print(f"⚠️ FixedResponseSystem을 불러올 수 없습니다: {e}")
+            self.fixed_response_system = None
+        except Exception as e:
+            print(f"⚠️ FixedResponseSystem 초기화 중 오류: {e}")
+            self.fixed_response_system = None
+
+        # GROQ_API_KEY 체크를 제거하여 LLM 없이도 작동하도록 함
+        # if not os.getenv("GROQ_API_KEY"):
+        #     raise ValueError("Groq API 키가 필요합니다.")
 
         self.embeddings_model = None
         self.llm = None
@@ -119,6 +148,30 @@ class InfoProcessingExamAgent(BaseAgent):
     @property
     def description(self) -> str:
         return "정보처리기사 5과목 기준으로 문제를 생성/검증하여 100문제(또는 과목별 지정 수)를 자동 생성합니다."
+
+    def check_off_topic_query(self, query: str) -> dict:
+        """
+        주제 외 질문인지 확인하고 적절한 응답 반환
+        
+        Args:
+            query (str): 사용자 질문
+            
+        Returns:
+            dict: {"is_off_topic": bool, "response": str, "category": str}
+        """
+        if not self.fixed_response_system:
+            return {"is_off_topic": False, "response": "", "category": ""}
+        
+        result = self.fixed_response_system.generate_response(query)
+        
+        if result["type"] in ["rejection", "quick_response"]:
+            return {
+                "is_off_topic": True,
+                "response": result["response"],
+                "category": result["category"]
+            }
+        
+        return {"is_off_topic": False, "response": "", "category": ""}
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -224,16 +277,29 @@ class InfoProcessingExamAgent(BaseAgent):
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )
-            self.llm = ChatGroq(
-                model="moonshotai/kimi-k2-instruct",
-                temperature=0.0,
-                max_tokens=2048,
-                timeout=120,
-                max_retries=3
-            )
-            _ = self.llm.invoke("ping")
+            
+            # GROQ API 키가 있을 때만 LLM 초기화
+            if os.getenv("GROQ_API_KEY"):
+                try:
+                    self.llm = ChatGroq(
+                        model="moonshotai/kimi-k2-instruct",
+                        temperature=0.0,
+                        max_tokens=2048,
+                        timeout=120,
+                        max_retries=3
+                    )
+                    _ = self.llm.invoke("ping")
+                except Exception as e:
+                    print(f"⚠️ LLM 초기화 실패 (API 키 문제일 수 있음): {e}")
+                    self.llm = None
+            else:
+                print("⚠️ GROQ_API_KEY가 설정되지 않아 LLM 기능을 사용할 수 없습니다.")
+                self.llm = None
+                
         except Exception as e:
-            raise ValueError(f"모델 초기화 중 오류 발생: {e}")
+            print(f"⚠️ 임베딩 모델 초기화 중 오류 발생: {e}")
+            self.embeddings_model = None
+            self.llm = None
 
     def _build_vectorstore_from_all_pdfs(self) -> bool:
         pdf_files = self.get_pdf_files()
@@ -256,12 +322,27 @@ class InfoProcessingExamAgent(BaseAgent):
         if not all_documents:
             return False
 
+        # embeddings_model이 없을 때 처리
+        if not self.embeddings_model:
+            print("⚠️ embeddings_model이 초기화되지 않아 vectorstore를 구축할 수 없습니다.")
+            return False
+
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = splitter.split_documents(all_documents)
-        self.vectorstore = FAISS.from_documents(splits, self.embeddings_model)
-        self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 15})
-        self.files_in_vectorstore = pdf_files
-        return True
+        
+        try:
+            self.vectorstore = Milvus(
+                embedding_function=self.embeddings_model.embed_documents,
+                collection_name=MILVUS_COLLECTION_NAME,
+                connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT}
+            )
+            self.vectorstore.add_documents(splits)
+            self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 15})
+            self.files_in_vectorstore = pdf_files
+            return True
+        except Exception as e:
+            print(f"⚠️ Milvus vectorstore 구축 중 오류: {e}")
+            return False
 
     def get_pdf_files(self) -> List[str]:
         return glob.glob(os.path.join(self.data_folder, "*.pdf"))
@@ -269,6 +350,11 @@ class InfoProcessingExamAgent(BaseAgent):
     # ---- 공통 노드 구현(그대로 재사용) ----
     def _retrieve_documents(self, state: GraphState) -> GraphState:
         try:
+            # retriever가 없을 때 처리
+            if not self.retriever:
+                print("[DEBUG] _retrieve_documents: retriever not available")
+                return {**state, "documents": [], "used_sources": [], "error": "retriever가 초기화되지 않았습니다."}
+            
             query = state["query"]
             subject_area = state.get("subject_area", "")
             enhanced_query = f"{subject_area} {query}".strip()
@@ -345,6 +431,18 @@ class InfoProcessingExamAgent(BaseAgent):
                 context=context, subject_area=subject_area, needed_count=generate_count
             )
 
+            # LLM이 없을 때 처리
+            if not self.llm:
+                print(f"[DEBUG] _generate_quiz_incremental: LLM not available, returning error")
+                new_attempts = state.get("generation_attempts", 0) + 1
+                return {
+                    **state,
+                    "quiz_questions": [],
+                    "validated_questions": validated_questions,
+                    "generation_attempts": new_attempts,
+                    "error": "LLM이 초기화되지 않아 문제를 생성할 수 없습니다. GROQ_API_KEY를 확인해주세요."
+                }
+            
             print(f"[DEBUG] _generate_quiz_incremental: calling LLM for {generate_count} questions")
             self.llm.temperature = 0.2
             self.llm.max_tokens = 1024

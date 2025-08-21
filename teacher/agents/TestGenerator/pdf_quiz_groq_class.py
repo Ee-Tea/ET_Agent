@@ -4,7 +4,7 @@ from typing import List, Dict, Any, TypedDict
 from abc import ABC, abstractmethod
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Milvus
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langgraph.graph import StateGraph, END
@@ -21,6 +21,11 @@ from dotenv import load_dotenv
 # Groq 관련 임포트
 from langchain_groq import ChatGroq
 from langchain_community.embeddings import HuggingFaceEmbeddings
+
+# Milvus 설정
+MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
+MILVUS_COLLECTION_NAME = os.getenv("MILVUS_COLLECTION_NAME", "info_processing_exam")
 
 # .env 파일 로드
 load_dotenv()
@@ -269,7 +274,12 @@ class InfoProcessingExamAgent(BaseAgent):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(all_documents)
         
-        self.vectorstore = FAISS.from_documents(splits, self.embeddings_model)
+        self.vectorstore = Milvus(
+            embedding_function=self.embeddings_model.embed_documents,
+            collection_name=MILVUS_COLLECTION_NAME,
+            connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT}
+        )
+        self.vectorstore.add_documents(splits)
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 15})
         
         self.files_in_vectorstore = pdf_files

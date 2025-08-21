@@ -3,7 +3,7 @@ import glob
 from typing import List, Dict, Any
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Milvus
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from collections import Counter
@@ -110,7 +110,12 @@ class RAGEngine:
                 print(f"✅ 기존 벡터스토어에 {len(new_splits)}개 청크 추가")
             else:
                 # 새로 생성
-                self.vectorstore = FAISS.from_documents(new_splits, self.embeddings_model)
+                self.vectorstore = Milvus(
+                    embedding_function=self.embeddings_model.embed_documents,
+                    collection_name=MILVUS_COLLECTION_NAME,
+                    connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT}
+                )
+                self.vectorstore.add_documents(new_splits)
                 print(f"✅ 새 벡터스토어 생성: {len(new_splits)}개 청크")
 
             # retriever 업데이트

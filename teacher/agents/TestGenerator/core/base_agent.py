@@ -17,6 +17,6 @@ class BaseAgent(ABC):
         pass
     
     @abstractmethod
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """에이전트의 주된 로직을 실행하는 메서드입니다."""
         pass

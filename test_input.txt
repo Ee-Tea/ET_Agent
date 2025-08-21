@@ -1,3 +1,0 @@
-"test"  
-"C:\project\Ee-Tea\Agent\ET_Agent\teacher\agents\solution\pdf_outputs\과목당5문제씩만들어줘_문제집.pdf 이거 문제 풀어줘"  
-"exit" 

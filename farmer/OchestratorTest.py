@@ -380,8 +380,13 @@ def node_input(state: RouterState) -> RouterState:
     user_input = input("\n사용자 입력: ").strip()
     
     # 모든 상태 초기화
-    state.clear()
-    state["query"] = user_input
+    state["crop_info"] = ""
+    state["selected_crop"] = ""
+    state["agent_answers"] = {}
+    state["selected_agents"] = []
+    state["question_parts"] = {}
+    state["execution_order"] = []
+    state["output"] = ""
 
     # 유효한 입력인 경우 상태에 저장하고 다음 단계로
     state["query"] = user_input

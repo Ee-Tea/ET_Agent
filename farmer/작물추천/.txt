@@ -8,5 +8,4 @@ cd farmer\작물추천\csv_change_need> -> pdf 변경
 vectordb 위치 
 C:/Rookies_project/ET_Agent/Crop_Recommendations_DB/faiss_pdf_db
 
-pdf load 경로 
 

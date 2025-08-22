@@ -14,7 +14,6 @@ dependencies = [
     # 서버 실행 의존성 (Dockerfile 초기 pip 사전 설치 제거했으므로 프로젝트 의존성에 포함)
     "fastapi>=0.110.0,<1.0.0",
     "uvicorn[standard]>=0.30.0,<1.0.0",
-    "langchain-ollama",
     "pypdf[crypto]",
     "ddgs",
     "python-dotenv",

@@ -1,4 +1,4 @@
-# run_graph.py  (채팅/평가 겸용)
+
 # - 실행 시 메뉴에서 1) 채팅  2) 평가 선택
 # - 두 모드 모두 LLM 참고 컨텍스트(원문 RAW)를 콘솔 출력 및 used_context_log.txt에 저장
 # - LLM이 참고한 문서 출처를 번호/파일명 DataFrame으로 보여줌
@@ -16,7 +16,7 @@ GOLDENSET_CSV = r"C:\Rookies_project\ET_Agent\farmer\작물추천\Goldenset_test
 # === 설정 ===
 # 실행 파일 위치: Goldenset_test
 # 벡터스토어 위치: ../Crop Recommedations DB/faiss_pdf_db
-VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "../Crop Recommedations DB/faiss_pdf_db")
+VECTOR_DB_PATH = Path("../faiss_pdf_db")
 
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 

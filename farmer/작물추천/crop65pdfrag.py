@@ -1,6 +1,9 @@
 import os
 from glob import glob
-from typing import List, Any
+from typing import List, Any, TypedDict
+import json
+import hashlib
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -18,11 +21,11 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
-# === 신규/변경 파일만 처리하기 위한 유틸 ===
-import json
-import hashlib
-from pathlib import Path
+# === LangGraph ===
+from langgraph.graph import StateGraph, END
+from langchain_core.documents import Document
 
+# === 신규/변경 파일만 처리하기 위한 유틸 ===
 MANIFEST_FILE = "manifest.json"
 
 def _abs(p: str) -> str:
@@ -55,15 +58,27 @@ def _save_manifest(db_path: str, manifest: dict) -> None:
     with open(_manifest_path(db_path), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-# === 단계별 함수 ===
-def load_all_pdfs(pdf_dir: str) -> List[Any]:
+# === Graph State 정의 ===
+class GraphState(TypedDict):
+    """
+    RAG 인덱스 빌드 그래프의 상태를 나타내는 클래스.
+    """
+    documents: List[Document]
+    splits: List[Document]
+    error: str
+
+# === 단계별 노드 함수 ===
+def load_all_pdfs_node(state: GraphState) -> GraphState:
+    """
+    PDF 파일을 로드하고, 변경된 파일만 식별하여 상태에 저장하는 노드.
+    """
     print("📥 [1/4] PDF 로드 단계 시작")
-    paths = sorted(glob(os.path.join(pdf_dir, "*.pdf")))
+    paths = sorted(glob(os.path.join(PDF_DIR, "*.pdf")))
     if not paths:
-        raise FileNotFoundError(f"PDF가 없습니다: {pdf_dir}")
+        return {"error": f"PDF가 없습니다: {PDF_DIR}"}
     print(f"📂 총 파일 수: {len(paths)}")
 
-    manifest = _load_manifest(VECTOR_DB_PATH)  # { abs_path: {"sha256": "..."} }
+    manifest = _load_manifest(VECTOR_DB_PATH)
     all_docs = []
     skipped, to_process = 0, 0
 
@@ -72,7 +87,6 @@ def load_all_pdfs(pdf_dir: str) -> List[Any]:
         try:
             file_hash = _sha256_file(abs_path)
 
-            # 변경 없으면 스킵
             if manifest.get(abs_path, {}).get("sha256") == file_hash:
                 skipped += 1
                 print(f"[{idx}/{len(paths)}] ⏭️ 변경 없음: {os.path.basename(p)} (skip)")
@@ -81,47 +95,59 @@ def load_all_pdfs(pdf_dir: str) -> List[Any]:
             print(f"[{idx}/{len(paths)}] 📥 파일 로드 중: {os.path.basename(p)}")
             docs = PyPDFLoader(abs_path).load()
 
-            # 이후 단계에서 사용할 메타데이터 주입
             for d in docs:
-                d.metadata["source"] = abs_path       # 절대 경로
-                d.metadata["file_sha256"] = file_hash # 파일 해시
+                d.metadata["source"] = abs_path
+                d.metadata["file_sha256"] = file_hash
 
             all_docs.extend(docs)
             to_process += 1
             print(f"    ✅ 로드 완료 (pages={len(docs)})")
         except Exception as e:
             print(f"[{idx}/{len(paths)}] ❗ 로드 실패: {p} -> {e}")
+            return {"error": f"파일 로드 실패: {p} -> {e}"}
 
     print(f"📚 총 페이지 문서 수: {len(all_docs)}")
     print(f"⏭️ 스킵: {skipped}개, ⏳ 신규/변경: {to_process}개")
     print("📥 [1/4] PDF 로드 단계 완료")
-    return all_docs
+    return {"documents": all_docs, "splits": []}
 
-
-def split_documents(documents: List[Any]) -> List[Any]:
+def split_documents_node(state: GraphState) -> GraphState:
+    """
+    로드된 문서를 청크로 분할하여 상태에 저장하는 노드.
+    """
     print("✂️ [2/4] 문서 분할 단계 시작")
+    documents = state.get("documents", [])
+    if not documents:
+        print("⏭️ 분할할 문서가 없습니다.")
+        return {"splits": []}
+    
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len
     )
     splits = splitter.split_documents(documents)
     print(f"✂️ 청크 수: {len(splits)}")
     print("✂️ [2/4] 문서 분할 단계 완료")
-    return splits
+    return {"splits": splits}
 
-
-def build_or_update_faiss(splits: List[Any], db_path: str) -> None:
+def build_or_update_faiss_node(state: GraphState) -> GraphState:
+    """
+    분할된 청크를 임베딩하고 FAISS 인덱스를 생성/갱신하는 노드.
+    """
     print("🧮 [3/4] 임베딩 & 인덱스 생성 단계 시작")
-    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
+    splits = state.get("splits", [])
+    if not splits:
+        print("⏭️ 임베딩할 청크가 없습니다.")
+        return {}
 
-    # 인덱스 로드/생성
-    if os.path.exists(db_path):
-        print(f"📦 기존 인덱스 로드: {db_path}")
-        vs = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
+    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
+    
+    if os.path.exists(VECTOR_DB_PATH):
+        print(f"📦 기존 인덱스 로드: {VECTOR_DB_PATH}")
+        vs = FAISS.load_local(VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
     else:
         print("🧱 새 인덱스 생성 중…")
         vs = None
 
-    # === splits를 파일별로 묶기 (source 기준) ===
     file_map = {}
     for s in splits:
         fname = s.metadata.get("source", "unknown.pdf")
@@ -130,10 +156,8 @@ def build_or_update_faiss(splits: List[Any], db_path: str) -> None:
     file_list = list(file_map.items())
     total_files = len(file_list)
 
-    # 파일별 임베딩
     for idx, (fname, file_splits) in enumerate(file_list, start=1):
         chunks = len(file_splits)
-        # 페이지 수 추정: split 메타데이터의 page 값을 unique count
         pages = len({sp.metadata.get("page") for sp in file_splits if "page" in sp.metadata})
 
         if vs:
@@ -141,38 +165,78 @@ def build_or_update_faiss(splits: List[Any], db_path: str) -> None:
         else:
             vs = FAISS.from_documents(file_splits, embeddings)
 
-        # ✅ 파일별 임베딩 완료 로그
         print(f"[{idx}/{total_files}] ✅ {os.path.basename(fname)} 임베딩 완료 "
               f"(pages={pages if pages else 'N/A'}, chunks={chunks})")
 
-    # 저장
     if vs:
-        vs.save_local(db_path)
-    print(f"💾 최종 인덱스 저장 완료: {db_path}")
+        vs.save_local(VECTOR_DB_PATH)
+    print(f"💾 최종 인덱스 저장 완료: {VECTOR_DB_PATH}")
 
-    # === 매니페스트 갱신: 이번에 처리된 파일의 sha256 기록 ===
-    manifest = _load_manifest(db_path)
+    manifest = _load_manifest(VECTOR_DB_PATH)
     for fname, file_splits in file_list:
-        sha = None
-        for sp in file_splits:
-            sha = sp.metadata.get("file_sha256")
-            if sha:
-                break
+        sha = next((sp.metadata.get("file_sha256") for sp in file_splits if "file_sha256" in sp.metadata), None)
         if sha:
             manifest[_abs(fname)] = {"sha256": sha}
-    _save_manifest(db_path, manifest)
+    _save_manifest(VECTOR_DB_PATH, manifest)
 
-    # 총합 로그
     total_pages = sum(len({sp.metadata.get("page") for sp in fs if "page" in sp.metadata})
                       for _, fs in file_list)
     total_chunks = sum(len(fs) for _, fs in file_list)
     print(f"📊 전체 결과: 파일={total_files}, 페이지={total_pages}, 청크={total_chunks}")
     print("🧮 [3/4] 임베딩 & 인덱스 생성 단계 완료")
-    
+    return {}
 
+# === 그래프 빌드 함수 ===
+def build_graph():
+    """
+    LangGraph를 사용하여 인덱스 빌드 워크플로우를 정의하고 반환합니다.
+    """
+    graph = StateGraph(GraphState)
+    graph.add_node("load_all_pdfs", load_all_pdfs_node)
+    graph.add_node("split_documents", split_documents_node)
+    graph.add_node("build_or_update_faiss", build_or_update_faiss_node)
+
+    graph.add_edge("load_all_pdfs", "split_documents")
+    graph.add_edge("split_documents", "build_or_update_faiss")
+    graph.add_edge("build_or_update_faiss", END)
+
+    graph.set_entry_point("load_all_pdfs")
+    return graph.compile()
+
+# === 메인 실행 로직 ===
 if __name__ == "__main__":
-    print("🚀 인덱스 빌드 프로세스 시작")
-    docs = load_all_pdfs(PDF_DIR)             # ✅ 신규/변경 파일만 반환 (스킵 로그 포함)
-    splits = split_documents(docs)             # ✂️ [2/4] 로그 그대로 출력
-    build_or_update_faiss(splits, VECTOR_DB_PATH)  # 파일별 임베딩 완료 로그 + manifest 갱신
-    print(f"🎉 [4/4] 전체 인덱스 빌드 완료 (저장 경로: {VECTOR_DB_PATH})")
+    app = build_graph()
+    
+    # ── 그래프 시각화 ───────────────────────────────────────────
+    try:
+        from langgraph.graph import MermaidDrawMethod
+        graph_image_path = Path(".") / "index_build_graph.png"
+        png_bytes = app.get_graph().draw_mermaid_png(
+            draw_method=MermaidDrawMethod.API
+        )
+        with open(graph_image_path, "wb") as f:
+            f.write(png_bytes)
+        print(f"\n✅ LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        print(f"⚠️ 그래프 시각화 중 오류 발생: {e}")
+        try:
+            ascii_map = app.get_graph().draw_ascii()
+            print("\n[ASCII Graph]")
+            print(ascii_map)
+            mermaid_src = app.get_graph().draw_mermaid()
+            mmd_path = Path(".") / "index_build_graph.mmd"
+            with open(mmd_path, "w", encoding="utf-8") as f:
+                f.write(mermaid_src)
+            print(f"📝 Mermaid 소스를 '{mmd_path}'로 저장했습니다. (mermaid.live 등에서 렌더 가능)")
+        except Exception as e2:
+            print(f"추가 백업도 실패: {e2}")
+    # ───────────────────────────────────────────────────────────
+
+    initial_state = {"documents": [], "splits": [], "error": None}
+    print("\n🚀 인덱스 빌드 프로세스 시작")
+    final_state = app.invoke(initial_state)
+
+    if final_state.get("error"):
+        print(f"❗ 그래프 실행 중 오류 발생: {final_state['error']}")
+    else:
+        print(f"🎉 [4/4] 전체 인덱스 빌드 완료 (저장 경로: {VECTOR_DB_PATH})")

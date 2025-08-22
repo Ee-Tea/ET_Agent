@@ -523,16 +523,17 @@ class Orchestrator:
                 continue
 
             problem_payload = {"question": q, "options": opts}
-
-            # 여러 구현과 호환을 위해 가능한 키들을 모두 전달
-            agent_input_state = {
-                "user_input_txt": state.get("user_query", ""),
-                "user_problem": problem_payload["question"],
-                "user_problem_options": problem_payload["options"],
-            }
-
+            print(f"🎯 [Solution] 처리할 문제: {problem_payload}")
+            print(problem_payload["question"], problem_payload["options"])
+            # # 여러 구현과 호환을 위해 가능한 키들을 모두 전달
+            # agent_input_state = {
+            #     "user_input_txt": state.get("user_query", ""),
+            #     "user_problem": problem_payload["question"],
+            #     "user_problem_options": problem_payload["options"],
+            # }
+            # print(f"🎯 [Solution] 처리할 문제: {agent_input_state}")
             try:
-                agent_result = agent.invoke(**agent_input_state)
+                agent_result = agent.invoke(user_problem=q, user_problem_options=opts, user_input_txt=state.get("user_query", ""))
             except Exception as e:
                 print(f"❌ SolutionAgent invoke 실행 실패({i}/{len(pdf_questions)}): {e}")
                 agent_result = None

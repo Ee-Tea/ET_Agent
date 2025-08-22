@@ -229,40 +229,6 @@ class Orchestrator:
     def intent_classifier(self, state: TeacherState) -> TeacherState:
         uq = (state.get("user_query") or "").strip()
 
-        # 규칙 기반 빠른 분기: 명확한 패턴은 즉시 처리
-        def _get_rule_based_intent(text: str) -> Optional[str]:
-            import re
-            if not text:
-                return None
-            
-            text_lower = text.lower()
-            
-            # 1. 매우 명확한 solution 패턴
-            solution_patterns = [
-                r'\.pdf.*풀',  # PDF 풀어줘
-                r'풀이.*해.*줘',  # 풀이해줘
-                r'해설.*해.*줘',  # 해설해줘
-                r'답.*알려.*줘',  # 답 알려줘
-            ]
-            if any(re.search(pattern, text, re.IGNORECASE) for pattern in solution_patterns):
-                return "solution"
-            
-            # 2. 매우 명확한 generate 패턴
-            if re.search(r'\d+\s*(?:문제|문항|개).*(?:만들|생성|출제)', text):
-                return "generate"
-            
-            # 3. 매우 명확한 retrieve 패턴
-            retrieve_patterns = [
-                r'(?:뭐|무엇|설명).*(?:야|인가|해줘)',
-                r'(?:검색|찾아).*줘',
-                r'.*(?:란|이란|뜻).*(?:뭐|무엇)',
-            ]
-            if any(re.search(pattern, text, re.IGNORECASE) for pattern in retrieve_patterns):
-                return "retrieve"
-            
-            # 4. 명확하지 않으면 None 반환 (LLM에 위임)
-            return None
-
         # PDF 전처리 모듈 import (편의 함수들)
         from pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
 
@@ -294,24 +260,17 @@ class Orchestrator:
             current_artifacts["problem_source"] = problem_source
             print(f"📚 문제 소스: {problem_source}")
 
-        # 의도 분류: 규칙 기반 -> LLM 폴백
-        rule_intent = _get_rule_based_intent(uq)
-        
-        if rule_intent:
-            intent = rule_intent
-            raw = f"rule_based:{rule_intent}"
-            print(f"🔧 규칙 기반 분류: {intent}")
-        else:
-            # 규칙으로 분류되지 않으면 LLM 사용
-            try:
-                from teacher_nodes import user_intent
-                raw = user_intent(uq) if uq else ""
-                intent = normalize_intent(raw or "retrieve")
-                print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
-            except Exception as e:
-                print(f"⚠️ LLM 분류 실패, 기본값 사용: {e}")
-                raw = "fallback"
-                intent = "retrieve"
+        # LLM 기반 의도 분류
+        try:
+            from teacher_nodes import user_intent
+            raw = user_intent(uq) if uq else ""
+            intent = normalize_intent(raw or "retrieve")
+            print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
+        except Exception as e:
+            print(f"⚠️ LLM 분류 실패, 기본값 사용: {e}")
+            raw = "fallback"
+            intent = "retrieve"
+            
         return {**state, "user_query": uq, "intent": intent, "artifacts": current_artifacts}
 
     def select_agent(self, state: TeacherState) -> str:
@@ -971,18 +930,60 @@ class Orchestrator:
             print(f"  - user_answer: {len(user_answer)}개")
             print(f"  - problem_types: {len(problem_types)}개")
             print(f"  - solution_answer: {len(solution_answers)}개")
+            print(f"  - solution: {len(solution)}개")
             print(f"  - user_query: {user_query}")
             
+            # 데이터 상세 내용 확인
+            if questions:
+                print(f"  - 첫 번째 문제: {questions[0][:100]}...")
+            if problem_types:
+                print(f"  - 첫 번째 과목: {problem_types[0]}")
+            if user_answer:
+                print(f"  - 첫 번째 사용자 답안: {user_answer[0]}")
+            if solution_answers:
+                print(f"  - 첫 번째 정답: {solution_answers[0]}")
+            if solution:
+                print(f"  - 첫 번째 해설: {solution[0][:100] if len(solution[0]) > 100 else solution[0]}...")
+            
+            # ===== score_result 타입 확인 =====
+            print(f"\n🔍 [Analysis] score_result 상세 확인:")
+            print(f"  - score_result 타입: {type(score_result)}")
+            print(f"  - score_result 값: {score_result}")
+            
+            # score state에서 results 추출
+            score_state = new_state.get('score', {})
+            print(f"  - score state: {score_state}")
+            
+            # 올바른 results 데이터 추출
+            if score_state and 'results' in score_state:
+                results_data = score_state['results']
+                print(f"  - results_data 타입: {type(results_data)}")
+                print(f"  - results_data 값: {results_data}")
+            else:
+                results_data = []
+                print(f"  - results_data를 빈 리스트로 설정")
+            
             # analysis_agent를 subgraph로 실행
-            agent_result = agent.invoke({
+            agent_input = {
                 "problem": sh.get("question", []) or [],
                 "user_answer": user_answer,
                 "problem_types": problem_types,  # ✅ 과목 정보 전달
                 "solution_answer": solution_answers,
                 "user_query": user_query,
-                "solution": solution,
-                "results": score_result
-            })
+                "solution": solution,  # explanation 데이터를 solution으로 전달
+                "results": results_data  # 수정: score_result 대신 results_data 사용
+            }
+            
+            print(f"\n🔍 [Analysis] analysis_agent 입력 데이터:")
+            for key, value in agent_input.items():
+                if isinstance(value, list):
+                    print(f"  - {key}: {len(value)}개")
+                    if value and len(value) > 0:
+                        print(f"    첫 번째 항목: {value[0]}")
+                else:
+                    print(f"  - {key}: {value}")
+            
+            agent_result = agent.invoke(agent_input)
             
             # ===== 분석 결과 확인 =====
             print(f"\n✅ [Analysis] 분석 결과:")
@@ -1498,6 +1499,12 @@ if __name__ == "__main__":
 
     print("\n=== Teacher Graph 테스트 ===")
     print("질문을 입력하세요. (종료: exit/quit)\n")
+
+# Streamlit 앱에서 사용할 함수
+def create_app() -> Any:
+    """Streamlit 앱에서 사용할 teacher graph 앱을 생성합니다."""
+    orch = Orchestrator(user_id="streamlit_user", service="teacher", chat_id="web")
+    return orch.build_teacher_graph()
 
     try:
         while True:

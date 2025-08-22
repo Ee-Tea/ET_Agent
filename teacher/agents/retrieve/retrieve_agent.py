@@ -94,7 +94,9 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
     builder.add_node("search_wiki", RunnableLambda(search_wiki_fn))
     builder.add_node("search_ddg", RunnableLambda(search_ddg_fn))
     builder.add_node("merge", RunnableLambda(merge_fn))
-    builder.add_node("answer", RunnableLambda(answer_fn))
+    # NOTE: state key 'answer' 와 노드명이 동일하면 최신 langgraph에서 충돌(ValueError)
+    #       노드명을 'generate_answer'로 변경
+    builder.add_node("generate_answer", RunnableLambda(answer_fn))
     builder.add_node("reinforce", RunnableLambda(reinforce_fn))
     builder.add_node("verify", RunnableLambda(verify_fn))
 
@@ -102,15 +104,17 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
 
     # ✅ parallel 메서드는 builder에만 존재
     builder.add_edge("extract", "rewrite")
+    # NOTE: 최신 langgraph 버전에서 동일 노드(rewrite)에서 다중 직접 엣지 추가 시
+    # "Already found path for node" 오류 발생 → 순차 실행으로 전환
     builder.add_edge("rewrite", "search_wiki")
-    builder.add_edge("rewrite", "search_ddg")
-    builder.add_edge("search_wiki", "merge")
-    builder.add_edge("search_ddg", "merge")
-    builder.add_edge("merge", "answer")
-    builder.add_edge("answer", "verify")
+    builder.add_edge("search_wiki", "search_ddg")  # wiki 검색 후 ddg 검색
+    builder.add_edge("search_ddg", "merge")  # 두 결과(state에 wiki, ddg 존재) 병합
+    builder.add_edge("merge", "generate_answer")
+    builder.add_edge("generate_answer", "verify")
     builder.add_conditional_edges("verify",check_verdict, {"pass": END, "fail" : "reinforce"})
-    builder.add_edge("reinforce", "search_wiki")  # 보강된 질문으로 다시 검색 시작
-    builder.add_edge("reinforce", "search_ddg")  # 보강된 질문으로 다시 검색 시작
+    # NOTE: 'reinforce'에서 다중 엣지를 추가하면 최신 langgraph에서 ValueError("Already found path for node 'reinforce'") 발생
+    #       순차 구조로 loop 시키기 위해 wiki -> ddg -> merge 체인을 그대로 재사용: reinforce -> search_wiki 하나만 둔다.
+    builder.add_edge("reinforce", "search_wiki")  # 보강 loop 시작 (search_wiki -> search_ddg 순차 진행)
 
     # 3️⃣ 최종 컴파일된 graph 얻기
     graph = builder.compile()
@@ -136,20 +140,11 @@ class retrieve_agent(BaseAgent):
         return "위키백과와 DuckDuckGo를 사용하여 질문에 대한 답변을 생성하는 에이전트입니다."
 
     def invoke(self, input_data: Dict) -> Dict:
-        """
-        입력 데이터를 기반으로 검색 에이전트를 실행합니다.
-        
-        Args:
-            input_data (Dict[str, Any]): 에이전트 실행에 필요한 입력 데이터입니다.
-            
-        Returns:
-            Dict[str, Any]: 에이전트 실행 결과 데이터입니다.
-        """
-        initial_state = {
+        """검색 그래프 실행 (간단 래퍼)"""
+        initial_state: Dict[str, str] = {
             "retrieval_question": input_data.get("retrieval_question", "")
         }
-        result = self.graph.invoke(initial_state)
-        return result
+        return self.graph.invoke(initial_state)  # type: ignore[arg-type]
 
 # initial_state = {
 #     "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"

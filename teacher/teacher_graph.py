@@ -29,14 +29,14 @@ import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from common.short_term.redis_memory import RedisLangGraphMemory
 
-from agents.analysis.analysis_agent import AnalysisAgent
-from agents.score.score_engine import ScoreEngine as score_agent
-from agents.retrieve.retrieve_agent import retrieve_agent
+from .agents.analysis.analysis_agent import AnalysisAgent
+from .agents.score.score_engine import ScoreEngine as score_agent
+from .agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
-from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
-from agents.solution.solution_agent import SolutionAgent as solution_agent
-from teacher_nodes import get_user_answer, parse_generator_input
-from file_path_mapper import FilePathMapper
+from .agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
+from .agents.solution.solution_agent import SolutionAgent as solution_agent
+from .teacher_nodes import get_user_answer, parse_generator_input
+from .file_path_mapper import FilePathMapper
 from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -191,7 +191,7 @@ class Orchestrator:
             self.memory = SimpleMemory()
         
         # PDF 전처리기 초기화
-        from unified_pdf_preprocessor import UnifiedPDFPreprocessor
+        from .unified_pdf_preprocessor import UnifiedPDFPreprocessor
         self.pdf_preprocessor = UnifiedPDFPreprocessor()
         
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
@@ -319,6 +319,7 @@ class Orchestrator:
             intent_norm = normalize_intent(state.get("intent", ""))
         except NameError:
             intent_norm = (state.get("intent","") or "").strip().strip('"\'' ).lower()
+        # 그래프 분기 키는 노드명이 아니라 라우팅 라벨(conditional edge의 key)이어야 함
         mapping = {
             "retrieve": "retrieve",
             "generate": "generator",
@@ -385,11 +386,11 @@ class Orchestrator:
 
     def post_generator_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_generator") or "").strip()
-        return nxt if nxt else "generate_problem_pdf"  # 기본적으로 문제집 PDF 생성
+        return nxt if nxt else "pdf_problem"  # 기본적으로 문제집 PDF 생성
 
     def post_solution_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_solution") or "").strip()
-        return nxt if nxt else "generate_answer_pdf"  # 기본적으로 답안집 PDF 생성
+        return nxt if nxt else "pdf_answer"  # 기본적으로 답안집 PDF 생성
 
     def post_score_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_score") or "").strip()
@@ -397,7 +398,7 @@ class Orchestrator:
 
     def post_analysis_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_analysis") or "").strip()
-        return nxt if nxt else "generate_analysis_pdf"  # 기본적으로 분석 리포트 PDF 생성
+        return nxt if nxt else "pdf_analysis"  # 기본적으로 분석 리포트 PDF 생성
 
     # ── Nodes ───────────────────────────────────────────────────────────────
     @traceable(name="teacher.preprocess")  
@@ -1361,21 +1362,16 @@ class Orchestrator:
         builder.add_node("load_state", RunnableLambda(self.load_state))
         builder.add_node("persist_state", RunnableLambda(self.persist_state))
         builder.add_node("intent_classifier", RunnableLambda(self.intent_classifier))
-
-        builder.add_node("generator", RunnableLambda(self.generator))
-        builder.add_node("solution", RunnableLambda(self.solution))
-        builder.add_node("score", RunnableLambda(self.score))
-        builder.add_node("analysis", RunnableLambda(self.analysis))
-        builder.add_node("retrieve", RunnableLambda(self.retrieve))
-
-        # Preprocess
-        builder.add_node("preprocess", RunnableLambda(self.preprocess))
-
+        builder.add_node("generator_node", RunnableLambda(self.generator))
+        builder.add_node("solution_node", RunnableLambda(self.solution))   # 상태 키와 구분
+        builder.add_node("score_node", RunnableLambda(self.score))
+        builder.add_node("analysis_node", RunnableLambda(self.analysis))
+        builder.add_node("retrieve_node", RunnableLambda(self.retrieve))
+        builder.add_node("preprocess_node", RunnableLambda(self.preprocess))
         # PDF Generation nodes
-        builder.add_node("generate_pdfs", RunnableLambda(self.generate_pdfs))
-        builder.add_node("generate_problem_pdf", RunnableLambda(self.generate_problem_pdf))
-        builder.add_node("generate_answer_pdf", RunnableLambda(self.generate_answer_pdf))
-        builder.add_node("generate_analysis_pdf", RunnableLambda(self.generate_analysis_pdf))
+        builder.add_node("pdf_problem_node", RunnableLambda(self.generate_problem_pdf))
+        builder.add_node("pdf_answer_node", RunnableLambda(self.generate_answer_pdf))
+        builder.add_node("pdf_analysis_node", RunnableLambda(self.generate_analysis_pdf))
 
         # Routing markers
         builder.add_node("mark_after_generator_solution", RunnableLambda(self.mark_after_generator_solution))
@@ -1391,13 +1387,13 @@ class Orchestrator:
         builder.add_edge(START, "load_state")
         builder.add_edge("load_state", "intent_classifier")
 
-        # intent branching (with routers)
+        # intent branching
         builder.add_conditional_edges(
             "intent_classifier",
             self.select_agent,
             {
-                "retrieve": "retrieve",
-                "generator": "generator",
+                "retrieve": "retrieve_node",
+                "generate": "generator_node",
                 "route_analysis": "route_analysis",
                 "route_solution": "route_solution",
                 "route_score": "route_score",
@@ -1409,68 +1405,68 @@ class Orchestrator:
             "route_solution",
             lambda state: state.get("routing", {}).get("solution_next", "mark_after_generator_solution"),
             {
-                "solution": "solution",
-                "preprocess": "preprocess",
+                "solution": "solution_node",
+                "preprocess": "preprocess_node",
                 "mark_after_generator_solution": "mark_after_generator_solution",
             },
         )
-        builder.add_edge("preprocess", "solution")
-        builder.add_edge("mark_after_generator_solution", "generator")
+        builder.add_edge("preprocess_node", "solution_node")
+        builder.add_edge("mark_after_generator_solution", "generator_node")
 
         # route_score
         builder.add_conditional_edges(
             "route_score",
             lambda state: state.get("routing", {}).get("score_next", "mark_after_solution_score"),
             {
-                "score": "score",
+                "score": "score_node",
                 "mark_after_solution_score": "mark_after_solution_score",
             },
         )
-        builder.add_edge("mark_after_solution_score", "solution")
+        builder.add_edge("mark_after_solution_score", "solution_node")
 
         # route_analysis
         builder.add_conditional_edges(
             "route_analysis",
             lambda state: state.get("routing", {}).get("analysis_next", "mark_after_score_analysis"),
             {
-                "analysis": "analysis",
+                "analysis": "analysis_node",
                 "mark_after_score_analysis": "mark_after_score_analysis",
             },
         )
-        builder.add_edge("mark_after_score_analysis", "score")
+        builder.add_edge("mark_after_score_analysis", "score_node")
 
-        # post dependencies - 자동 PDF 생성 강화
+        # post dependencies
         builder.add_conditional_edges(
-            "generator",
+            "generator_node",
             self.post_generator_route,
             {
-                "solution": "solution",
-                "generate_problem_pdf": "generate_problem_pdf",
+                "solution": "solution_node",
+                "pdf_problem": "pdf_problem_node",
             },
         )
         builder.add_conditional_edges(
-            "solution",
+            "solution_node",
             self.post_solution_route,
             {
-                "score": "score",
-                "generate_answer_pdf": "generate_answer_pdf",
+                "score": "score_node",
+                "pdf_answer": "pdf_answer_node",
             },
         )
         builder.add_conditional_edges(
-            "score",
+            "score_node",
             self.post_score_route,
             {
-                "analysis": "analysis",
-                "generate_answer_pdf": "generate_answer_pdf",  # 채점 후 답안집 PDF 생성
+                "analysis": "analysis_node",
+                "pdf_answer": "pdf_answer_node",
             },
         )
 
-        # retrieve → persist, analysis → generate_analysis_pdf → persist → END
-        builder.add_edge("retrieve", "persist_state")
-        builder.add_edge("analysis", "generate_analysis_pdf")
-        builder.add_edge("generate_analysis_pdf", "persist_state")
-        builder.add_edge("generate_problem_pdf", "persist_state")
-        builder.add_edge("generate_answer_pdf", "persist_state")
+        # retrieve → persist & PDF edges
+        builder.add_edge("retrieve_node", "persist_state")
+        builder.add_edge("analysis_node", "pdf_analysis_node")
+        builder.add_edge("pdf_analysis_node", "persist_state")
+        builder.add_edge("pdf_problem_node", "persist_state")
+        builder.add_edge("pdf_answer_node", "persist_state")
         builder.add_edge("persist_state", END)
 
         return builder.compile()

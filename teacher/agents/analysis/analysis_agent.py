@@ -89,7 +89,7 @@ class AnalysisAgent(BaseAgent):
         self.model = OPENAI_LLM_MODEL
         self.graph = self._create_graph()
     
-    def _create_graph(self) -> StateGraph:
+    def _create_graph(self):
         """분석 그래프 구성
         - 단일 노드(generate_feedback)로 구성
         - entry → generate_feedback → END
@@ -223,7 +223,7 @@ subject 는 각 문항의 과목명(문자열)입니다.
 
             feedback_content = completion.choices[0].message.content
             try:
-                parsed_feedback = json.loads(feedback_content)
+                parsed_feedback = json.loads(feedback_content or "{}")
             except json.JSONDecodeError:
                 parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
             state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
@@ -276,7 +276,7 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
 
             feedback_content = completion.choices[0].message.content
             try:
-                parsed_feedback = json.loads(feedback_content)
+                parsed_feedback = json.loads(feedback_content or "{}")
             except json.JSONDecodeError:
                 parsed_feedback = {"overall_assessment": {}}
             state["detailed_analysis"] = []

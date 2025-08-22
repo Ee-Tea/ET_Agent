@@ -8,29 +8,27 @@ MAX_QAS = 200          # shared의 리스트 항목 최대 길이(최근 N개 �
 HISTORY_LIMIT = 200    # history 최근 N개만 유지
 DEFAULT_TTL = 72 * 3600  # 72시간
 
-# teacher_graph의 규격 재사용
-try:
-    from ...teacher.teacher_graph import ensure_shared, SHARED_DEFAULTS
-except Exception:
-    SHARED_DEFAULTS = {
-        "question": [],
-        "options": [],
-        "answer": [],
-        "explanation": [],
-        "subject": [],
-        "wrong_question": [],
-        "weak_type": [],
-        "notes": [],
-        "user_answer": [],
-        "retrieve_answer": "",
-    }
-    def ensure_shared(state: Dict[str, Any]) -> Dict[str, Any]:
-        state = dict(state or {})
-        state.setdefault("shared", {})
-        for k, v in SHARED_DEFAULTS.items():
-            if k not in state["shared"] or not isinstance(state["shared"][k], type(v)):
-                state["shared"][k] = json.loads(json.dumps(v)) if isinstance(v, (dict, list)) else v
-        return state
+SHARED_DEFAULTS = {
+    "question": [],
+    "options": [],
+    "answer": [],
+    "explanation": [],
+    "subject": [],
+    "wrong_question": [],
+    "weak_type": [],
+    "notes": [],
+    "user_answer": [],
+    "retrieve_answer": "",
+}
+
+def ensure_shared(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = dict(state or {})
+    state.setdefault("shared", {})
+    for k, v in SHARED_DEFAULTS.items():
+        cur = state["shared"].get(k)
+        if cur is None or not isinstance(cur, type(v)):
+            state["shared"][k] = json.loads(json.dumps(v)) if isinstance(v, (dict, list)) else v
+    return state
 
 
 class RedisLangGraphMemory:
@@ -48,12 +46,16 @@ class RedisLangGraphMemory:
         redis_host: str = "localhost",
         redis_port: int = 6380,
         ttl_seconds: Optional[int] = DEFAULT_TTL,
-    ):
+    ) -> None:
         self.user_id = user_id
         self.service = service
         self.chat_id = chat_id
+        import os
+        # 환경 변수/인자 우선순위로 Redis 설정
+        host = redis_host if redis_host is not None else os.getenv("REDIS_HOST", "langgraph-redis")
+        port = redis_port if redis_port is not None else int(os.getenv("REDIS_PORT", "6379"))
         self.ttl_seconds = ttl_seconds
-        self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        self.redis = redis.Redis(host=host, port=port, decode_responses=True)
 
     def _k(self, suffix: str) -> str:
         return f"{self.user_id}:{self.service}:{self.chat_id}:{suffix}"
@@ -68,11 +70,12 @@ class RedisLangGraphMemory:
 
     # ---------- 내부 IO ----------
     def _load_shared(self) -> Dict[str, Any]:
-        raw = self.redis.get(self.k_shared)
+        # redis-py sync client returns str|None
+        raw = self.redis.get(self.k_shared)  # type: ignore[assignment]
         if not raw:
             return json.loads(json.dumps(SHARED_DEFAULTS))  # deepcopy
         try:
-            data = json.loads(raw)
+            data = json.loads(raw)  # type: ignore[arg-type]
             tmp = {"shared": data}
             tmp = ensure_shared(tmp)
             return tmp["shared"]
@@ -110,13 +113,25 @@ class RedisLangGraphMemory:
             pipe.execute()
 
     def _load_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        def _force_int(x):
+            try:
+                return int(x)  # type: ignore
+            except Exception:
+                return 0
+        def _force_list(x):
+            try:
+                return list(x)  # type: ignore
+            except Exception:
+                return []
         if limit is None:
-            entries = self.redis.lrange(self.k_history, 0, -1)
+            _entries = self.redis.lrange(self.k_history, 0, -1)  # type: ignore
         else:
-            length = self.redis.llen(self.k_history)
-            start = max(0, length - limit)
-            entries = self.redis.lrange(self.k_history, start, -1)
-        out = []
+            _len_val = self.redis.llen(self.k_history)  # type: ignore
+            length = _force_int(_len_val)
+            start = max(0, length - int(limit))
+            _entries = self.redis.lrange(self.k_history, start, -1)  # type: ignore
+        entries: List[str] = _force_list(_entries)
+        out: List[Dict[str, Any]] = []
         for e in entries:
             try:
                 out.append(json.loads(e))

@@ -1,7 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "agent": "./teacher.py:graph"
+    "agent": "./teacher/graph.py:graph"
   },
   "env": ".env",
   "image_distro": "wolfi"

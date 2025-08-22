@@ -10,7 +10,8 @@ from openai import OpenAI
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field
+# pydantic v2 직접 import (langchain_core.pydantic_v1 제거 경고 대응)
+from pydantic import BaseModel, Field
 
 from ..base_agent import BaseAgent
 

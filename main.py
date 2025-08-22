@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from langserve import add_routes
 
-from teacher.teacher import graph
+from teacher.graph import graph
 
 # FastAPI 애플리케이션을 생성합니다. 이것이 웹 서버의 본체입니다.
 app = FastAPI(

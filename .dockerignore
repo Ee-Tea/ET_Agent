@@ -1,0 +1,32 @@
+# Reduce 2GB+ build context size for langgraph up / Docker builds
+# Ignore large / non-runtime assets
+
+# VCS
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local virtual envs
+.venv/
+.env
+
+# Data / docs not needed in runtime image
+Docs/
+data/
+*.pdf
+
+# Tests & samples (remove if you need them in image)
+tests/
+test_sample/
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+tmp/

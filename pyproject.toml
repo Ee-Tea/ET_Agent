@@ -4,16 +4,15 @@ version = "0.1.0"
 description = "PDF 기반 객관식 문제 자동 출제 시스템 (RAG + LangGraph)"
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2.7,<3",
-    "pydantic-core>=2.14,<3",
-    "langchain>=0.2.0,<0.3.0",
-    "langgraph>=0.0.60,<0.1.0",
-    "langserve>=0.2.0,<0.3.0",
-    # httpx 0.28+ 에서 VerifyTypes 타입이 제거되어 langserve 0.2.x 가 ImportError 발생 → 0.27.x 로 고정
+    "pydantic",
+    "pydantic-core",
+    "langchain",
+    "langgraph",
+    "langserve",
     "httpx<0.28",
     # 서버 실행 의존성 (Dockerfile 초기 pip 사전 설치 제거했으므로 프로젝트 의존성에 포함)
-    "fastapi>=0.110.0,<1.0.0",
-    "uvicorn[standard]>=0.30.0,<1.0.0",
+    "fastapi",
+    "uvicorn[standard]",
     "pypdf[crypto]",
     "ddgs",
     "python-dotenv",
@@ -40,12 +39,12 @@ dependencies = [
     "graphviz",
     "groq",
     "docling",
-    "protobuf==5.27.2",
+    "protobuf",
     "huggingface-hub[hf-xet]",
-    "sse-starlette>=3.0.2",
-    "pdfminer.six>=20231228",
-    "pydantic>=2.0.0",
-    "pdfplumber>=0.11.7",
+    "sse-starlette",
+    "pdfminer.six",
+    "pydantic",
+    "pdfplumber",
 ]
 
 [build-system]

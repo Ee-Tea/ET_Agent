@@ -3,9 +3,12 @@ import glob
 from typing import List, Dict, Any
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+# from langchain_community.vectorstores import FAISS  # FAISS 제거
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
+# 🔁 Milvus 관련 임포트 추가
+from langchain_milvus import Milvus
+from pymilvus import connections, utility
 from collections import Counter
 
 
@@ -32,6 +35,15 @@ class RAGEngine:
         
         # 벡터 스토어에 포함된 파일 목록 추적
         self.files_in_vectorstore = []
+        
+        # 🔧 Milvus 설정 추가
+        self.milvus_conf = {
+            "host": os.getenv("MILVUS_HOST", "localhost"),
+            "port": os.getenv("MILVUS_PORT", "19530"),
+            "collection": os.getenv("MILVUS_COLLECTION", "rag_documents"),
+            "topk": int(os.getenv("MILVUS_TOPK", "15")),
+            "drop_existing": os.getenv("MILVUS_DROP_EXISTING", "false").lower() == "true",
+        }
         
         self._initialize_embeddings()
     
@@ -90,8 +102,42 @@ class RAGEngine:
                 loader = PyPDFLoader(pdf_path)
                 documents = loader.load()
                 for doc in documents:
-                    doc.metadata['source_file'] = os.path.basename(pdf_path)
-                new_documents.extend(documents)
+                    # 🔧 PDF 메타데이터 정리 및 Milvus 스키마에 맞게 조정
+                    metadata = doc.metadata.copy()
+                    
+                    # 필수 필드 보장
+                    metadata['source_file'] = os.path.basename(pdf_path)
+                    
+                    # title 필드가 없거나 None인 경우 기본값 설정
+                    if not metadata.get('title') or metadata['title'] is None:
+                        metadata['title'] = os.path.basename(pdf_path)
+                    
+                    # author 필드가 없거나 None인 경우 기본값 설정
+                    if not metadata.get('author') or metadata['author'] is None:
+                        metadata['author'] = 'Unknown'
+                    
+                    # 기타 필드들도 안전하게 처리
+                    for key in ['producer', 'creator', 'creationdate', 'moddate', 'source']:
+                        if key not in metadata or metadata[key] is None:
+                            metadata[key] = ''
+                    
+                    # page 관련 필드 정수형으로 변환
+                    if 'page' in metadata and metadata['page'] is not None:
+                        try:
+                            metadata['page'] = int(metadata['page'])
+                        except (ValueError, TypeError):
+                            metadata['page'] = 0
+                    
+                    if 'total_pages' in metadata and metadata['total_pages'] is not None:
+                        try:
+                            metadata['total_pages'] = int(metadata['total_pages'])
+                        except (ValueError, TypeError):
+                            metadata['total_pages'] = 1
+                    
+                    # 수정된 메타데이터로 문서 업데이트
+                    doc.metadata = metadata
+                    new_documents.append(doc)
+                    
             except Exception as e:
                 print(f"PDF 로드 실패: {pdf_path}, 오류: {e}")
                 continue
@@ -104,17 +150,49 @@ class RAGEngine:
             )
             new_splits = text_splitter.split_documents(new_documents)
 
+            # 🔧 Milvus 연결 및 컬렉션 관리
+            host = self.milvus_conf["host"]
+            port = self.milvus_conf["port"]
+            collection = self.milvus_conf["collection"]
+            
+            # 연결 정리 후 재접속
+            if "default" in connections.list_connections():
+                connections.disconnect(alias="default")
+            connections.connect(alias="default", host=host, port=port)
+
             if self.vectorstore:
-                # 기존 벡터스토어에 추가
+                # 기존 Milvus 벡터스토어에 추가
                 self.vectorstore.add_documents(new_splits)
-                print(f"✅ 기존 벡터스토어에 {len(new_splits)}개 청크 추가")
+                print(f"✅ 기존 Milvus 벡터스토어에 {len(new_splits)}개 청크 추가")
             else:
+                # 🔧 기존 컬렉션이 있고 drop_existing이 True인 경우 삭제
+                if self.milvus_conf["drop_existing"] and utility.has_collection(collection):
+                    print(f"⚠️ 기존 컬렉션 삭제 중: {collection}")
+                    utility.drop_collection(collection)
+                
                 # 새로 생성
-                self.vectorstore = FAISS.from_documents(new_splits, self.embeddings_model)
-                print(f"✅ 새 벡터스토어 생성: {len(new_splits)}개 청크")
+                index_params = {"index_type": "AUTOINDEX", "metric_type": "IP"}
+                search_params = {"metric_type": "IP"}
+                
+                # 🔧 Milvus 스키마 설정 추가
+                schema_config = {
+                    "auto_id": True,
+                    "enable_dynamic_field": True,  # 동적 필드 허용
+                }
+                
+                self.vectorstore = Milvus.from_documents(
+                    documents=new_splits,
+                    embedding=self.embeddings_model,
+                    collection_name=collection,
+                    connection_args={"host": host, "port": port},
+                    index_params=index_params,
+                    search_params=search_params,
+                    **schema_config
+                )
+                print(f"✅ 새 Milvus 벡터스토어 생성: {len(new_splits)}개 청크")
 
             # retriever 업데이트
-            self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 15})
+            self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.milvus_conf["topk"]})
             
             # 파일 목록 업데이트
             self.files_in_vectorstore = pdf_files
@@ -148,8 +226,11 @@ class RAGEngine:
             # 문서 검색
             documents = self.retriever.invoke(enhanced_query)
             
-            # 사용된 소스 파일 분석
-            source_files = [doc.metadata.get('source_file', 'Unknown') for doc in documents]
+            # 사용된 소스 파일 분석 (Milvus 문서에는 source_file이 없을 수 있으므로 보완)
+            source_files = []
+            for doc in documents:
+                src = doc.metadata.get('source_file') or doc.metadata.get('subject') or 'milvus'
+                source_files.append(src)
             used_sources = list(Counter(source_files).keys())
             
             return {
@@ -173,17 +254,23 @@ class RAGEngine:
             준비된 컨텍스트 문자열
         """
         if not documents:
+            print("[DEBUG] prepare_context: no documents provided")
             return ""
+        
+        print(f"[DEBUG] prepare_context: processing {len(documents)} documents")
         
         # 취약점 개념과 관련된 내용을 우선적으로 선별
         key_sents = []
         weakness_related_sents = []
         
-        for doc in documents:
+        for i, doc in enumerate(documents):
+            print(f"[DEBUG] Document {i+1}: content length={len(doc.page_content)}")
             lines = doc.page_content.split("\n")
-            for line in lines:
+            print(f"[DEBUG] Document {i+1}: {len(lines)} lines")
+            
+            for line_num, line in enumerate(lines):
                 line = line.strip()
-                if len(line) > 50:  # 최소 길이 확보
+                if len(line) > 30:  # 최소 길이를 30으로 줄임
                     # 취약점 개념과 관련된 내용 우선 선별
                     is_weakness_related = False
                     if weakness_concepts:
@@ -195,17 +282,35 @@ class RAGEngine:
                     # 중요한 키워드가 포함된 문장
                     is_important = any(k in line for k in [
                         "정의", "특징", "종류", "예시", "원리", 
-                        "구성", "절차", "장점", "단점", "방법", "기능"
+                        "구성", "절차", "장점", "단점", "방법", "기능",
+                        "자료구조", "스택", "큐", "리스트", "트리", "그래프"
                     ])
                     
                     if is_weakness_related:
                         weakness_related_sents.append(line)
-                    elif is_important or len(line) > 100:
+                        print(f"[DEBUG] Weakness related line: {line[:100]}...")
+                    elif is_important or len(line) > 80:  # 길이 기준을 80으로 줄임
                         key_sents.append(line)
+                        print(f"[DEBUG] Important line: {line[:100]}...")
+        
+        print(f"[DEBUG] Found {len(weakness_related_sents)} weakness-related sentences")
+        print(f"[DEBUG] Found {len(key_sents)} important sentences")
         
         # 취약점 관련 내용을 앞쪽에, 일반 내용을 뒤쪽에 배치
         all_sents = weakness_related_sents + key_sents
-        context = "\n".join(all_sents[:20])  # 최대 20개 문장으로 제한
+        print(f"[DEBUG] Total sentences: {len(all_sents)}")
+        
+        # 최대 30개 문장으로 제한하고 최소 1개는 보장
+        context_sents = all_sents[:30] if all_sents else []
+        if not context_sents and documents:
+            # 아무것도 선택되지 않았으면 첫 번째 문서의 첫 몇 줄을 사용
+            first_doc = documents[0]
+            lines = first_doc.page_content.split("\n")
+            context_sents = [line.strip() for line in lines[:5] if len(line.strip()) > 20]
+            print(f"[DEBUG] Using fallback context: {len(context_sents)} lines from first document")
+        
+        context = "\n".join(context_sents)
+        print(f"[DEBUG] Final context length: {len(context)} characters")
         
         return context
     
@@ -220,7 +325,9 @@ class RAGEngine:
             "is_initialized": self.vectorstore is not None,
             "total_files": len(self.files_in_vectorstore),
             "files": self.files_in_vectorstore.copy(),
-            "embeddings_model": "jhgan/ko-sroberta-multitask" if self.embeddings_model else None
+            "embeddings_model": "jhgan/ko-sroberta-multitask" if self.embeddings_model else None,
+            "vectorstore_type": "Milvus",
+            "milvus_config": self.milvus_conf
         }
     
     def clear_vectorstore(self):

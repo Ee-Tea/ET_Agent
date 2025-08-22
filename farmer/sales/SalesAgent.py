@@ -30,7 +30,7 @@ collection_name = "market_price_docs"
 
 
 # CSV 파일 임베딩 및 Milvus에 저장
-def embed_and_store_csv(csv_path="data/info_20240812.csv"):
+def embed_and_store_csv(csv_path="sales/info_20240812.csv"):
     df = pd.read_csv(csv_path, encoding="euc-kr")
     df['품목'] = df['품목'].fillna("정보 없음")
     docs = []
@@ -41,15 +41,57 @@ def embed_and_store_csv(csv_path="data/info_20240812.csv"):
         embeddings = embedder.encode(docs)
         collection.insert([embeddings.tolist(), docs], fields=["embedding", "text"])
 
-# 컬렉션 있는지 검사
 def check_collection():
     global collection
     connections.connect("default", host=milvus_host, port=milvus_port)
 
     if collection_name in utility.list_collections():
-        collection = Collection(collection_name)  # 이미 있으면 기존 컬렉션 사용
-        print(f"컬렉션 '{collection_name}'이 이미 존재합니다. 기존 컬렉션을 사용합니다.")
+        collection = Collection(collection_name)
+        collection.load()
+        
+        # 실제 쿼리로 데이터 존재 여부 확인
+        try:
+            print(f"🔍 컬렉션 '{collection_name}' 데이터 존재 여부 확인 중...")
+            
+            # 실제 쿼리로 데이터 확인
+            sample_results = collection.query(
+                expr="id >= 0",
+                output_fields=["id", "text"],
+                limit=1
+            )
+            
+            has_data = len(sample_results) > 0
+            print(f"�� 쿼리 결과: {len(sample_results)}개")
+            print(f"🔍 데이터 존재 여부: {'있음' if has_data else '없음'}")
+            
+            if has_data:
+                print(f"✅ 데이터가 존재합니다. 기존 컬렉션을 보존합니다.")
+                return collection
+            else:
+                print(f"⚠️ 데이터가 없습니다. 삭제 후 재생성합니다.")
+                utility.drop_collection(collection_name)
+                print(f"✅ 컬렉션 '{collection_name}' 삭제 완료")
+                
+                # 새 컬렉션 생성
+                fields = [
+                    FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+                    FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
+                    FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512),
+                ]
+                schema = CollectionSchema(fields, "시장 가격 문서 컬렉션")
+                collection = Collection(collection_name, schema)
+                print(f"🔄 컬렉션 '{collection_name}' 재생성 완료")
+                
+                # 데이터 삽입
+                embed_and_store_csv()
+                print(f"✅ 데이터 삽입 완료")
+                
+        except Exception as e:
+            print(f"❌ 쿼리 확인 중 오류: {e}")
+            print(f"⚠️ 오류 발생으로 인해 기존 컬렉션을 보존합니다.")
+            return collection
     else:
+        # 컬렉션이 없는 경우 새로 생성
         fields = [
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
@@ -60,7 +102,7 @@ def check_collection():
         print(f"컬렉션 '{collection_name}'을 새로 생성했습니다.")
         embed_and_store_csv()
 
-    # 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
+# 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
     if not collection.has_index():
         index_params = {
             "metric_type": "IP",
@@ -71,6 +113,7 @@ def check_collection():
             field_name="embedding",
             index_params=index_params
         )
+        print(f"✅ 인덱스 생성 완료")
     
     return collection
 
@@ -80,14 +123,14 @@ def classify_question_simple(query: str) -> str:
     query_lower = query.lower()
     
     # 핵심 의도 키워드 (가장 중요한 것들만)
-    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있']
+    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있', '팔까', '팔면', '파는게', '파는 것', '파는것']
     price_intent = ['가격', '시세', '얼마', '값', '원']
     location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳']
     
     # "농작물"이 포함된 경우 특별 처리
     if "농작물" in query_lower:
         if any(keyword in query_lower for keyword in selling_intent):
-            return "판매처"  # "농작물을 팔고 싶어" → 판매처
+            return "판매처" # "농작물을 팔고 싶어" → 판매처
         elif any(keyword in query_lower for keyword in price_intent):
             return "정보 부족"  # "농작물 가격" (농작물은 구체적이지 않음)
         else:
@@ -178,14 +221,14 @@ def fetch_api_data(query=None):
                 except (ValueError, TypeError):
                     diff = 0
                 
-                change_str = "변동 없는"
+                change_str = "와 변동 없는"
                 if str(direction_raw) == "0":
-                    change_str = f"{value_raw}%({diff}원) 감소한"
+                    change_str = f"보다 {value_raw}%({diff}원) 감소한"
                 elif str(direction_raw) == "1":
-                    change_str = f"{value_raw}%({diff}원) 증가한"
+                    change_str = f"보다 {value_raw}%({diff}원) 증가한"
                 
                 doc = (
-                    f"{safe_val(item.get('item_name', ''))} ({safe_val(item.get('unit', ''))})의 가격은 어제보다 "
+                    f"{safe_val(item.get('item_name', ''))} ({safe_val(item.get('unit', ''))})의 가격은 어제"
                     f"{change_str} {dpr1}원 입니다."
                 )
                 if dpr3 and str(dpr3).strip() != "" and str(dpr3).strip() != "원":
@@ -402,7 +445,7 @@ class GroqLLM:
 # 프롬프트 생성
 def make_system_instruction(classification="시세+판매처"):
     """질문 분류에 따라 적절한 시스템 지시사항을 생성합니다."""
-    
+
     templates = {
         "시세": {
             "order": "품목/등락율 → 가격정보(없으면 생략) → 출처",
@@ -871,6 +914,14 @@ def run(state):
     판매처 에이전트의 워크플로우를 실행합니다.
     오케스트레이터에서 전달받은 상태를 바탕으로 LangGraph를 실행합니다.
     """
+    # 컬렉션 초기화 추가
+    try:
+        check_collection()
+        print("✅ Milvus 컬렉션 초기화 완료")
+    except Exception as e:
+        print(f"❌ Milvus 컬렉션 초기화 실패: {e}")
+        # 컬렉션 초기화 실패 시에도 계속 진행
+    
     app = graph.compile()
     
     # LangGraph가 TypedDict를 기반으로 작동하기 때문에, 일반 Dict를 TypedDict로 변환
@@ -895,7 +946,7 @@ if __name__ == "__main__":
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     except Exception as e:
         print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "경주에서 배추를 팔고싶어"})
+    result_state = app.invoke({"query": ""})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

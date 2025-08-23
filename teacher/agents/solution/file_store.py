@@ -10,7 +10,7 @@ def load_questions_from_json(inputs):
 
     # 문제 경로에서 JSON 파일 로드
     with open(inputs["question_path"], "r", encoding="utf-8") as f:
-        questions = json.load(f)
+        questions = json.load(f)["all_questions"]
     
     docs = []
     for q in questions:
@@ -18,6 +18,9 @@ def load_questions_from_json(inputs):
         options = q.get("options", [])
         answer = q.get("answer", None)
         explanation = q.get("explanation", "")
+        subject = q.get("subject", "정보처리기사")  # 기본 과목 설정
+
+
 
         # 문장은 본문만 저장, 옵션은 metadata에 따로
         doc = Document(
@@ -25,7 +28,8 @@ def load_questions_from_json(inputs):
             metadata={
                 "options": json.dumps(options),
                 "answer": str(answer) if answer is not None else "",
-                "explanation": explanation.strip()
+                "explanation": explanation.strip(),
+                "subject": subject,
             }
         )
         docs.append(doc)
@@ -66,7 +70,7 @@ def load_questions_from_json(inputs):
 if __name__ == "__main__":
 
     inputs = {
-            "question_path": "./x_files/x_sample_pre.json",  # JSON 기출문제 모음
+            "question_path": "./teacher/agents/TestGenerator/test/설계 중심 2개_2과목_24문제.json",  # JSON 기출문제 모음
             "docs": []
         }
     load_questions_from_json(inputs)

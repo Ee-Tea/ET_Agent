@@ -25,7 +25,7 @@ def generate_pdf(results):
         story.append(Paragraph(f"문제: {item['question']}", styles["normal"]))
         story.append(Paragraph("보기:", styles["normal"]))
         for idx, opt in enumerate(item["options"], 1):
-            story.append(Paragraph(f"{idx}. {opt}", styles["normal"]))
+            story.append(Paragraph(f"{idx}) {opt}", styles["normal"]))
         story.append(Spacer(1, 6))
         story.append(Paragraph(f"정답: {item['answer']}", styles["normal"]))
         story.append(Paragraph(f"풀이: {item['explanation']}", styles["normal"]))

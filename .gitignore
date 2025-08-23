@@ -239,3 +239,9 @@ a-bucket/
 milvus/logs/
 milvus/data/
 milvus/configs/
+
+# runtime data
+data/
+data/**
+*.rdb
+*.aof

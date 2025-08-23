@@ -178,8 +178,7 @@ class Orchestrator:
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
         # TTL/길이 제한은 redis_memory.py에서 설정
         try:
-            # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
-            os.environ['REDIS_PORT'] = '6380'
+            # 환경변수 / 인자 기반 Redis 연결 (redis_memory.py에서 자동 감지)
             self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
         except Exception as e:
             print(f"⚠️ Redis 연결 실패: {e}")

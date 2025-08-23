@@ -9,6 +9,7 @@ from groq import Groq
 from typing import TypedDict, Annotated, List, Dict
 from tavily import TavilyClient
 import operator
+from langsmith import traceable
 from dotenv import load_dotenv
 import os
 load_dotenv()
@@ -327,6 +328,7 @@ def select_single_crop_from_recommendations(crop_recommendations, llm):
         print(f"[❌ LLM 호출 오류 - 공백 반환] {e}")
         return ""
 
+@traceable(name="node_input")
 def node_input(state: RouterState) -> RouterState:
     while True:
         user_input = input("\n사용자 입력: ").strip()
@@ -354,6 +356,7 @@ def node_input(state: RouterState) -> RouterState:
     
     return state
 
+@traceable(name="node_agent_select")
 def node_agent_select(state: RouterState) -> RouterState:
     # 기존 복잡한 로직을 단순화된 함수로 교체
     result = simple_agent_selector(state["query"][0] if state["query"] else "", llm)
@@ -368,6 +371,7 @@ def node_agent_select(state: RouterState) -> RouterState:
     
     return state
 
+@traceable(name="node_crop_recommend")
 def node_crop_recommend(state: RouterState) -> RouterState:
     if "작물추천_agent" not in state.get("selected_agents", []):
         return state
@@ -404,6 +408,7 @@ def node_crop_recommend(state: RouterState) -> RouterState:
     return state
 
 # 각 에이전트별로 개별 노드 생성
+@traceable(name="node_crop_grow_agent")
 def node_crop_grow_agent(state: RouterState) -> RouterState:
     """작물재배_agent 전용 노드"""
     if "작물재배_agent" not in state.get("selected_agents", []):
@@ -436,6 +441,7 @@ def node_crop_grow_agent(state: RouterState) -> RouterState:
     print(f"[📤 응답 원본] {answer[:200]}...")
     return state
 
+@traceable(name="node_disaster_agent")
 def node_disaster_agent(state: RouterState) -> RouterState:
     """재해_agent 전용 노드"""
     if "재해_agent" not in state.get("selected_agents", []):
@@ -468,6 +474,7 @@ def node_disaster_agent(state: RouterState) -> RouterState:
     print(f"[📤 응답 원본] {answer[:200]}...")
     return state
 
+@traceable(name="node_sales_agent")
 def node_sales_agent(state: RouterState) -> RouterState:
     """판매처_agent 전용 노드"""
     if "판매처_agent" not in state.get("selected_agents", []):
@@ -500,6 +507,7 @@ def node_sales_agent(state: RouterState) -> RouterState:
     print(f"[📤 응답 원본] {answer[:200]}...")
     return state
 
+@traceable(name="node_etc")
 def node_etc(state: RouterState) -> RouterState:
     """기타 에이전트 전용 노드"""
     if "기타" not in state.get("selected_agents", []):
@@ -522,6 +530,7 @@ def node_etc(state: RouterState) -> RouterState:
     return state
 
 # 병렬 처리 노드 (기존 로직 단순화)
+@traceable(name="node_parallel_agents")
 def node_parallel_agents(state: RouterState) -> RouterState:
     """병렬 에이전트 실행을 조정하는 노드"""
     selected_agents = state.get("execution_order", [])
@@ -537,6 +546,7 @@ def node_parallel_agents(state: RouterState) -> RouterState:
     
     return state
 
+@traceable(name="node_merge_output")
 def node_merge_output(state: RouterState) -> RouterState:
     print("\n=== 최종 응답 병합 시작 ===")
     

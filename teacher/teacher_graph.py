@@ -226,8 +226,19 @@ class Orchestrator:
     def intent_classifier(self, state: TeacherState) -> TeacherState:
         uq = (state.get("user_query") or "").strip()
 
-        # PDF 전처리 모듈 import (편의 함수들)
-        from pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
+        # PDF 전처리 모듈 import (편의 함수들) - 상대 import 우선, 실패 시 절대
+        try:
+            from .pdf_preprocessor import (
+                extract_pdf_paths,
+                extract_problem_range,
+                determine_problem_source,
+            )
+        except Exception:
+            from teacher.pdf_preprocessor import (
+                extract_pdf_paths,
+                extract_problem_range,
+                determine_problem_source,
+            )
 
         # PDF 경로 추출 및 artifacts 업데이트
         extracted_pdfs = extract_pdf_paths(uq)
@@ -259,7 +270,7 @@ class Orchestrator:
 
         # LLM 기반 의도 분류
         try:
-            from teacher_nodes import user_intent
+            from .teacher_nodes import user_intent
             raw = user_intent(uq) if uq else ""
             intent = normalize_intent(raw or "retrieve")
             print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
@@ -1070,7 +1081,7 @@ class Orchestrator:
                 print("⚠️ 문제집 PDF 생성할 문제가 없습니다.")
                 return new_state
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            from .agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
             base_dir = os.path.abspath(
@@ -1156,7 +1167,7 @@ class Orchestrator:
                 print("⚠️ 답안집 PDF 생성할 문제가 없습니다.")
                 return new_state
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            from .agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
             base_dir = os.path.abspath(
@@ -1262,7 +1273,7 @@ class Orchestrator:
                 "range": {"start_index": start, "end_index": end},
             }
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            from .agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
             base_dir = os.path.abspath(os.path.join(

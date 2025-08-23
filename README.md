@@ -134,3 +134,6 @@ REDIS_DB=0
 | 데이터 안 쌓임 | TTL 만료 / 다른 DB 사용 | TTL(72h) 확인, `REDIS_DB` 일치 여부 확인 |
 
 ---
+
+## docker compose 했을 때 테스트 가능한 기본 주소
+`https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:8123`

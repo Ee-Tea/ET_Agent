@@ -1,5 +1,5 @@
 # teacher/teacher_graph_visual.py
-from teacher_graph import Orchestrator
+from .teacher_graph import Orchestrator
 import graphviz
 
 def _as_iter_nodes(g):

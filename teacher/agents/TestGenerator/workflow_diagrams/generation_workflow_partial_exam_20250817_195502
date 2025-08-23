@@ -1,0 +1,50 @@
+// 정보처리기사 문제 생성 워크플로우 - partial_exam
+digraph {
+	rankdir=TB size="12,8"
+	node [fontname=Arial fontsize=10 shape=box style="rounded,filled"]
+	start [label="사용자 입력" fillcolor=lightgreen]
+	parse [label="LLM 기반
+입력 파싱" fillcolor=lightblue]
+	validate [label="파라미터 검증
+(과목/문제수/난이도)" fillcolor=lightyellow]
+	mode [label="PARTIAL_EXAM
+(선택과목 모드)" fillcolor=orange]
+	parallel [label="병렬 처리
+(ThreadPoolExecutor)" fillcolor=lightcoral]
+	merge [label="결과 통합
+(과목별 결과 병합)" fillcolor=lightcoral]
+	agent [label="TestGenerator
+.execute()" fillcolor=lightpink]
+	result [label="결과 처리
+(모드별 결과 추출)" fillcolor=lightcyan]
+	transform [label="데이터 변환
+(QA 형식)" fillcolor=lightcyan]
+	output [label="출력
+(JSON/PDF)" fillcolor=lightgreen]
+	start -> parse
+	parse -> validate
+	validate -> mode
+	mode -> parallel
+	parallel -> agent
+	agent -> merge
+	merge -> result
+	result -> transform
+	transform -> output
+	subgraph cluster_subjects {
+		fillcolor=lightgray label="과목별 병렬 처리" style=filled
+		subject_0 [label="소프트웨어설계
+(5문제)"]
+		subject_1 [label="소프트웨어개발
+(5문제)"]
+		subject_0 -> subject_1 [style=dashed]
+		subject_2 [label="데이터베이스구축
+(5문제)"]
+		subject_1 -> subject_2 [style=dashed]
+		subject_3 [label="프로그래밍언어활용
+(5문제)"]
+		subject_2 -> subject_3 [style=dashed]
+		subject_4 [label="정보시스템구축관리
+(5문제)"]
+		subject_3 -> subject_4 [style=dashed]
+	}
+}

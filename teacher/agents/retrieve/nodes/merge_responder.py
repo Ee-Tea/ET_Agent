@@ -1,12 +1,22 @@
-from openai import OpenAI
-from typing import List
-from dotenv import load_dotenv
 import os
+import json
+import re
+from typing import Dict, Any, List, Optional
+from dotenv import load_dotenv
 load_dotenv()
 
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+
 # Grok이 OpenAI 호환 API를 제공한다고 가정
-groq_api_key = os.getenv("GROQAI_API_KEY")
-client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+  raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
 
 def merge_context(wiki,ddg) -> str:
     """
@@ -23,12 +33,17 @@ def merge_context(wiki,ddg) -> str:
 
     ==> 중복을 제거한 요약 결과:
     """
-    merged_result = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
-        messages=[{"role": "user", "content": merge_prompt}],
+    
+    llm = ChatOpenAI(
+        api_key=openai_api_key,
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+        model=OPENAI_LLM_MODEL,
         temperature=0.5,
+        max_tokens=LLM_MAX_TOKENS
     )
-    return merged_result.choices[0].message.content.strip()
+    
+    response = llm.invoke([HumanMessage(content=merge_prompt)])
+    return response.content.strip()
 
 def generate_answer(prompt: str, context: str) -> str:
     # context = "\n\n".join(context_chunks[:10])  # context 최대 5개만 사용
@@ -39,9 +54,14 @@ def generate_answer(prompt: str, context: str) -> str:
     위 참고자료를 바탕으로 사용자의 질문에 친절하고 이해하기 쉽게 답변해주세요.
     질문: {prompt}
     답변:"""
-    response = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",  # 실제 사용 모델명 확인 필요
-        messages=[{"role": "user", "content": full_prompt}],
+    
+    llm = ChatOpenAI(
+        api_key=openai_api_key,
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+        model=OPENAI_LLM_MODEL,
         temperature=0.5,
+        max_tokens=LLM_MAX_TOKENS
     )
-    return response.choices[0].message.content.strip()
+    
+    response = llm.invoke([HumanMessage(content=full_prompt)])
+    return response.content.strip()

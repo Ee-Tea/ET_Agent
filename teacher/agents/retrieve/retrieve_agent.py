@@ -4,7 +4,7 @@ from .nodes.search import wiki_tool, ddg_tool
 from langgraph.graph import END, StateGraph
 from langchain_core.runnables import RunnableLambda
 from typing_extensions import TypedDict
-from .nodes.verifier import fact_check_with_context
+from .nodes.verifier import fact_check
 from ..base_agent import BaseAgent
 from typing import Dict, List, TypedDict, Annotated
 
@@ -66,7 +66,7 @@ def verify_fn(state):
     question = state["retrieval_question"]
     context = state["merged_context"]
     answer = state["answer"]
-    fact_check_result = fact_check_with_context(question, context, answer)
+    fact_check_result = fact_check(question, context, answer)
     print(f"검증 결과: {fact_check_result}")
     return {"fact_check_result": fact_check_result}
 
@@ -135,7 +135,7 @@ class retrieve_agent(BaseAgent):
     def description(self) -> str:
         return "위키백과와 DuckDuckGo를 사용하여 질문에 대한 답변을 생성하는 에이전트입니다."
 
-    def execute(self, input_data: Dict) -> Dict:
+    def invoke(self, input_data: Dict) -> Dict:
         """
         입력 데이터를 기반으로 검색 에이전트를 실행합니다.
         

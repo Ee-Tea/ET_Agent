@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 # .env 파일 로드
 load_dotenv()
 
-# Groq 관련 상수
-DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# LLM 모델 설정을 환경변수에서 가져오기
+DEFAULT_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_TIMEOUT = 120

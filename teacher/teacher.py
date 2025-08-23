@@ -6,9 +6,9 @@ import os
 from dotenv import load_dotenv
 from langsmith import traceable
 
-from agents.analysis.analysis_agent import AnalysisAgent, print_analysis_result
-from agents.base_agent import BaseAgent
-from agents.score.score_engine import ScoreEngine, print_score_result, ScoreResult
+from .agents.analysis.analysis_agent import AnalysisAgent, print_analysis_result
+from .agents.base_agent import BaseAgent
+from .agents.score.score_engine import ScoreEngine, print_score_result, ScoreResult
 
 class Orchestrator:
     """

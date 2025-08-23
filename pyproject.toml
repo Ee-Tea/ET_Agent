@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "PDF 기반 객관식 문제 자동 출제 시스템 (RAG + LangGraph)"
 requires-python = ">=3.11"
 dependencies = [
+    "sentence-transformers",
     "pydantic",
     "pydantic-core",
     "langchain",
     "langgraph",
-    "langserve",
-    "httpx<0.28",
-    # 서버 실행 의존성 (Dockerfile 초기 pip 사전 설치 제거했으므로 프로젝트 의존성에 포함)
+    "langgraph-cli[inmem]",
+    "httpx",
     "fastapi",
     "uvicorn[standard]",
     "pypdf[crypto]",
@@ -25,6 +25,7 @@ dependencies = [
     "langchain-huggingface",
     "langchain-milvus",
     "langchain-openai",
+    "langchain-groq",
     "opencv-python",
     "pillow",
     "pymilvus",
@@ -35,7 +36,6 @@ dependencies = [
     "numpy",
     "requests",
     "anyio",
-    "langchain-groq",
     "graphviz",
     "groq",
     "docling",
@@ -51,8 +51,8 @@ dependencies = [
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["common", "farmer", "teacher"]
+[tool.setuptools.packages.find]
+include = ["common*", "farmer*", "teacher*"]
 
 [project.optional-dependencies]
 dev = [

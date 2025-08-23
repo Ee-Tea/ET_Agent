@@ -7,7 +7,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import os
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, cast
 from copy import deepcopy
 from dotenv import load_dotenv
 load_dotenv()
@@ -15,7 +15,7 @@ load_dotenv()
 from langsmith import traceable
 from langgraph.graph import START, END, StateGraph
 from langchain_core.runnables import RunnableLambda
-from typing_extensions import TypedDict, NotRequired
+from typing_extensions import TypedDict
 
 # LLM 모델 설정을 환경변수에서 가져오기
 OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
@@ -54,30 +54,30 @@ score_runner    : Optional[SupportsExecute] = None
 analyst_runner  : Optional[SupportsExecute] = None
 
 # ---------- Graph State ----------
-class SharedState(TypedDict):
-    question: NotRequired[List[str]]
-    options: NotRequired[List[List[str]]]
-    answer: NotRequired[List[str]]
-    explanation: NotRequired[List[str]]
-    subject: NotRequired[List[str]]
-    weak_type: NotRequired[List[str]]
-    retrieve_answer: NotRequired[str]
-    user_answer: NotRequired[List[str]]  # 사용자가 실제 제출한 답
-    score_result: NotRequired[dict]
+class SharedState(TypedDict, total=False):
+    question: List[str]
+    options: List[List[str]]
+    answer: List[str]
+    explanation: List[str]
+    subject: List[str]
+    weak_type: List[str]
+    retrieve_answer: str
+    user_answer: List[str]
+    score_result: dict
 
-class TeacherState(TypedDict):
+class TeacherState(TypedDict, total=False):
     user_query: str
     intent: str
-    shared: NotRequired[SharedState]
-    retrieval: NotRequired[dict]
-    generation: NotRequired[dict]
-    solution: NotRequired[dict]
-    score: NotRequired[dict]
-    analysis: NotRequired[dict]
-    history: NotRequired[List[dict]]      # 채팅 히스토리(메모리에서 로드)
-    session: NotRequired[dict]            # 실행 플래그(예: {"loaded": True})
-    artifacts: NotRequired[dict]          # 파일/중간 산출물 메타
-    routing: NotRequired[dict]            # 의존성-복귀 플래그
+    shared: SharedState
+    retrieval: dict
+    generation: dict
+    solution: dict
+    score: dict
+    analysis: dict
+    history: List[dict]
+    session: dict
+    artifacts: dict
+    routing: dict
 
 # ---------- Shared 기본값/유틸 ----------
 SHARED_DEFAULTS: Dict[str, Any] = {
@@ -110,15 +110,14 @@ def normalize_intent(raw: str) -> str:
     s = alias.get(s, s)
     return s if s in CANON_INTENTS else "retrieve"
 
-def ensure_shared(state: TeacherState) -> TeacherState:
-    """shared 키 및 타입을 보정하여 이후 노드에서 안정적으로 사용 가능하게 합니다."""
-    ns = deepcopy(state) if state else {}
-    ns.setdefault("shared", {})
+def ensure_shared(state: TeacherState | Dict[str, Any]) -> TeacherState:
+    ns = cast(Dict[str, Any], deepcopy(state) if state else {})
+    shared = ns.setdefault("shared", {})  # type: ignore
     for key, default_val in SHARED_DEFAULTS.items():
-        cur = ns["shared"].get(key, None)
+        cur = shared.get(key)
         if not isinstance(cur, type(default_val)):
-            ns["shared"][key] = deepcopy(default_val)
-    return ns
+            shared[key] = deepcopy(default_val)
+    return cast(TeacherState, ns)
 
 def validate_qas(shared: SharedState) -> None:
     """문항/보기/정답/해설/과목 길이 일관성 검증."""
@@ -213,14 +212,16 @@ class Orchestrator:
         """그래프 시작 시 단 1번만 메모리에서 상태를 불러와 state에 병합."""
         if (state.get("session") or {}).get("loaded"):
             return state
-        loaded = self.memory.load(state)
-        loaded.setdefault("session", {})
-        loaded["session"]["loaded"] = True
-        return ensure_shared(loaded)
+        # memory.load 는 Dict[str, Any] 를 기대하므로 캐스팅하여 타입 검사 오류 방지
+        loaded_raw = cast(Dict[str, Any], self.memory.load(cast(Dict[str, Any], state)))
+        loaded_raw.setdefault("session", {})
+        loaded_raw["session"]["loaded"] = True
+        return ensure_shared(loaded_raw)
 
     def persist_state(self, state: TeacherState) -> TeacherState:
         """그래프 리프 종료 후 단 1곳에서 메모리에 반영."""
-        self.memory.save(state, state)
+        # TypedDict(TeacherState)를 Dict[str, Any]로 캐스팅하여 타입 검사 경고/에러 제거
+        self.memory.save(cast(Dict[str, Any], state), cast(Dict[str, Any], state))
         return state
 
     # ── Intent & Routing ────────────────────────────────────────────────────
@@ -306,7 +307,8 @@ class Orchestrator:
             try:
                 from teacher_nodes import user_intent
                 raw = user_intent(uq) if uq else ""
-                intent = normalize_intent(raw or "retrieve")
+                raw_str = raw if isinstance(raw, str) else str(raw)
+                intent = normalize_intent(raw_str or "retrieve")
                 print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
             except Exception as e:
                 print(f"⚠️ LLM 분류 실패, 기본값 사용: {e}")
@@ -334,9 +336,9 @@ class Orchestrator:
     # ── Router (의존성 자동 보장) ───────────────────────────────────────────
     def route_solution(self, state: TeacherState) -> TeacherState:
         # 라우팅 정보를 state에 저장
-        intent = state.get("intent", "")
-        artifacts = state.get("artifacts", {})
-        
+        intent = state.get("intent", "")  # noqa: F841 (미사용 가능)
+        artifacts = state.get("artifacts", {})  # noqa: F841
+
         # 우선순위: 전처리 필요 → 전처리 후 solution → 기존 문제로 solution
         if has_files_to_preprocess(state):
             next_node = "preprocess"
@@ -346,43 +348,43 @@ class Orchestrator:
             print("📄 기존 문제로 solution 실행")
         else:
             next_node = "mark_after_generator_solution"
-        
-        new_state = {**state}
-        new_state.setdefault("routing", {})
-        new_state["routing"]["solution_next"] = next_node
-        return new_state
+
+        new_state: Dict[str, Any] = {**state}
+        routing = cast(Dict[str, Any], new_state.setdefault("routing", {}))
+        routing["solution_next"] = next_node
+        return cast(TeacherState, new_state)
 
     def route_score(self, state: TeacherState) -> TeacherState:
         next_node = "score" if has_solution_answers(state) else "mark_after_solution_score"
-        new_state = {**state}
-        new_state.setdefault("routing", {})
-        new_state["routing"]["score_next"] = next_node
-        return new_state
+        new_state: Dict[str, Any] = {**state}
+        routing = cast(Dict[str, Any], new_state.setdefault("routing", {}))
+        routing["score_next"] = next_node
+        return cast(TeacherState, new_state)
 
     def route_analysis(self, state: TeacherState) -> TeacherState:
         next_node = "analysis" if has_score(state) else "mark_after_score_analysis"
-        new_state = {**state}
-        new_state.setdefault("routing", {})
-        new_state["routing"]["analysis_next"] = next_node
-        return new_state
+        new_state: Dict[str, Any] = {**state}
+        routing = cast(Dict[str, Any], new_state.setdefault("routing", {}))
+        routing["analysis_next"] = next_node
+        return cast(TeacherState, new_state)
 
     def mark_after_generator_solution(self, state: TeacherState) -> TeacherState:
-        ns = {**state}
-        ns.setdefault("routing", {})
-        ns["routing"]["after_generator"] = "solution"
-        return ns
+        ns: Dict[str, Any] = {**state}
+        routing = cast(Dict[str, Any], ns.setdefault("routing", {}))
+        routing["after_generator"] = "solution"
+        return cast(TeacherState, ns)
 
     def mark_after_solution_score(self, state: TeacherState) -> TeacherState:
-        ns = {**state}
-        ns.setdefault("routing", {})
-        ns["routing"]["after_solution"] = "score"
-        return ns
+        ns: Dict[str, Any] = {**state}
+        routing = cast(Dict[str, Any], ns.setdefault("routing", {}))
+        routing["after_solution"] = "score"
+        return cast(TeacherState, ns)
 
     def mark_after_score_analysis(self, state: TeacherState) -> TeacherState:
-        ns = {**state}
-        ns.setdefault("routing", {})
-        ns["routing"]["after_score"] = "analysis"
-        return ns
+        ns: Dict[str, Any] = {**state}
+        routing = cast(Dict[str, Any], ns.setdefault("routing", {}))
+        routing["after_score"] = "analysis"
+        return cast(TeacherState, ns)
 
     def post_generator_route(self, state: TeacherState) -> str:
         nxt = ((state.get("routing") or {}).get("after_generator") or "").strip()
@@ -422,7 +424,8 @@ class Orchestrator:
             extracted_problems = self._extract_problems_from_pdf(external_file_paths)
 
             new_state = ensure_shared({**state})
-            shared = new_state["shared"]
+            # ensure_shared should create 'shared', but use setdefault for static type safety
+            shared = cast(SharedState, new_state.setdefault("shared", cast(SharedState, {})))
 
             # extend 이전 길이를 고정 저장
             start_index = len(shared.get("question", []))
@@ -446,10 +449,11 @@ class Orchestrator:
 
             # 실제 반영
             if questions:
-                prev_cnt = len(shared["question"])
-                shared["question"].extend(questions)
-                shared["options"].extend(options)
-                new_cnt = len(shared["question"])
+                # Optional TypedDict keys: use get/setdefault to satisfy type checker and avoid potential KeyError
+                prev_cnt = len(shared.get("question", []))
+                shared.setdefault("question", []).extend(questions)
+                shared.setdefault("options", []).extend(options)
+                new_cnt = len(shared.get("question", []))
 
                 added_count = len(questions)
                 end_index = start_index + added_count - 1
@@ -607,8 +611,9 @@ class Orchestrator:
             })
             
             if agent_result:
-                # 생성된 문제를 shared state에 추가
-                shared = new_state["shared"]
+                # 생성된 문제를 shared state에 추가 (ensure_shared로 존재하지만 타입 체커 경고 회피)
+                from typing import cast
+                shared = cast(SharedState, new_state.setdefault("shared", {}))
                 
                 # agent_result의 구조: {"success": True, "result": {...}}
                 if agent_result.get("success") and "result" in agent_result:

@@ -10,7 +10,7 @@ EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.8"))
 
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY가 .env에 설정되어야 합니다.")

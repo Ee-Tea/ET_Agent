@@ -319,6 +319,27 @@ def main():
             except Exception as e:
                 st.error(f"❌ 오류가 발생했습니다: {str(e)}")
                 st.code(traceback.format_exc())
+    
+    # 추가 예정 사항 섹션
+    st.divider()
+    st.subheader("🚀 추가 예정 사항")
+    
+    planned_features = [
+        "과목 입력 안했을 때 전과목 문제 만들기(과목별 전체 /5)",
+        "OCR 붙이기",
+        "HITL로 해설에 Retrieve 내용 추가 붙이기",
+        "숏텀 메모리 저장 방식 검토(중복검사 등등)",
+        "  ㄴ 현재 append-only",
+        "전체 오케스트레이터 구현(상관없는 질문 처리)",
+        "챗봇 답변 생성 추가",
+        "shared에 과목 저장되는 거 고치기"
+    ]
+    
+    for feature in planned_features:
+        if feature.startswith("  "):
+            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{feature}")
+        else:
+            st.markdown(f"• {feature}")
 
 if __name__ == "__main__":
     main()

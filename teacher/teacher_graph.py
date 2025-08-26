@@ -162,12 +162,16 @@ def has_files_to_preprocess(state: TeacherState) -> bool:
     # PDF 파일이 있으면 항상 전처리 수행 (새로운 파일이므로)
     pdf_ids = art.get("pdf_ids", [])
     
+    # 이미지 파일도 체크 (새로 추가)
+    image_ids = art.get("image_ids", [])
+    
     # 디버깅 로그 추가
     print(f"🔍 [전처리 체크] PDF 파일: {pdf_ids}")
-    result = bool(pdf_ids)
-    print(f"🔍 [전처리 체크] 결과: {result} (PDF 있음: {bool(pdf_ids)})")
+    print(f"🔍 [전처리 체크] 이미지 파일: {image_ids}")
+    result = bool(pdf_ids) or bool(image_ids)
+    print(f"🔍 [전처리 체크] 결과: {result} (PDF 있음: {bool(pdf_ids)}, 이미지 있음: {bool(image_ids)})")
     
-    # PDF 파일이 있으면 전처리 필요 (기존 문제 상관없이)
+    # PDF 또는 이미지 파일이 있으면 전처리 필요 (기존 문제 상관없이)
     return result
 
 # ========== Orchestrator ==========
@@ -176,6 +180,13 @@ class Orchestrator:
         load_dotenv()
         if not os.getenv("LANGCHAIN_API_KEY"):
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
+        
+        # 이미지 처리에 필요한 환경 변수 설정
+        if not os.getenv("OPENAI_VISION_MODEL"):
+            os.environ["OPENAI_VISION_MODEL"] = "o4-mini"  # 기본값 설정
+        if not os.getenv("MAX_OUTPUT_TOKENS"):
+            os.environ["MAX_OUTPUT_TOKENS"] = "1200"  # 기본값 설정
+        
         # TTL/길이 제한은 redis_memory.py에서 설정
         try:
             # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
@@ -247,6 +258,18 @@ class Orchestrator:
             current_artifacts["pdf_ids"] = pdf_filenames
             print(f"📁 사용자 지정 PDF 파일: {pdf_filenames}")
             print(f"🎯 이 파일들만 처리됩니다: {pdf_filenames}")
+
+        # 이미지 파일 경로 추출 (새로 추가)
+        extracted_images = self._extract_image_paths(uq)
+        if extracted_images:
+            image_filenames = []
+            for path in extracted_images:
+                filename = path.split('\\')[-1].split('/')[-1]  # Windows/Unix 경로 모두 처리
+                image_filenames.append(filename)
+            
+            current_artifacts["image_ids"] = image_filenames
+            print(f"🖼️ 사용자 지정 이미지 파일: {image_filenames}")
+            print(f"🎯 이 이미지들만 처리됩니다: {image_filenames}")
 
         # 문제 번호 범위 추출
         problem_range = extract_problem_range(uq)
@@ -362,11 +385,12 @@ class Orchestrator:
     @traceable(name="teacher.preprocess")  
     def preprocess(self, state: TeacherState) -> TeacherState:
         """
-        PDF 파일에서 문제 추출하는 전처리 노드
+        PDF 및 이미지 파일에서 문제 추출하는 전처리 노드
+        - 파일 종류에 따라 적절한 처리 방법 선택
         - 인덱스 기록을 'extend 이전' 길이로 고정해 올바른 범위를 남깁니다.
         - 불필요한 장황 로그를 줄였습니다.
         """
-        print("📄 PDF 문제 추출 전처리 노드 실행")
+        print("📄 PDF/이미지 문제 추출 전처리 노드 실행")
 
         artifacts = state.get("artifacts", {}) or {}
         file_mapper = FilePathMapper()
@@ -377,7 +401,35 @@ class Orchestrator:
             return state
 
         try:
-            extracted_problems = self._extract_problems_from_pdf(external_file_paths)
+            # 파일 종류별로 분류
+            pdf_files = []
+            image_files = []
+            
+            for file_path in external_file_paths:
+                if file_path.lower().endswith(('.pdf')):
+                    pdf_files.append(file_path)
+                elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')):
+                    image_files.append(file_path)
+                else:
+                    print(f"⚠️ 지원하지 않는 파일 형식: {file_path}")
+            
+            print(f"📁 PDF 파일: {len(pdf_files)}개, 이미지 파일: {len(image_files)}개")
+            
+            extracted_problems = []
+            
+            # PDF 파일 처리
+            if pdf_files:
+                print("📄 PDF 파일에서 문제 추출 중...")
+                pdf_problems = self._extract_problems_from_pdf(pdf_files)
+                extracted_problems.extend(pdf_problems or [])
+                print(f"📄 PDF에서 {len(pdf_problems or [])}개 문제 추출")
+            
+            # 이미지 파일 처리
+            if image_files:
+                print("🖼️ 이미지 파일에서 문제 추출 중...")
+                image_problems = self._extract_problems_from_images(image_files)
+                extracted_problems.extend(image_problems or [])
+                print(f"🖼️ 이미지에서 {len(image_problems or [])}개 문제 추출")
 
             new_state = ensure_shared({**state})
             shared = new_state["shared"]
@@ -417,7 +469,7 @@ class Orchestrator:
                 arts["pdf_added_start_index"] = start_index
                 arts["pdf_added_end_index"] = end_index
 
-                print(f"📄 PDF 문제를 shared state에 추가: {added_count}개")
+                print(f"📄 파일에서 문제를 shared state에 추가: {added_count}개")
                 print(f"📂 shared state 총 문제 수: {prev_cnt}개 → {new_cnt}개")
                 print(f"🔢 추가된 문제 인덱스: {start_index} ~ {end_index}")
             else:
@@ -426,9 +478,8 @@ class Orchestrator:
             return new_state
 
         except Exception as e:
-            print(f"❌ PDF 문제 추출 중 오류: {e}")
+            print(f"❌ 파일 문제 추출 중 오류: {e}")
             return state
-
 
     @traceable(name="teacher.solution")
     def solution(self, state: TeacherState) -> TeacherState:
@@ -1328,6 +1379,108 @@ class Orchestrator:
             except Exception as e:
                 print(f"[WARN] PDF 추출 실패({p}): {e}")
         return results
+
+    def _extract_problems_from_images(self, image_paths: List[str]) -> List[Dict]:
+        """이미지 파일에서 문제 추출 (img2json_generation 사용)"""
+        try:
+            # img2json_generation 모듈 import
+            from agents.solution.img2json_generation import call_gpt_on_images
+            
+            print(f"🖼️ 이미지에서 문제 추출 시작: {len(image_paths)}개 파일")
+            
+            # 이미지 파일 존재 여부 재확인
+            valid_paths = []
+            for path in image_paths:
+                if os.path.exists(path):
+                    valid_paths.append(path)
+                else:
+                    print(f"⚠️ 이미지 파일을 찾을 수 없음: {path}")
+            
+            if not valid_paths:
+                print("❌ 처리할 수 있는 이미지 파일이 없습니다.")
+                return []
+            
+            print(f"🖼️ 유효한 이미지 파일: {len(valid_paths)}개")
+            
+            # call_gpt_on_images 함수 호출
+            result = call_gpt_on_images(valid_paths)
+            
+            if not result or "problems" not in result:
+                print("⚠️ 이미지에서 문제를 추출하지 못했습니다.")
+                return []
+            
+            problems = result["problems"]
+            print(f"🖼️ 이미지에서 {len(problems)}개 문제 추출 성공")
+            
+            # img2json_generation의 결과를 teacher_graph 형식에 맞게 변환
+            converted_problems = []
+            skipped_count = 0
+            
+            for problem in problems:
+                if isinstance(problem, dict):
+                    # skipped 문제는 제외하되 카운트
+                    if problem.get("skipped", False):
+                        skipped_count += 1
+                        print(f"⚠️ 문제 {problem.get('number', 'N/A')} 건너뜀: {problem.get('reason', '이유 없음')}")
+                        continue
+                    
+                    # teacher_graph 형식으로 변환
+                    question = str(problem.get("question", "")).strip()
+                    options = problem.get("options", [])
+                    
+                    # options가 리스트가 아니면 변환
+                    if isinstance(options, str):
+                        options = [x.strip() for x in options.splitlines() if x.strip()]
+                    elif not isinstance(options, list):
+                        options = []
+                    
+                    # 빈 문제나 보기가 없는 문제는 제외
+                    if not question or not options:
+                        print(f"⚠️ 문제 {problem.get('number', 'N/A')} 건너뜀: 질문 또는 보기가 비어있음")
+                        continue
+                    
+                    converted_problem = {
+                        "question": question,
+                        "options": options
+                    }
+                    converted_problems.append(converted_problem)
+            
+            print(f"🖼️ 변환 완료: {len(converted_problems)}개 문제 (건너뜀: {skipped_count}개)")
+            return converted_problems
+            
+        except ImportError as e:
+            print(f"❌ img2json_generation 모듈을 불러올 수 없습니다: {e}")
+            print("💡 이미지 처리를 위해서는 agents.solution.img2json_generation 모듈이 필요합니다.")
+            return []
+        except Exception as e:
+            print(f"❌ 이미지 문제 추출 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _extract_image_paths(self, user_query: str) -> List[str]:
+        """사용자 입력에서 이미지 파일 경로 추출"""
+        import re
+        
+        # 이미지 파일 확장자 패턴
+        image_extensions = r'\.(jpg|jpeg|png|gif|bmp|tiff|webp)$'
+        
+        # 파일 경로 패턴 (절대 경로 또는 상대 경로)
+        path_pattern = r'["\']?([^"\s]+' + image_extensions + r')["\']?'
+        
+        matches = re.findall(path_pattern, user_query, re.IGNORECASE)
+        
+        # 실제 파일 존재 여부 확인
+        valid_paths = []
+        for match in matches:
+            path = match.strip('"\'')
+            if os.path.exists(path):
+                valid_paths.append(path)
+                print(f"🖼️ 이미지 파일 발견: {path}")
+            else:
+                print(f"⚠️ 이미지 파일을 찾을 수 없음: {path}")
+        
+        return valid_paths
 
     @traceable(name="teacher.retrieve")
     def retrieve(self, state: TeacherState) -> TeacherState:

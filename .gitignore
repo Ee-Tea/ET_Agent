@@ -1,3 +1,6 @@
+# AWS Milvus keys
+keys/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

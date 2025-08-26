@@ -121,11 +121,20 @@ class SolutionAgent(BaseAgent):
             explanation = metadata.get("explanation", "")
             subject = metadata.get("subject", "기타")
 
+            # 정답이 보기 번호(문자열)라면 해당 번호의 보기 텍스트를 찾아서 표시
+            answer_text = ""
+            try:
+                answer_idx = int(answer) - 1
+                if 0 <= answer_idx < len(options):
+                    answer_text = options[answer_idx]
+            except Exception:
+                answer_text = ""
+
             formatted = f"""[유사문제 {i+1}]
                 문제: {doc.page_content}
                 보기:
                 """ + "\n".join([f"{idx + 1}. {opt}" for idx, opt in enumerate(options)]) + f"""
-                정답: {answer}
+                정답: {answer} ({answer_text})
                 풀이: {explanation}
                 과목: {subject}
                 """
@@ -230,17 +239,45 @@ class SolutionAgent(BaseAgent):
         # 중복 문제 확인
         similar = vectorstore.similarity_search(state["user_problem"], k=1)
         if similar and state["user_problem"].strip() in similar[0].page_content:
-            print("⚠️ 동일한 문제가 존재하여 저장 생략")
+            existing_doc = similar[0]
+            # 기존 문서의 answer/explanation이 비어있으면 업데이트
+            updated = False
+            metadata = existing_doc.metadata.copy()
+            if not metadata.get("answer") and state["generated_answer"]:
+                metadata["answer"] = state["generated_answer"]
+                updated = True
+            if not metadata.get("explanation") and state["generated_explanation"]:
+                metadata["explanation"] = state["generated_explanation"]
+                updated = True
+            if not metadata.get("subject") and state["generated_subject"]:
+                metadata["subject"] = state["generated_subject"]
+                updated = True
+            if updated:
+                # Milvus는 일반적으로 문서 업데이트를 지원하지 않으므로, 삭제 후 재추가 방식 사용
+                vectorstore.delete([existing_doc.page_content])
+                doc = Document(
+                    page_content=state["user_problem"],
+                    metadata={
+                    "options": json.dumps(state.get("user_problem_options", [])), 
+                    "answer": metadata.get("answer", ""),
+                    "explanation": metadata.get("explanation", ""),
+                    "subject": metadata.get("subject", ""),
+                    }
+                )
+                vectorstore.add_documents([doc])
+                print("✅ 기존 문제의 빈 컬럼을 채워서 저장 완료")
+            else:
+                print("⚠️ 동일한 문제가 이미 존재하며, 모든 컬럼이 채워져 있어 저장 생략")
         else:
             # 문제, 해답, 풀이를 각각 metadata로 저장
             doc = Document(
-                page_content=state["user_problem"],
-                metadata={
-                    "options": json.dumps(state.get("user_problem_options", [])), 
-                    "answer": state["generated_answer"],
-                    "explanation": state["generated_explanation"],
-                    "subject": state["generated_explanation"],
-                }
+            page_content=state["user_problem"],
+            metadata={
+                "options": json.dumps(state.get("user_problem_options", [])), 
+                "answer": state["generated_answer"],
+                "explanation": state["generated_explanation"],
+                "subject": state["generated_subject"],
+            }
             )
             vectorstore.add_documents([doc])
             print("✅ 문제+해답+풀이 저장 완료")

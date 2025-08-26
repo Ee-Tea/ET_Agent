@@ -29,19 +29,19 @@ import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from common.short_term.redis_memory import RedisLangGraphMemory
 
-from agents.analysis.analysis_agent import AnalysisAgent
-from agents.score.score_engine import ScoreEngine as score_agent
-from agents.retrieve.retrieve_agent import retrieve_agent
+from .agents.analysis.analysis_agent import AnalysisAgent
+from .agents.score.score_engine import ScoreEngine as score_agent
+from .agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
-from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
-from agents.solution.solution_agent import SolutionAgent as solution_agent
-from teacher_nodes import (
+from .agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
+from .agents.solution.solution_agent import SolutionAgent as solution_agent
+from .teacher_nodes import (
     get_user_answer, parse_generator_input, user_intent,
     route_solution, route_score, route_analysis,
     mark_after_generator_solution, mark_after_solution_score, mark_after_score_analysis,
     post_generator_route, post_solution_route, post_score_route, post_analysis_route
 )
-from file_path_mapper import FilePathMapper
+from .file_path_mapper import FilePathMapper
 from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 from teacher_util import (
@@ -116,7 +116,7 @@ class Orchestrator:
             self.memory = SimpleMemory()
         
         # PDF 전처리기 초기화
-        from unified_pdf_preprocessor import UnifiedPDFPreprocessor
+        from .unified_pdf_preprocessor import UnifiedPDFPreprocessor
         self.pdf_preprocessor = UnifiedPDFPreprocessor()
         
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)

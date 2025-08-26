@@ -9,11 +9,15 @@ from langchain_huggingface import HuggingFaceEmbeddings
 import json, re
 from langchain_openai import ChatOpenAI
 from ..base_agent import BaseAgent
-from datetime import datetime
 
 
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 # ✅ 상태 정의
 class SolutionState(TypedDict):
@@ -56,9 +60,9 @@ class SolutionAgent(BaseAgent):
 
     def _llm(self, temperature: float = 0):
         return ChatOpenAI(
-            api_key=GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1",
-            model="moonshotai/kimi-k2-instruct",  # ✅ 통일된 모델
+            api_key=OPENAI_API_KEY,
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+            model=OPENAI_LLM_MODEL,  # ✅ 환경변수에서 가져온 모델
             temperature=temperature,
         )
 
@@ -264,7 +268,7 @@ class SolutionAgent(BaseAgent):
         
         return state
 
-    def execute(
+    def invoke(
             self, 
             user_input_txt: str,
             user_problem: str,

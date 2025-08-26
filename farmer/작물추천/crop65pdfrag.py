@@ -1,219 +1,611 @@
 import os
-from glob import glob
-from typing import List, Any, TypedDict
 import json
-import hashlib
+from typing import TypedDict, Optional, Any, Dict, List
+from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
+import math
+import re  # 지역 추출/품질 검사
 
-from dotenv import load_dotenv
-load_dotenv()
-
-# === 설정 ===
-PDF_DIR = os.getenv("PDF_DIR", "./cropinfo")
-VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "faiss_pdf_db")
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "900"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
-
-# === LangChain ===
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.runnables.graph import MermaidDrawMethod
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-
-# === LangGraph ===
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, END
-from langchain_core.documents import Document
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
 
-# === 신규/변경 파일만 처리하기 위한 유틸 ===
-MANIFEST_FILE = "manifest.json"
+# ──────────────────────────────────────────────────────────────────────────────
+# 환경 변수 로드
+# ──────────────────────────────────────────────────────────────────────────────
+load_dotenv(find_dotenv())
 
-def _abs(p: str) -> str:
-    return str(Path(p).resolve())
+# ──────────────────────────────────────────────────────────────────────────────
+# 실행 경로 설정 (__file__ 없는 환경 대비)
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    BASE_DIR = Path(__file__).resolve().parent
+except NameError:
+    BASE_DIR = Path.cwd()
 
-def _sha256_file(path: str, buf_size: int = 1 << 20) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            b = f.read(buf_size)
-            if not b:
-                break
-            h.update(b)
-    return h.hexdigest()
+VECTOR_DB_PATH = Path("faiss_pdf_db")
+CHAT_HISTORY_PATH = Path("chat_history.json")
 
-def _manifest_path(db_path: str) -> str:
-    return os.path.join(db_path, MANIFEST_FILE)
+# ──────────────────────────────────────────────────────────────────────────────
+# 임베딩 및 벡터스토어 설정
+# ──────────────────────────────────────────────────────────────────────────────
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
+embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
 
-def _load_manifest(db_path: str) -> dict:
-    try:
-        with open(_manifest_path(db_path), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        return {}
+# ──────────────────────────────────────────────────────────────────────────────
+# API 키 및 게이트/품질 파라미터
+# ──────────────────────────────────────────────────────────────────────────────
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
+os.environ["TAVILY_API_KEY"] = os.getenv("TAVILY_API_KEY")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+os.environ["COHERE_API_KEY"] = COHERE_API_KEY
 
-def _save_manifest(db_path: str, manifest: dict) -> None:
-    os.makedirs(db_path, exist_ok=True)
-    with open(_manifest_path(db_path), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
+# 유사도 게이트 & 품질 규칙 (환경변수로 조절 가능)
+ANSWER_CONTEXT_SIM_THRESHOLD = float(os.getenv("ANSWER_CONTEXT_SIM_THRESHOLD", "0.8"))
+QUALITY_MIN_CHARS = int(os.getenv("QUALITY_MIN_CHARS", "80"))
+QUALITY_REQUIRE_KOREAN = bool(int(os.getenv("QUALITY_REQUIRE_KOREAN", "1")))
+QUALITY_MIN_OVERLAP = float(os.getenv("QUALITY_MIN_OVERLAP", "0.03"))
+QUALITY_MIN_LINES_IF_CONTEXT_LONG = int(os.getenv("QUALITY_MIN_LINES_IF_CONTEXT_LONG", "2"))
+CONTEXT_LONG_CHARS = int(os.getenv("CONTEXT_LONG_CHARS", "400"))
 
-# === Graph State 정의 ===
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY가 .env에 설정되어야 합니다.")
+if not os.getenv("TAVILY_API_KEY"):
+    raise ValueError("TAVILY_API_KEY가 .env에 설정되어야 합니다.")
+
+print(f"🔧 GROQ_MODEL={GROQ_MODEL}, TEMPERATURE={TEMPERATURE}")
+try:
+    print(f"📦 VECTOR_DB_PATH={VECTOR_DB_PATH.resolve()}")
+except Exception:
+    print(f"📦 VECTOR_DB_PATH={VECTOR_DB_PATH}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 프롬프트 정의
+# ──────────────────────────────────────────────────────────────────────────────
+RAG_PROMPT_TMPL = """
+당신은 대한민국 농업 작물 재배 방법 전문가입니다.
+아래 '문맥'과 '대화 기록'만 사용해 질문에 답하세요.
+
+[대화 기록]
+{chat_history}
+
+[문맥]
+{context}
+
+규칙:
+- 문맥에 없는 정보/추측/한자 금지.
+- 한글로만 작성.
+- 단계/설명은 "한 문장씩 줄바꿈".
+- **만약 주어진 문맥에 답변할 정보가 전혀 없다면, 반드시 '정보 부족'이라고만 응답하세요. 다른 부가적인 설명은 금지합니다.**
+
+질문: {question}
+답변:
+"""
+rag_prompt = ChatPromptTemplate.from_template(RAG_PROMPT_TMPL)
+
+WEB_SEARCH_PROMPT_TMPL = """
+당신은 대한민국 농업 관련 지식과 일반 상식에 해박한 전문가입니다.
+아래 '대화 기록'과 '검색 결과'를 바탕으로 '질문'에 대해 한국어로 명확하고 간결하게 답변하세요.
+
+규칙:
+- 검색 결과가 충분치 않거나 없는 경우 '죄송합니다. 현재 제공해 드릴 수 있는 정보가 없습니다.'라고 답변하세요.
+- 불필요한 서론/결론 없이 답변만 제공.
+- 매 답변의 마지막에 항상 사용자의 다음 질문을 유도하는 긍정적이고 개방적인 질문을 추가하세요.
+
+[대화 기록]
+{chat_history}
+
+[검색 결과]
+{search_results}
+
+질문: {question}
+답변:
+"""
+web_search_prompt = PromptTemplate.from_template(WEB_SEARCH_PROMPT_TMPL)
+
+QUERY_EXPANSION_PROMPT_TMPL = """
+아래 '대화 기록'과 '질문'을 바탕으로,
+웹 검색에 최적화된 검색 질의(query)를 생성해 주세요.
+
+[대화 기록]
+{chat_history}
+
+질문: {question}
+
+생성할 검색 질의는 한 문장으로, 30자 이내로 작성하세요.
+"""
+query_expansion_prompt = ChatPromptTemplate.from_template(QUERY_EXPANSION_PROMPT_TMPL)
+
+QUESTION_TYPE_PROMPT_TMPL = """
+당신은 사용자의 질문 의도를 정확하게 파악하는 시스템입니다.
+'대화 기록'과 '질문'을 기반으로, 가장 적합한 질문 유형을 아래 세 가지 중 하나로 분류하세요.
+'context', 'crop', 'general' 중 하나의 단어만 반환해야 합니다. 다른 부가적인 설명은 금지합니다.
+
+- **context**: 현재 질문이 **직전 대화의 주제**에 대해 더 자세한 정보나 추가적인 비교를 요청하는 경우.
+  (예: "그러면 과일이랑도 비교해 줘", "더 자세한 정보 알려줘", "그거 말고 다른 건 없어?")
+- **crop**: 질문이 **농업 작물 재배 방법**에 대한 구체적인 정보를 요청하는 경우. 이는 대화의 첫 질문일 수도 있고, 대화 중 주제가 변경된 경우에도 해당합니다.
+  (예: "가지 재배 방법 알려줘", "농약은 어떻게 써?", "고추 키우는 법은?")
+- **general**: 위 두 가지에 해당하지 않는, **농업과 관련 없는** 완전히 새로운 주제의 일반적인 질문.
+  (예: "24시간이 몇 초야?", "서울의 날씨는?")
+
+[대화 기록]
+{chat_history}
+
+질문: {question}
+답변:
+"""
+question_type_prompt = ChatPromptTemplate.from_template(QUESTION_TYPE_PROMPT_TMPL)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 상태 정의
+# ──────────────────────────────────────────────────────────────────────────────
 class GraphState(TypedDict):
-    """
-    RAG 인덱스 빌드 그래프의 상태를 나타내는 클래스.
-    """
-    documents: List[Document]
-    splits: List[Document]
-    error: str
+    question: Optional[str]
+    chat_history: List[BaseMessage]
+    vectorstore: Optional[Any]
+    context: Optional[str]
+    answer: Optional[str]
+    question_type: Optional[str]
+    rewritten_query: Optional[str]
+    previous_question_type: Optional[str]
+    # 추가
+    awaiting_region: Optional[bool]
+    user_region: Optional[str]
 
-# === 단계별 노드 함수 ===
-def load_all_pdfs_node(state: GraphState) -> GraphState:
-    """
-    PDF 파일을 로드하고, 변경된 파일만 식별하여 상태에 저장하는 노드.
-    """
-    print("📥 [1/4] PDF 로드 단계 시작")
-    paths = sorted(glob(os.path.join(PDF_DIR, "*.pdf")))
-    if not paths:
-        return {"error": f"PDF가 없습니다: {PDF_DIR}"}
-    print(f"📂 총 파일 수: {len(paths)}")
-
-    manifest = _load_manifest(VECTOR_DB_PATH)
-    all_docs = []
-    skipped, to_process = 0, 0
-
-    for idx, p in enumerate(paths, start=1):
-        abs_path = _abs(p)
-        try:
-            file_hash = _sha256_file(abs_path)
-
-            if manifest.get(abs_path, {}).get("sha256") == file_hash:
-                skipped += 1
-                print(f"[{idx}/{len(paths)}] ⏭️ 변경 없음: {os.path.basename(p)} (skip)")
-                continue
-
-            print(f"[{idx}/{len(paths)}] 📥 파일 로드 중: {os.path.basename(p)}")
-            docs = PyPDFLoader(abs_path).load()
-
-            for d in docs:
-                d.metadata["source"] = abs_path
-                d.metadata["file_sha256"] = file_hash
-
-            all_docs.extend(docs)
-            to_process += 1
-            print(f"    ✅ 로드 완료 (pages={len(docs)})")
-        except Exception as e:
-            print(f"[{idx}/{len(paths)}] ❗ 로드 실패: {p} -> {e}")
-            return {"error": f"파일 로드 실패: {p} -> {e}"}
-
-    print(f"📚 총 페이지 문서 수: {len(all_docs)}")
-    print(f"⏭️ 스킵: {skipped}개, ⏳ 신규/변경: {to_process}개")
-    print("📥 [1/4] PDF 로드 단계 완료")
-    return {"documents": all_docs, "splits": []}
-
-def split_documents_node(state: GraphState) -> GraphState:
-    """
-    로드된 문서를 청크로 분할하여 상태에 저장하는 노드.
-    """
-    print("✂️ [2/4] 문서 분할 단계 시작")
-    documents = state.get("documents", [])
-    if not documents:
-        print("⏭️ 분할할 문서가 없습니다.")
-        return {"splits": []}
-    
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len
-    )
-    splits = splitter.split_documents(documents)
-    print(f"✂️ 청크 수: {len(splits)}")
-    print("✂️ [2/4] 문서 분할 단계 완료")
-    return {"splits": splits}
-
-def build_or_update_faiss_node(state: GraphState) -> GraphState:
-    """
-    분할된 청크를 임베딩하고 FAISS 인덱스를 생성/갱신하는 노드.
-    """
-    print("🧮 [3/4] 임베딩 & 인덱스 생성 단계 시작")
-    splits = state.get("splits", [])
-    if not splits:
-        print("⏭️ 임베딩할 청크가 없습니다.")
-        return {}
-
-    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
-    
-    if os.path.exists(VECTOR_DB_PATH):
-        print(f"📦 기존 인덱스 로드: {VECTOR_DB_PATH}")
-        vs = FAISS.load_local(VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
-    else:
-        print("🧱 새 인덱스 생성 중…")
-        vs = None
-
-    file_map = {}
-    for s in splits:
-        fname = s.metadata.get("source", "unknown.pdf")
-        file_map.setdefault(fname, []).append(s)
-
-    file_list = list(file_map.items())
-    total_files = len(file_list)
-
-    for idx, (fname, file_splits) in enumerate(file_list, start=1):
-        chunks = len(file_splits)
-        pages = len({sp.metadata.get("page") for sp in file_splits if "page" in sp.metadata})
-
-        if vs:
-            vs.add_documents(file_splits)
-        else:
-            vs = FAISS.from_documents(file_splits, embeddings)
-
-        print(f"[{idx}/{total_files}] ✅ {os.path.basename(fname)} 임베딩 완료 "
-              f"(pages={pages if pages else 'N/A'}, chunks={chunks})")
-
-    if vs:
-        vs.save_local(VECTOR_DB_PATH)
-    print(f"💾 최종 인덱스 저장 완료: {VECTOR_DB_PATH}")
-
-    manifest = _load_manifest(VECTOR_DB_PATH)
-    for fname, file_splits in file_list:
-        sha = next((sp.metadata.get("file_sha256") for sp in file_splits if "file_sha256" in sp.metadata), None)
-        if sha:
-            manifest[_abs(fname)] = {"sha256": sha}
-    _save_manifest(VECTOR_DB_PATH, manifest)
-
-    total_pages = sum(len({sp.metadata.get("page") for sp in fs if "page" in sp.metadata})
-                      for _, fs in file_list)
-    total_chunks = sum(len(fs) for _, fs in file_list)
-    print(f"📊 전체 결과: 파일={total_files}, 페이지={total_pages}, 청크={total_chunks}")
-    print("🧮 [3/4] 임베딩 & 인덱스 생성 단계 완료")
-    return {}
-
-# === 그래프 빌드 함수 ===
-def build_graph():
-    """
-    LangGraph를 사용하여 인덱스 빌드 워크플로우를 정의하고 반환합니다.
-    """
-    graph = StateGraph(GraphState)
-    graph.add_node("load_all_pdfs", load_all_pdfs_node)
-    graph.add_node("split_documents", split_documents_node)
-    graph.add_node("build_or_update_faiss", build_or_update_faiss_node)
-
-    graph.add_edge("load_all_pdfs", "split_documents")
-    graph.add_edge("split_documents", "build_or_update_faiss")
-    graph.add_edge("build_or_update_faiss", END)
-
-    graph.set_entry_point("load_all_pdfs")
-    return graph.compile()
-
-# === 메인 실행 로직 ===
-if __name__ == "__main__":
-    app = build_graph()
-    
-    # ── 그래프 시각화 ───────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 공통 함수
+# ──────────────────────────────────────────────────────────────────────────────
+def load_vectorstore(db_path: str) -> Any:
     try:
-        from langgraph.graph import MermaidDrawMethod
-        graph_image_path = Path(".") / "index_build_graph.png"
-        png_bytes = app.get_graph().draw_mermaid_png(
-            draw_method=MermaidDrawMethod.API
+        return FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
+    except Exception as e:
+        print(f"❌ 벡터스토어 로드 실패: {e}")
+        return None
+
+def make_llm() -> ChatGroq:
+    return ChatGroq(model_name=GROQ_MODEL, temperature=TEMPERATURE, api_key=GROQ_API_KEY)
+
+def format_chat_history(history: List[BaseMessage]) -> str:
+    formatted_history = ""
+    for message in history:
+        if isinstance(message, HumanMessage):
+            formatted_history += f"사용자: {message.content}\n"
+        elif isinstance(message, AIMessage):
+            formatted_history += f"AI: {message.content}\n"
+    return formatted_history
+
+# ──────────────────────────────────────────────────────────────────────────────
+# (추가) 코사인 유사도 & 품질 유틸
+# ──────────────────────────────────────────────────────────────────────────────
+def cosine(u: List[float], v: List[float]) -> float:
+    dot = sum(ux * vx for ux, vx in zip(u, v))
+    nu = math.sqrt(sum(ux * ux for ux in u))
+    nv = math.sqrt(sum(vx * vx for vx in v))
+    if nu == 0.0 or nv == 0.0:
+        return 0.0
+    return dot / (nu * nv)
+
+def print_cosine_similarities(query_text: str, docs: List[Any], max_docs: int = 5):
+    if not docs:
+        return
+    print("\n🧮 코사인 유사도 정의: cos(u, v) = (u·v) / (||u||·||v||)")
+    try:
+        q_vec = embeddings.embed_query(query_text)
+        doc_texts = [d.page_content for d in docs[:max_docs]]
+        doc_vecs = embeddings.embed_documents(doc_texts)
+        print("📏 코사인 유사도(질문 vs. 문서 상위 {}개):".format(len(doc_vecs)))
+        for doc, dv in zip(docs[:max_docs], doc_vecs):
+            cs = cosine(q_vec, dv)
+            src = doc.metadata.get("source")
+            print(f"  - cos_sim={cs:.4f} | source:{src} | {doc.page_content[:100]}...")
+    except Exception as e:
+        print(f"⚠️ 코사인 유사도 계산 중 오류: {e}")
+
+def compute_answer_context_similarity_texts(context_text: str, answer_text: str) -> float:
+    try:
+        ctx = context_text[:1500]
+        ans = answer_text[:1500]
+        v_ctx = embeddings.embed_query(ctx)
+        v_ans = embeddings.embed_query(ans)
+        sim = cosine(v_ctx, v_ans)
+        print(f"🧮 context-답변 코사인 유사도 = {sim:.4f}  (threshold={ANSWER_CONTEXT_SIM_THRESHOLD})")
+        return sim
+    except Exception as e:
+        print(f"⚠️ context-답변 유사도 계산 중 오류: {e}")
+        return 0.0
+
+_token_re = re.compile(r"[가-힣A-Za-z0-9]+")
+REGION_RE = re.compile(
+    r"(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주|"
+    r"[가-힣]{2,10}(시|군|구)|[가-힣]{2,10}(읍|면|동))"
+)
+
+def _simple_tokens(text: str) -> List[str]:
+    return [t for t in _token_re.findall(text or "") if len(t) > 1]
+
+def extract_region_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = REGION_RE.search(text)
+    return m.group(0) if m else None
+
+def question_needs_region(text: str) -> bool:
+    if not text:
+        return False
+    t = text.replace(" ", "")
+    keys = ["어디서", "어디에", "판매", "팔수", "직판", "납품", "도매시장", "로컬푸드"]
+    return any(k in t for k in keys)
+
+def assess_answer_quality(answer: str, context: str, question: str) -> Dict[str, Any]:
+    ans = (answer or "").strip()
+    ctx = (context or "").strip()
+    reasons = []
+    metrics: Dict[str, Any] = {}
+
+    metrics["length"] = len(ans)
+    if len(ans) < QUALITY_MIN_CHARS:
+        reasons.append(f"too_short(<{QUALITY_MIN_CHARS})")
+
+    has_korean = bool(re.search(r"[가-힣]", ans))
+    metrics["has_korean"] = has_korean
+    if QUALITY_REQUIRE_KOREAN and not has_korean:
+        reasons.append("no_korean")
+
+    ans_tokens = set(_simple_tokens(ans))
+    ctx_tokens = set(_simple_tokens(ctx))
+    overlap = 0.0
+    if ans_tokens:
+        overlap = len(ans_tokens & ctx_tokens) / max(1, len(ans_tokens))
+    metrics["overlap_ratio"] = round(overlap, 4)
+    if ctx and overlap < QUALITY_MIN_OVERLAP:
+        reasons.append(f"low_term_overlap(<{QUALITY_MIN_OVERLAP})")
+
+    line_count = len([ln for ln in ans.splitlines() if ln.strip()])
+    metrics["line_count"] = line_count
+    if len(ctx) >= CONTEXT_LONG_CHARS and line_count < QUALITY_MIN_LINES_IF_CONTEXT_LONG:
+        reasons.append(f"too_few_lines(<{QUALITY_MIN_LINES_IF_CONTEXT_LONG})")
+
+    ok = len(reasons) == 0
+    print(f"🧪 품질 평가: ok={ok} | metrics={metrics} | reasons={reasons}")
+    return {"ok": ok, "reasons": reasons, "metrics": metrics}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LangGraph 노드
+# ──────────────────────────────────────────────────────────────────────────────
+def load_vs_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 벡터스토어 로드")
+    vs = load_vectorstore(VECTOR_DB_PATH.as_posix())
+    return {**state, "vectorstore": vs}
+
+def classify_question_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 질문 유형 분류")
+    question = state["question"]
+    chat_history = state.get("chat_history", [])
+    formatted_chat_history = format_chat_history(chat_history)
+
+    prev_type = state.get("question_type")
+
+    chain = question_type_prompt | make_llm() | StrOutputParser()
+    try:
+        result = chain.invoke({"question": question, "chat_history": formatted_chat_history}).strip().lower()
+        # 판매/어디서 계열은 웹검색 친화 → general로 보정
+        if question_needs_region(question):
+            result = "general"
+        if result not in ['crop', 'general', 'context']:
+            result = 'general'
+        print(f"LLM이 판단한 질문 유형: {result}")
+    except Exception as e:
+        print(f"❌ LLM 질문 분류 실패, 기본값(general)으로 설정: {e}")
+        result = 'general'
+    return {**state, "previous_question_type": prev_type, "question_type": result}
+
+def check_location_node(state: GraphState) -> Dict[str, Any]:
+    """지역이 필요한데 없으면 먼저 지역을 물어본다."""
+    print("🧩 노드: 지역 필요 여부 확인")
+    q = state["question"] or ""
+    chat_history = state.get("chat_history", [])
+    hist_text = format_chat_history(chat_history)
+    region = extract_region_from_text(q) or extract_region_from_text(hist_text)
+
+    needs = question_needs_region(q)
+    print(f"지역 추출: region={region} | needs_region={needs}")
+
+    if needs and not region:
+        ask = (
+            "판매 채널은 지역에 따라 달라요.\n"
+            "어느 지역(시/군/구)에서 판매하시나요?\n"
+            "예: '경기 용인시 수지구', '광주 북구', '경남 김해시'"
         )
+        return {**state, "answer": ask, "awaiting_region": True, "user_region": None}
+    return {**state, "awaiting_region": False, "user_region": region}
+
+def retrieve_and_generate_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: Auto-RAG 검색 및 답변 생성")
+    vs = state.get("vectorstore")
+    if not vs:
+        return {**state, "answer": "벡터스토어를 찾을 수 없습니다."}
+
+    q = state["question"] or ""
+    # 지역이 있다면 질문에 주입해 검색 힌트 강화
+    if state.get("user_region"):
+        q = f"{q} (판매 지역: {state['user_region']})"
+
+    chat_history = state.get("chat_history", [])
+    formatted_chat_history = format_chat_history(chat_history)
+
+    base_retriever = vs.as_retriever(search_kwargs={"k": 12})
+    multi_query_retriever = MultiQueryRetriever.from_llm(
+        retriever=base_retriever,
+        llm=make_llm()
+    )
+
+    try:
+        from langchain_cohere import CohereRerank
+        compressor = CohereRerank(model="rerank-multilingual-v3.0")
+        compression_retriever = ContextualCompressionRetriever(
+            base_compressor=compressor,
+            base_retriever=multi_query_retriever
+        )
+
+        retrieval_query = q if state["question_type"] != 'context' else (formatted_chat_history + "\n" + q)
+        print("🔍 멀티 쿼리 + Rerank 검색...")
+        retrieved_docs = compression_retriever.invoke(retrieval_query)
+
+        SCORE_THRESHOLD = 0.6
+        filtered_docs = [d for d in retrieved_docs if d.metadata.get('relevance_score', 0) >= SCORE_THRESHOLD]
+        if not filtered_docs and retrieved_docs:
+            print("⚠️ 상향 완화: 필터 실패 → 상위 5개 사용")
+            filtered_docs = retrieved_docs[:5]
+
+        seen = set()
+        unique_docs = []
+        for d in filtered_docs:
+            src = d.metadata.get("source")
+            if src in seen:
+                continue
+            seen.add(src)
+            unique_docs.append(d)
+        filtered_docs = unique_docs[:5]
+
+        if not filtered_docs:
+            print("❌ 필터링 문서 없음 → '정보 부족'")
+            return {**state, "context": "", "answer": "정보 부족"}
+
+        print("\n💡 참고한 문서와 점수:")
+        for doc in filtered_docs:
+            score = doc.metadata.get('relevance_score', 0)
+            source = doc.metadata.get('source')
+            page = doc.metadata.get('page')
+            print(f"  - 점수:{score:.4f} | source:{source} | page:{page} | 내용:{doc.page_content[:100]}...")
+        print("-----------------------------------")
+
+        print_cosine_similarities(retrieval_query, filtered_docs)
+
+        ctx = "\n\n".join([doc.page_content for doc in filtered_docs])
+        if not ctx.strip():
+            return {**state, "context": "", "answer": "정보 부족"}
+
+        chain = rag_prompt | make_llm() | StrOutputParser()
+        ans = chain.invoke({"context": ctx, "question": q, "chat_history": formatted_chat_history})
+        return {**state, "context": ctx, "answer": ans}
+
+    except ImportError:
+        print("⚠️ CohereRerank 미사용: 기본 검색")
+        retrieved_docs = multi_query_retriever.invoke(q)
+        if not retrieved_docs:
+            return {**state, "context": "", "answer": "정보 부족"}
+
+        print_cosine_similarities(q, retrieved_docs)
+
+        ctx = "\n\n".join([d.page_content for d in retrieved_docs])
+        if not ctx.strip():
+            return {**state, "context": "", "answer": "정보 부족"}
+        chain = rag_prompt | make_llm() | StrOutputParser()
+        ans = chain.invoke({"context": ctx, "question": q, "chat_history": formatted_chat_history})
+        return {**state, "context": ctx, "answer": ans}
+
+def rewrite_query_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 질문 확장")
+    question = state["question"]
+    chat_history = state.get("chat_history", [])
+    region = state.get("user_region")
+
+    if state["question_type"] == 'general':
+        formatted_chat_history = ""
+    else:
+        formatted_chat_history = format_chat_history(chat_history)
+
+    q_for_expand = question
+    if region and region not in q_for_expand:
+        q_for_expand = f"{q_for_expand} (판매 지역: {region})"
+    print("🔍 대화 기록 참고 여부:", "없음" if state["question_type"] == 'general' else "있음")
+
+    chain = query_expansion_prompt | make_llm() | StrOutputParser()
+    try:
+        rewritten_query = chain.invoke({"question": q_for_expand, "chat_history": formatted_chat_history}).strip()
+        if len(rewritten_query) < 10:
+            rewritten_query = q_for_expand
+        print(f"✅ 확장된 검색 질의: {rewritten_query}")
+    except Exception as e:
+        print(f"❌ 질문 확장 실패: {e}")
+        rewritten_query = q_for_expand
+
+    return {**state, "rewritten_query": rewritten_query}
+
+def web_search_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 웹 검색")
+    query = state.get("rewritten_query", state["question"])
+    region = state.get("user_region")
+    if region and region not in query:
+        query = f"{query} (판매 지역: {region})"
+
+    chat_history = state.get("chat_history", [])
+    tavily_tool = TavilySearchResults(max_results=5)
+
+    formatted_chat_history = "" if state["question_type"] == 'general' else format_chat_history(chat_history)
+
+    print(f"🔍 웹 검색 수행 중... (질의: {query})")
+    try:
+        search_results = tavily_tool.invoke({"query": query, "search_depth": "advanced"})
+        if not search_results:
+            print("⚠️ 1차 결과 없음 → basic로 재시도")
+            search_results = tavily_tool.invoke({"query": query})
+
+        if not search_results:
+            print("⚠️ 웹 검색 결과가 없습니다.")
+            return {**state, "answer": "죄송합니다. 현재 제공해 드릴 수 있는 정보가 없습니다."}
+
+        search_results_str = "\n".join([str(res) for res in search_results])
+
+    except Exception as e:
+        print(f"❌ 웹 검색 오류 발생: {e}")
+        return {**state, "answer": "웹 검색 중 오류가 발생했습니다."}
+
+    print("💡 웹 검색 결과를 바탕으로 답변 생성 중...")
+    chain = web_search_prompt | make_llm() | StrOutputParser()
+    web_answer = chain.invoke({
+        "search_results": search_results_str,
+        "question": query,
+        "chat_history": formatted_chat_history
+    })
+    return {**state, "answer": web_answer}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 조건부 라우팅
+# ──────────────────────────────────────────────────────────────────────────────
+def decide_route_from_type(state: GraphState) -> str:
+    qtype = state.get("question_type")
+    print("🧩 노드: 경로 결정 (질문 유형) =", qtype)
+    if qtype == "general":
+        return "rewrite_query"
+    return "retrieve_and_generate"
+
+def decide_after_location(state: GraphState) -> str:
+    """지역 확인 이후 분기: 지역 대기면 ask_region, 아니면 유형대로 진행"""
+    if state.get("awaiting_region"):
+        return "ask_region"
+    return decide_route_from_type(state)
+
+def decide_route_from_retrieve(state: GraphState) -> str:
+    print("🧩 노드: 경로 결정 (DB 검색 결과)")
+    answer = (state.get("answer") or "").strip()
+    ctx = (state.get("context") or "").strip()
+
+    if ("정보 부족" in answer) or ("벡터스토어를 찾을 수 없습니다" in answer) or (not ctx):
+        print("결정: 내부 DB 부족/컨텍스트 없음 → 질문 확장 후 웹검색 진행")
+        return "rewrite_query"
+
+    try:
+        sim = compute_answer_context_similarity_texts(ctx, answer)
+        if sim < ANSWER_CONTEXT_SIM_THRESHOLD:
+            print(f"결정: context-답변 유사도 미달 ({sim:.4f} < {ANSWER_CONTEXT_SIM_THRESHOLD}) → 웹검색 경로")
+            return "rewrite_query"
+    except Exception as e:
+        print(f"⚠️ 유사도 게이트 오류: {e} → 안전하게 웹검색 경로")
+        return "rewrite_query"
+
+    qres = assess_answer_quality(answer, ctx, state.get("question", ""))
+    if not qres["ok"]:
+        print(f"결정: 품질 기준 미달({qres['reasons']}) → 웹검색 경로")
+        return "rewrite_query"
+
+    print("결정: 유사도/품질 기준 통과 → 종료")
+    return "end"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 그래프 빌드
+# ──────────────────────────────────────────────────────────────────────────────
+def build_graph():
+    g = StateGraph(GraphState)
+    g.add_node("load_vs", load_vs_node)
+    g.add_node("classify_question", classify_question_node)
+    g.add_node("check_location", check_location_node)
+    g.add_node("retrieve_and_generate", retrieve_and_generate_node)
+    g.add_node("rewrite_query", rewrite_query_node)
+    g.add_node("web_search", web_search_node)
+
+    g.set_entry_point("load_vs")
+    g.add_edge("load_vs", "classify_question")
+    g.add_edge("classify_question", "check_location")
+
+    # 지역 확인 후: ask_region → END / 아니면 질문 유형에 맞게
+    g.add_conditional_edges(
+        "check_location",
+        decide_after_location,
+        {
+            "ask_region": END,
+            "retrieve_and_generate": "retrieve_and_generate",
+            "rewrite_query": "rewrite_query",
+        },
+    )
+
+    g.add_conditional_edges(
+        "retrieve_and_generate",
+        decide_route_from_retrieve,
+        {"end": END, "rewrite_query": "rewrite_query"}
+    )
+
+    g.add_edge("rewrite_query", "web_search")
+    g.add_edge("web_search", END)
+
+    return g.compile()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# JSON 파일 관련 (대화 기록)
+# ──────────────────────────────────────────────────────────────────────────────
+def load_chat_history() -> List[BaseMessage]:
+    if CHAT_HISTORY_PATH.exists():
+        try:
+            with open(CHAT_HISTORY_PATH, "r", encoding="utf-8") as f:
+                history_data = json.load(f)
+            chat_history = []
+            for item in history_data:
+                if item["role"] == "user":
+                    chat_history.append(HumanMessage(content=item["content"]))
+                elif item["role"] == "assistant":
+                    chat_history.append(AIMessage(content=item["content"]))
+            print(f"✅ 기존 대화 기록 ({len(chat_history)}개)을 로드했습니다.")
+            return chat_history
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"❌ 대화 기록 파일 로드 오류: {e}. 새 대화를 시작합니다.")
+    return []
+
+def save_chat_history(history: List[BaseMessage]):
+    try:
+        history_data = []
+        for message in history:
+            if isinstance(message, HumanMessage):
+                history_data.append({"role": "user", "content": message.content})
+            elif isinstance(message, AIMessage):
+                history_data.append({"role": "assistant", "content": message.content})
+        with open(CHAT_HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(history_data, f, ensure_ascii=False, indent=4)
+        print("✅ 대화 기록을 'chat_history.json' 파일에 저장했습니다.")
+    except Exception as e:
+        print(f"❌ 대화 기록 저장 오류: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 메인 실행
+# ──────────────────────────────────────────────────────────────────────────────
+def main():
+    print("🚀 LangGraph 기반의 Auto-RAG 시스템을 시작합니다.")
+    app = build_graph()
+    chat_history: List[BaseMessage] = load_chat_history()
+
+    # 그래프 시각화 (PNG 실패 시 ASCII + Mermaid 소스 저장)
+    try:
+        graph_image_path = BASE_DIR / "agent_workflow_llm.png"
+        png_bytes = app.get_graph().draw_mermaid_png(draw_method=MermaidDrawMethod.API)
         with open(graph_image_path, "wb") as f:
             f.write(png_bytes)
         print(f"\n✅ LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
@@ -224,19 +616,70 @@ if __name__ == "__main__":
             print("\n[ASCII Graph]")
             print(ascii_map)
             mermaid_src = app.get_graph().draw_mermaid()
-            mmd_path = Path(".") / "index_build_graph.mmd"
+            mmd_path = BASE_DIR / "agent_workflow.mmd"
             with open(mmd_path, "w", encoding="utf-8") as f:
                 f.write(mermaid_src)
             print(f"📝 Mermaid 소스를 '{mmd_path}'로 저장했습니다. (mermaid.live 등에서 렌더 가능)")
         except Exception as e2:
             print(f"추가 백업도 실패: {e2}")
-    # ───────────────────────────────────────────────────────────
 
-    initial_state = {"documents": [], "splits": [], "error": None}
-    print("\n🚀 인덱스 빌드 프로세스 시작")
-    final_state = app.invoke(initial_state)
+    # 지역 입력 대기 상태 관리 (간단한 메모리 변수)
+    pending_need_region = False
+    pending_base_question = ""
 
-    if final_state.get("error"):
-        print(f"❗ 그래프 실행 중 오류 발생: {final_state['error']}")
-    else:
-        print(f"🎉 [4/4] 전체 인덱스 빌드 완료 (저장 경로: {VECTOR_DB_PATH})")
+    while True:
+        print("\n" + "="*50)
+        q = input("질문 > ").strip()
+        print("="*50 + "\n")
+
+        if q.lower() in ("exit", "quit"):
+            save_chat_history(chat_history)
+            print("👋 프로그램을 종료합니다. 대화 기록이 저장되었습니다.")
+            break
+        if not q:
+            continue
+
+        try:
+            # 직전 턴에서 지역을 물었다면, 이번 입력을 지역으로 간주해 재조합
+            if pending_need_region:
+                region = q
+                # 이전 질문에 지역을 주입해 보다 구체적으로 재질문
+                combined_q = (
+                    f"{pending_base_question} (판매 지역: {region}) "
+                    f"해당 지역 기준으로 공영도매시장, 로컬푸드 직매장, 농협/축협 판매처, "
+                    f"산지유통센터(APC), 온라인/택배 채널을 구체적으로 알려줘."
+                )
+                print(f"🔁 지역 입력 확인 → 재질문: {combined_q}")
+                q = combined_q
+                pending_need_region = False
+                pending_base_question = ""
+
+            state: Dict[str, Any] = {"question": q, "chat_history": chat_history}
+            final_state = app.invoke(state)
+            answer = final_state["answer"]
+
+            # 지역 대기 신호가 오면 다음 턴에 지역 입력 대기
+            if final_state.get("awaiting_region"):
+                pending_need_region = True
+                pending_base_question = q  # 원 질문 저장
+                print("\n--- 답변(지역 요청) ---")
+                print(answer)
+                print("------------\n")
+            else:
+                # 질문 유형 전환에 따른 히스토리 초기화 (예: general → crop)
+                if final_state.get('question_type') == 'crop' and final_state.get('previous_question_type') == 'general':
+                    chat_history = []
+
+                print("\n--- 답변 ---")
+                print(answer)
+                print("------------\n")
+
+            # 대화기록 반영
+            chat_history.append(HumanMessage(content=q if not final_state.get("awaiting_region") else final_state.get("question","")))
+            chat_history.append(AIMessage(content=answer))
+
+        except Exception as e:
+            print(f"❌ 오류가 발생했습니다: {e}\n")
+
+if __name__ == "__main__":
+    main()

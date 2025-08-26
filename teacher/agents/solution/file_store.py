@@ -2,8 +2,8 @@ import json
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
-from pymilvus import connections, utility
-import uuid
+from pymilvus import connections
+from pathlib import Path
 
 
 def load_questions_from_json(inputs):
@@ -69,8 +69,9 @@ def load_questions_from_json(inputs):
 
 if __name__ == "__main__":
 
+    base_dir = Path(__file__).parent.parent.parent  # llm-T 폴더 기준
     inputs = {
-            "question_path": "./teacher/agents/TestGenerator/test/설계 중심 2개_2과목_24문제.json",  # JSON 기출문제 모음
+            "question_path": str(base_dir / "teacher/agents/TestGenerator/test/개발 관련 3개_3과목_24문제.json"),
             "docs": []
         }
     load_questions_from_json(inputs)

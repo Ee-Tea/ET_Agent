@@ -26,7 +26,7 @@ def user_intent(user_question: str) -> dict:
      - generate: 시험 문제 생성 - 새로운 문제를 만들거나 생성하는 것 (예: "문제 만들어줘", "5문제 출제해줘")
      - retrieve: 정보 검색 - 모르는 단어 및 용어에 대한 정보를 검색하는 것
      - analyze: 오답 분석 - 틀린 문제를 정리하고 유형을 분석하여 보완점 및 전략 생성을 추천하는 것
-     - solution: 문제 풀이 - 기존 문제에 대한 답과 풀이, 해설을 제공하는 것 (예: "문제 풀어줘", "이거 해설 해줘", "PDF 풀이해줘")
+     - solution: 문제 풀이 - 기존 문제에 대한 답과 풀이, 해설을 제공하는 것 (예: "문제 풀어줘", "이거 풀어줘", "이거 해설 해줘", "PDF 풀이해줘")
      - score: 채점 - 문제 풀이에 대한 채점 및 합격 여부를 판단 하는 것
      
     중요한 구분:
@@ -124,7 +124,7 @@ def parse_generator_input(user_question: str) -> dict:
     문항 수는 과목별 최대 40문제까지 가능
     난이도는 초급, 중급, 고급 중 하나, 언급 없으면 중급으로 간주
     과목 선정 없이 문제 수 만으로 문제 생성 요청 시 전체 과목 생성. 이 때, 과목 당 문제 수는 전체 문제 수의 1/5로 간주
-    다른 변수 없이 단순한 문제 생성 요청은 전체 시험 문제 생성으로 간주
+    다른 변수 없이 단순한 문제 생성 요청은 전체 시험 문제 생성으로 간주 
     
     파싱 결과는 다음과 같은 형식으로 출력하세요:
     
@@ -187,40 +187,66 @@ def parse_generator_input(user_question: str) -> dict:
 # teacher_nodes.py
 # 노드 내부에서 사용되는 헬퍼 함수들과 라우팅 로직
 
-# ========== 기존 함수들 ==========
-def get_user_answer(user_query: str) -> List[str]:
-    """사용자 입력에서 답안 추출"""
-    # 기존 구현 유지
-    pass
-
-def parse_generator_input(user_query: str) -> Dict[str, Any]:
-    """사용자 입력에서 생성 파라미터 추출"""
-    # 기존 구현 유지
-    pass
-
-def user_intent(user_query: str) -> str:
-    """사용자 의도 분류"""
-    # 기존 구현 유지
-    pass
-
 # ========== 라우팅 함수들 ==========
 def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
-    """solution 노드 라우팅"""
-    # 우선순위: 전처리 필요 → 전처리 후 solution → 기존 문제로 solution
-    from teacher_util import has_files_to_preprocess, has_questions
+    """solution 노드 라우팅 - 파일 탐색 포함"""
+    from teacher_util import has_questions, extract_image_paths
+    from pdf_preprocessor import extract_pdf_paths
     
-    if has_files_to_preprocess(state):
+    print(f"🔍 [route_solution] 상태 확인:")
+    print(f"   user_query: {state.get('user_query', '')}")
+    print(f"   artifacts: {state.get('artifacts', {})}")
+    print(f"   has_questions: {has_questions(state)}")
+    
+    # 사용자 입력에서 파일 탐색
+    user_query = state.get("user_query", "")
+    current_artifacts = state.get("artifacts", {}) or {}
+    
+    # 이미지 파일 경로 추출
+    extracted_images = extract_image_paths(user_query)
+    if extracted_images:
+        image_filenames = []
+        for path in extracted_images:
+            filename = path.split('\\')[-1].split('/')[-1]  # Windows/Unix 경로 모두 처리
+            image_filenames.append(filename)
+        
+        current_artifacts["image_ids"] = image_filenames
+        print(f"🖼️ [route_solution] 이미지 파일 발견: {image_filenames}")
+    
+    # PDF 파일 경로 추출
+    extracted_pdfs = extract_pdf_paths(user_query)
+    if extracted_pdfs:
+        pdf_filenames = []
+        for path in extracted_pdfs:
+            filename = path.split('\\')[-1].split('/')[-1]  # Windows/Unix 경로 모두 처리
+            pdf_filenames.append(filename)
+        
+        current_artifacts["pdf_ids"] = pdf_filenames
+        print(f"📄 [route_solution] PDF 파일 발견: {pdf_filenames}")
+    
+    # 파일이 발견되었는지 확인
+    has_files = bool(current_artifacts.get("image_ids")) or bool(current_artifacts.get("pdf_ids"))
+    
+    if has_files:
         next_node = "preprocess"
-        print("📄 PDF 파일 전처리 후 solution 실행")
+        print("📄 PDF/이미지 파일 전처리 후 solution 실행")
     elif has_questions(state):
         next_node = "solution"
         print("📄 기존 문제로 solution 실행")
     else:
         next_node = "mark_after_generator_solution"
+        print("📄 문제 생성 후 solution 실행")
     
+    print(f"🔍 [route_solution] 다음 노드: {next_node}")
+    
+    # artifacts 업데이트된 상태 반환
     new_state = {**state}
+    new_state["artifacts"] = current_artifacts
     new_state.setdefault("routing", {})
     new_state["routing"]["solution_next"] = next_node
+    
+    print(f"🔍 [route_solution] 업데이트된 artifacts: {new_state['artifacts']}")
+    print(f"🔍 [route_solution] 업데이트된 routing: {new_state['routing']}")
     return new_state
 
 def route_score(state: Dict[str, Any]) -> Dict[str, Any]:

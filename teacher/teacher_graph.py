@@ -6,9 +6,8 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-import os
+import sys, os
 from typing import Dict, Any, List, Optional, Tuple
-from copy import deepcopy
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -25,7 +24,6 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 # 경로는 실제 프로젝트 구조에 맞게 하나만 활성화하세요.
 # from ...common.short_term.redis_memory import RedisLangGraphMemory   # 상대 임포트(패키지 실행 전제)
 # from ..common.short_term.redis_memory import RedisLangGraphMemory   # 절대 임포트(권장)
-import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from common.short_term.redis_memory import RedisLangGraphMemory
 
@@ -45,10 +43,11 @@ from file_path_mapper import FilePathMapper
 from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 from teacher_util import (
-    normalize_intent, ensure_shared, validate_qas, safe_execute,
+    ensure_shared, validate_qas, safe_execute,
     has_questions, has_solution_answers, has_score, has_files_to_preprocess,
-    extract_image_paths, extract_problems_from_pdf, extract_problems_from_images, SupportsExecute
+    extract_image_paths, extract_problems_from_images, SupportsExecute
 )
+from pdf_preprocessor import PDFPreprocessor
 
 # ========== 타입/프로토콜 ==========
 
@@ -150,13 +149,52 @@ class Orchestrator:
     def intent_classifier(self, state: TeacherState) -> TeacherState:
         uq = (state.get("user_query") or "").strip()
 
+        # LLM 기반 의도 분류만 담당
+        try:
+            raw = user_intent(uq) if uq else ""
+            intent = raw
+            print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
+        except Exception as e:
+            print(f"⚠️ LLM 분류 실패, 기본값 사용: {e}")
+            intent = "retrieve"
+            
+        return {**state, "user_query": uq, "intent": intent}
+
+    def select_agent(self, state: TeacherState) -> str:
+        intent = (state.get("intent") or "").strip().strip('"\'' ).lower()
+
+        mapping = {
+            "retrieve": "retrieve",
+            "generate": "generator",
+            "analyze": "route_analysis",
+            "solution": "route_solution",
+            "score": "route_score",
+        }
+        chosen = mapping.get(intent, "retrieve")
+        print(f"[router] intent={intent} → {chosen}")
+        return chosen
+
+    # ── Router (의존성 자동 보장) ───────────────────────────────────────────
+
+    # ── Nodes ───────────────────────────────────────────────────────────────
+    @traceable(name="teacher.preprocess")  
+    def preprocess(self, state: TeacherState) -> TeacherState:
+        """
+        PDF 및 이미지 파일에서 문제 추출하는 전처리 노드
+        - 사용자 입력에서 파일 경로 추출 및 메타데이터 파싱
+        - 파일 종류에 따라 적절한 처리 방법 선택
+        - 인덱스 기록을 'extend 이전' 길이로 고정해 올바른 범위를 남깁니다.
+        """
+        print("📄 PDF/이미지 문제 추출 전처리 노드 실행")
+
+        uq = state.get("user_query", "")
+        current_artifacts = state.get("artifacts", {}) or {}
+        
         # PDF 전처리 모듈 import (편의 함수들)
         from pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
 
         # PDF 경로 추출 및 artifacts 업데이트
         extracted_pdfs = extract_pdf_paths(uq)
-        current_artifacts = state.get("artifacts", {})
-        
         if extracted_pdfs:
             # 사용자가 명시적으로 파일 경로를 제공한 경우, 해당 파일만 사용
             pdf_filenames = []
@@ -169,8 +207,8 @@ class Orchestrator:
             print(f"📁 사용자 지정 PDF 파일: {pdf_filenames}")
             print(f"🎯 이 파일들만 처리됩니다: {pdf_filenames}")
 
-        # 이미지 파일 경로 추출 (새로 추가)
-        extracted_images = self._extract_image_paths(uq)
+        # 이미지 파일 경로 추출
+        extracted_images = extract_image_paths(uq)
         if extracted_images:
             image_filenames = []
             for path in extracted_images:
@@ -193,51 +231,12 @@ class Orchestrator:
             current_artifacts["problem_source"] = problem_source
             print(f"📚 문제 소스: {problem_source}")
 
-        # LLM 기반 의도 분류
-        try:
-            from teacher_nodes import user_intent
-            raw = user_intent(uq) if uq else ""
-            intent = normalize_intent(raw or "retrieve")
-            print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
-        except Exception as e:
-            print(f"⚠️ LLM 분류 실패, 기본값 사용: {e}")
-            raw = "fallback"
-            intent = "retrieve"
-            
-        return {**state, "user_query": uq, "intent": intent, "artifacts": current_artifacts}
+        # artifacts 업데이트
+        state["artifacts"] = current_artifacts
 
-    def select_agent(self, state: TeacherState) -> str:
-        try:
-            intent_norm = normalize_intent(state.get("intent", ""))
-        except NameError:
-            intent_norm = (state.get("intent","") or "").strip().strip('"\'' ).lower()
-        mapping = {
-            "retrieve": "retrieve",
-            "generate": "generator",
-            "analyze": "route_analysis",
-            "solution": "route_solution",
-            "score": "route_score",
-        }
-        chosen = mapping.get(intent_norm, "retrieve")
-        print(f"[router] intent={intent_norm} → {chosen}")
-        return chosen
-
-    # ── Router (의존성 자동 보장) ───────────────────────────────────────────
-
-    # ── Nodes ───────────────────────────────────────────────────────────────
-    @traceable(name="teacher.preprocess")  
-    def preprocess(self, state: TeacherState) -> TeacherState:
-        """
-        PDF 및 이미지 파일에서 문제 추출하는 전처리 노드
-        - 파일 종류에 따라 적절한 처리 방법 선택
-        - 인덱스 기록을 'extend 이전' 길이로 고정해 올바른 범위를 남깁니다.
-        - 불필요한 장황 로그를 줄였습니다.
-        """
-        print("📄 PDF/이미지 문제 추출 전처리 노드 실행")
-
-        artifacts = state.get("artifacts", {}) or {}
+        # 파일 경로 매핑
         file_mapper = FilePathMapper()
-        external_file_paths = file_mapper.map_artifacts_to_paths(artifacts)
+        external_file_paths = file_mapper.map_artifacts_to_paths(current_artifacts)
 
         if not external_file_paths:
             print("⚠️ 전처리할 파일이 없습니다.")
@@ -263,7 +262,8 @@ class Orchestrator:
             # PDF 파일 처리
             if pdf_files:
                 print("📄 PDF 파일에서 문제 추출 중...")
-                pdf_problems = extract_problems_from_pdf(pdf_files)
+                pdf_preprocessor = PDFPreprocessor()
+                pdf_problems = pdf_preprocessor.extract_problems_from_pdf(pdf_files)
                 extracted_problems.extend(pdf_problems or [])
                 print(f"📄 PDF에서 {len(pdf_problems or [])}개 문제 추출")
             
@@ -1283,7 +1283,7 @@ class Orchestrator:
                 "retrieve": "retrieve",
                 "generator": "generator",
                 "route_analysis": "route_analysis",
-                "route_solution": "route_solution",
+                "route_solution": "route_solution",  # solution 의도일 때 route_solution으로
                 "route_score": "route_score",
             },
         )
@@ -1358,6 +1358,13 @@ class Orchestrator:
         builder.add_edge("persist_state", END)
 
         return builder.compile()
+    
+    
+    # Streamlit 앱에서 사용할 함수
+def create_app() -> Any:
+    """Streamlit 앱에서 사용할 teacher graph 앱을 생성합니다."""
+    orch = Orchestrator(user_id="streamlit_user", service="teacher", chat_id="web")
+    return orch.build_teacher_graph()
 
 if __name__ == "__main__":
     """
@@ -1472,9 +1479,3 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("\n[Ctrl+C] 종료합니다.")
-    
-    # Streamlit 앱에서 사용할 함수
-def create_app() -> Any:
-    """Streamlit 앱에서 사용할 teacher graph 앱을 생성합니다."""
-    orch = Orchestrator(user_id="streamlit_user", service="teacher", chat_id="web")
-    return orch.build_teacher_graph()

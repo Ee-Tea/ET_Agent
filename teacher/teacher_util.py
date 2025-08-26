@@ -8,21 +8,6 @@ from copy import deepcopy
 # ========== 의도 정규화 ==========
 CANON_INTENTS = {"retrieve", "generate", "analyze", "solution", "score"}
 
-def normalize_intent(raw: str) -> str:
-    s = (raw or "").strip().strip('"\'').lower()  # 양끝 따옴표/공백 제거
-    # 흔한 별칭/오타 흡수
-    alias = {
-        "generator": "generate",
-        "problem_generation": "generate",
-        "make": "generate", "create": "generate", "생성": "generate", "만들": "generate",
-        "analysis": "analyze", "분석": "analyze",
-        "search": "retrieve", "lookup": "retrieve", "검색": "retrieve",
-        "solve": "solution", "풀이": "solution",
-        "grade": "score", "채점": "score",
-    }
-    s = alias.get(s, s)
-    return s if s in CANON_INTENTS else "retrieve"
-
 # ========== Shared State 관리 ==========
 SHARED_DEFAULTS: Dict[str, Any] = {
     "question": [],
@@ -100,6 +85,7 @@ def has_files_to_preprocess(state: Dict[str, Any]) -> bool:
     # 디버깅 로그 추가
     print(f"🔍 [전처리 체크] PDF 파일: {pdf_ids}")
     print(f"🔍 [전처리 체크] 이미지 파일: {image_ids}")
+    print(f"🔍 [전처리 체크] artifacts 전체: {art}")
     result = bool(pdf_ids) or bool(image_ids)
     print(f"🔍 [전처리 체크] 결과: {result} (PDF 있음: {bool(pdf_ids)}, 이미지 있음: {bool(image_ids)})")
     
@@ -111,23 +97,58 @@ def extract_image_paths(user_query: str) -> List[str]:
     """사용자 입력에서 이미지 파일 경로 추출"""
     import re
     
-    # 이미지 파일 확장자 패턴
-    image_extensions = r'\.(jpg|jpeg|png|gif|bmp|tiff|webp)$'
+    # 이미지 파일 확장자 패턴 (문자열 끝 앵커 제거)
+    image_extensions = r'\.(jpg|jpeg|png|gif|bmp|tiff|webp)'
     
-    # 파일 경로 패턴 (절대 경로 또는 상대 경로)
-    path_pattern = r'["\']?([^"\s]+' + image_extensions + r')["\']?'
+    # 1. 따옴표로 둘러싸인 경로
+    quoted_pattern = r'["\']([^"\']+' + image_extensions + r')["\']'
+    # 2. 간단한 파일명 패턴 (확장자만 확인)
+    filename_pattern = r'([^"\s]+' + image_extensions + r')'
     
-    matches = re.findall(path_pattern, user_query, re.IGNORECASE)
-    
-    # 실제 파일 존재 여부 확인
     valid_paths = []
-    for match in matches:
-        path = match.strip('"\'')
+    
+    # 따옴표로 둘러싸인 경로 먼저 찾기
+    quoted_matches = re.findall(quoted_pattern, user_query, re.IGNORECASE)
+    for match in quoted_matches:
+        path = match.strip()
         if os.path.exists(path):
             valid_paths.append(path)
-            print(f"🖼️ 이미지 파일 발견: {path}")
+            print(f"🖼️ 따옴표로 둘러싸인 이미지 파일 발견: {path}")
         else:
-            print(f"⚠️ 이미지 파일을 찾을 수 없음: {path}")
+            print(f"⚠️ 따옴표로 둘러싸인 이미지 파일을 찾을 수 없음: {path}")
+    
+    # 공백으로 구분된 파일명 찾기
+    filename_matches = re.findall(filename_pattern, user_query, re.IGNORECASE)
+    for match in filename_matches:
+        # re.findall이 그룹을 반환할 때 튜플이 될 수 있음
+        if isinstance(match, tuple):
+            filename = match[0]  # 첫 번째 그룹 사용
+        else:
+            filename = match
+        
+        # 파일명에서 불필요한 공백 제거
+        filename = filename.strip()
+        
+        # 현재 디렉토리에서 파일 찾기
+        if os.path.exists(filename):
+            valid_paths.append(filename)
+            print(f"🖼️ 파일명으로 이미지 파일 발견: {filename}")
+        else:
+            # teacher/solution/pdf_outputs 디렉토리에서 찾기
+            pdf_outputs_path = os.path.join("teacher", "solution", "pdf_outputs", filename)
+            if os.path.exists(pdf_outputs_path):
+                valid_paths.append(pdf_outputs_path)
+                print(f"🖼️ pdf_outputs에서 이미지 파일 발견: {pdf_outputs_path}")
+            else:
+                # 현재 디렉토리의 하위 디렉토리들에서 찾기
+                for root, dirs, files in os.walk("."):
+                    if filename in files:
+                        full_path = os.path.join(root, filename)
+                        valid_paths.append(full_path)
+                        print(f"🖼️ 하위 디렉토리에서 이미지 파일 발견: {full_path}")
+                        break
+                else:
+                    print(f"⚠️ 이미지 파일을 찾을 수 없음: {filename}")
     
     return valid_paths
 
@@ -168,7 +189,18 @@ def extract_problems_from_images(image_paths: List[str]) -> List[Dict]:
         # call_gpt_on_images 함수 호출
         result = call_gpt_on_images(valid_paths)
         
-        if not result or "problems" not in result:
+        if not result:
+            print("⚠️ 이미지에서 문제를 추출하지 못했습니다.")
+            return []
+        
+        # 오류가 있는 경우 처리
+        if "error" in result:
+            print(f"⚠️ 이미지 처리 중 오류 발생: {result['error']}")
+            if "raw_response" in result:
+                print(f"🔍 원본 응답: {result['raw_response'][:200]}...")
+            return []
+        
+        if "problems" not in result:
             print("⚠️ 이미지에서 문제를 추출하지 못했습니다.")
             return []
         

@@ -6,7 +6,7 @@ from langchain_milvus import Milvus
 from pymilvus import connections
 from langgraph.graph import StateGraph, END
 from langchain_huggingface import HuggingFaceEmbeddings
-import json, re
+import json, re, hashlib
 from langchain_openai import ChatOpenAI
 from ..base_agent import BaseAgent
 
@@ -227,81 +227,164 @@ class SolutionAgent(BaseAgent):
 
 
     # ✅ 임베딩 후 벡터 DB 저장
-    def _store_to_vector_db(self, state: SolutionState) -> SolutionState:  
-        print("\n🧩 [4단계] 임베딩 및 벡터 DB 저장 시작")
+    def _store_to_vector_db(self, state: SolutionState) -> SolutionState:
+        vectorstore = state.get("vectorstore")
+        q    = state.get("user_problem", "") or ""
+        opts = state.get("user_problem_options", []) or []
 
-    
-        vectorstore = state["vectorstore"] 
+        from langchain_core.documents import Document
+        import json, hashlib
 
-        # 중복 문제 확인
-        similar = vectorstore.similarity_search(state["user_problem"], k=1)
-        if similar and state["user_problem"].strip() in similar[0].page_content:
-            existing_doc = similar[0]
-            # 기존 문서의 answer/explanation이 비어있으면 업데이트
+        # ---------- helpers ----------
+        norm = lambda s: " ".join((s or "").split()).strip()
+
+        def parse_opts(v):
+            if isinstance(v, str):
+                try: v = json.loads(v)
+                except: v = [v]
+            return [norm(str(x)) for x in (v or [])]
+
+        def doc_id_of(q, opts):
+            base = norm(q) + "||" + "||".join(parse_opts(opts))
+            return hashlib.sha1(base.encode()).hexdigest()
+
+        def _clean_str(v):
+            if isinstance(v, (bytes, bytearray)):
+                try: v = v.decode("utf-8", "ignore")
+                except Exception: v = str(v)
+            if isinstance(v, str):
+                s = v.strip()
+                if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                    try:
+                        u = json.loads(s)
+                        if isinstance(u, str): s = u.strip()
+                    except Exception:
+                        pass
+                if s.lower() in ("", "null", "none"):
+                    return ""
+                return s
+            return v
+
+        def _is_blank(v):
+            v = _clean_str(v)
+            if v is None: return True
+            if isinstance(v, str): return v == ""
+            try: return len(v) == 0
+            except Exception: return False
+
+        def _escape(s: str) -> str:
+            # Milvus expr용 이스케이프
+            return s.replace("\\", "\\\\").replace('"', r"\"")
+
+        did = doc_id_of(q, opts)
+
+        # ---------- 완전 일치 1개만: retrieved_docs[0] ----------
+        docs = state.get("retrieved_docs", []) or []
+        exact = None
+        if docs:
+            d = docs[0]
+            same_q = norm(d.page_content) == norm(q)
+            same_o = parse_opts(d.metadata.get("options", "[]")) == parse_opts(opts)
+            print("[DEBUG] exact-match?", same_q and same_o,
+                "| Q:", repr(norm(d.page_content)), "==", repr(norm(q)),
+                "| OPTS:", parse_opts(d.metadata.get("options", "[]")), "==", parse_opts(opts))
+            if same_q and same_o:
+                exact = d
+
+        # ---------- 삭제→추가 (upsert) ----------
+        def upsert(meta, pk_to_delete=None, text_to_delete=None):
+            if not vectorstore:
+                print("⚠️ vectorstore 없음 → 저장 스킵(결과만 기록)")
+                return
+            # 1) PK로 삭제 (가장 안전)
+            if pk_to_delete is not None:
+                try:
+                    vectorstore.delete([pk_to_delete])
+                    print(f"[DEBUG] delete by PK ok: {pk_to_delete}")
+                except Exception as e:
+                    print(f"[DEBUG] delete(ids=[{pk_to_delete}]) 실패: {e}")
+
+            # 2) expr 삭제: 필드명 후보 순회 (컬렉션 스키마마다 다름)
+            elif text_to_delete:
+                expr_fields = ["text", "page_content", "content", "question"]
+                esc = _escape(text_to_delete)
+                for f in expr_fields:
+                    try:
+                        vectorstore.delete(expr=f'{f} == "{esc}"')
+                        print(f"[DEBUG] delete by expr ok: {f} == \"{esc}\"")
+                        break
+                    except Exception as e:
+                        print(f"[DEBUG] delete by expr 실패({f}): {e}")
+
+            # 새 문서 추가
+            vectorstore.add_documents([Document(
+                page_content=q,
+                metadata={
+                    # 참고용 fingerprint(스키마 필드는 아님)
+                    "doc_id": did,
+                    "options": json.dumps(opts, ensure_ascii=False),
+                    "answer":      meta.get("answer", "") or "",
+                    "explanation": meta.get("explanation", "") or "",
+                    "subject":     meta.get("subject", "") or "",
+                },
+            )])
+
+        if exact:
+            meta = exact.metadata.copy()
             updated = False
-            metadata = existing_doc.metadata.copy()
-            if not metadata.get("answer") and state["generated_answer"]:
-                metadata["answer"] = state["generated_answer"]
-                updated = True
-            if not metadata.get("explanation") and state["generated_explanation"]:
-                metadata["explanation"] = state["generated_explanation"]
-                updated = True
-            if not metadata.get("subject") and state["generated_subject"]:
-                metadata["subject"] = state["generated_subject"]
-                updated = True
-            if updated:
-                # Milvus는 일반적으로 문서 업데이트를 지원하지 않으므로, 삭제 후 재추가 방식 사용
-                vectorstore.delete([existing_doc.page_content])
-                doc = Document(
-                    page_content=state["user_problem"],
-                    metadata={
-                    "options": json.dumps(state.get("user_problem_options", [])), 
-                    "answer": metadata.get("answer", ""),
-                    "explanation": metadata.get("explanation", ""),
-                    "subject": metadata.get("subject", ""),
-                    }
-                )
-                vectorstore.add_documents([doc])
-                print("✅ 기존 문제의 빈 컬럼을 채워서 저장 완료")
-            else:
-                print("⚠️ 동일한 문제가 이미 존재하며, 모든 컬럼이 채워져 있어 저장 생략")
-        else:
-            # 문제, 해답, 풀이를 각각 metadata로 저장
-            doc = Document(
-            page_content=state["user_problem"],
-            metadata={
-                "options": json.dumps(state.get("user_problem_options", [])), 
-                "answer": state["generated_answer"],
-                "explanation": state["generated_explanation"],
-                "subject": state["generated_subject"],
-            }
-            )
-            vectorstore.add_documents([doc])
-            print("✅ 문제+해답+풀이 저장 완료")
 
-        # 결과를 state에 저장 (항상 실행)
-        print(f"\n📝 결과 저장 시작:")
-        print(f"   - 현재 문제: {state['user_problem'][:50]}...")
-        print(f"   - 생성된 정답: {state['generated_answer'][:30]}...")
-        print(f"   - 검증 상태: {state['validated']}")
-        
-        item = {
-            "user_problem": state["user_problem"],
-            "user_problem_options": state["user_problem_options"],
-            "generated_answer": state["generated_answer"],
-            "generated_explanation": state["generated_explanation"],
-            "generated_subject": state["generated_subject"],
-            "validated": state["validated"],
-            "chat_history": state.get("chat_history", [])
-        }
-        
-        
-        state["results"].append(item)
-        print(f"✅ 결과 저장 완료: {len(state['results'])}개")
-        for key, value in item.items():
-            print(f"{key}: {value}")
-        
+            new_answer      = _clean_str(state.get("generated_answer"))
+            new_explanation = _clean_str(state.get("generated_explanation"))
+            new_subject     = _clean_str(state.get("generated_subject"))
+
+            for k, new_val in [("answer", new_answer),
+                            ("explanation", new_explanation),
+                            ("subject", new_subject)]:
+                cur_val   = meta.get(k)
+                cur_blank = _is_blank(cur_val)
+                new_blank = _is_blank(new_val)
+                print(f"[DEBUG] {k}: current={repr(cur_val)} (blank={cur_blank}) "
+                    f"new={repr(new_val)} (blank={new_blank})")
+                if cur_blank and not new_blank:
+                    meta[k] = new_val
+                    updated = True
+
+            if updated:
+                # PK 추출 시도 (환경에 따라 'pk'/'id'/'_id' 등일 수 있음)
+                pk = None
+                for k in ("pk", "id", "_id", "pk_id", "milvus_id"):
+                    if k in exact.metadata:
+                        pk = exact.metadata[k]; break
+                if pk is not None:
+                    upsert(meta, pk_to_delete=pk)
+                else:
+                    # PK 못 찾으면 텍스트로 expr 삭제 시도
+                    upsert(meta, text_to_delete=q)
+                print("✅ 동일 문항(완전 일치) 빈 컬럼만 채워 갱신")
+            else:
+                print("⚠️ 동일 문항(완전 일치) 존재, 저장 생략")
+        else:
+            upsert({
+                "answer": _clean_str(state.get("generated_answer")),
+                "explanation": _clean_str(state.get("generated_explanation")),
+                "subject": _clean_str(state.get("generated_subject")),
+            }, text_to_delete=q)
+            print("🆕 신규 문항 저장")
+
+        # ---------- 결과 기록 ----------
+        state.setdefault("results", []).append({
+            "user_problem": q,
+            "user_problem_options": opts,
+            "generated_answer": state.get("generated_answer", ""),
+            "generated_explanation": state.get("generated_explanation", ""),
+            "generated_subject": state.get("generated_subject", ""),
+            "validated": state.get("validated", False),
+            "chat_history": state.get("chat_history", []),
+        })
         return state
+
+
+
 
     def invoke(
             self, 

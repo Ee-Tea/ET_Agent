@@ -2,9 +2,9 @@ import os
 import glob
 from typing import List, Dict, Any, TypedDict
 from abc import ABC, abstractmethod
-from langchain_community.document_loaders import PyPDFLoader
+# from langchain_community.document_loaders import PyPDFLoader   # FAISS 경로 제거: 미사용
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+# from langchain_community.vectorstores import FAISS             # FAISS 제거
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langgraph.graph import StateGraph, END
@@ -25,8 +25,25 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from base_agent import BaseAgent
 
 ***REMOVED*** 관련 임포트
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# 🔁 Milvus 관련 임포트
+from langchain_milvus import Milvus
+from pymilvus import connections, utility
+
+# milvus_store 유틸 불러오기 (패키지 구조에 따라 상대/절대 임포트 호환)
+try:
+    from .milvus_store import load_questions_from_json
+except ImportError:
+    from milvus_store import load_questions_from_json
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 
 # .env 파일 로드
 load_dotenv()
@@ -97,8 +114,8 @@ class InfoProcessingExamAgent(BaseAgent):
         os.makedirs(self.data_folder, exist_ok=True)
 
         if groq_api_key:
-            os.environ["GROQ_API_KEY=REDACTED
-        elif not os.getenv("GROQ_API_KEY=REDACTED ValueError("Groq API 키가 필요합니다.")
+            os.environ["OPENAI_API_KEY=REDACTED
+        elif not os.getenv("OPENAI_API_KEY=REDACTED ValueError("OpenAI API 키가 필요합니다.")
 
         self.embeddings_model = None
         self.llm = None
@@ -107,6 +124,14 @@ class InfoProcessingExamAgent(BaseAgent):
         self.workflow = None
 
         self.files_in_vectorstore = []
+
+        # 🔧 Milvus 접속/검색 기본값
+        self.milvus_conf = {
+            "host": os.getenv("MILVUS_HOST", "localhost"),
+            "port": os.getenv("MILVUS_PORT", "19530"),
+            "collection": os.getenv("MILVUS_COLLECTION", "info_exam_chunks"),
+            "topk": int(os.getenv("MILVUS_TOPK", "15")),
+        }
 
         self._initialize_models()
         self._build_graph()  # 2) 과목별 2노드(생성/검증) 구축
@@ -119,7 +144,7 @@ class InfoProcessingExamAgent(BaseAgent):
     def description(self) -> str:
         return "정보처리기사 5과목 기준으로 문제를 생성/검증하여 100문제(또는 과목별 지정 수)를 자동 생성합니다."
 
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Args (확장):
           - mode: "full_exam" | "subject_quiz" | "partial_exam"
@@ -131,6 +156,7 @@ class InfoProcessingExamAgent(BaseAgent):
           - parallel_agents: 동시 병렬 실행 개수 (default: 2, 권장: 2~5)
           - save_to_file: bool
           - filename: 저장 파일명
+          - milvus_question_path: (선택) JSON 문제은행 경로. 지정 시 해당 JSON을 Milvus에 적재 후 검색에 사용
         """
         try:
             mode = input_data.get("mode", "full_exam")
@@ -139,10 +165,11 @@ class InfoProcessingExamAgent(BaseAgent):
             filename = input_data.get("filename")
             parallel_agents = max(1, int(input_data.get("parallel_agents", 2)))  # 3) 병렬 개수
 
-            if not self._build_vectorstore_from_all_pdfs():
+            # ✅ Milvus 사용 (기본)
+            if not self._build_retriever_from_milvus(input_data):
                 return {
                     "success": False,
-                    "error": f"'{self.data_folder}' 폴더에 PDF 파일이 없습니다."
+                    "error": "Milvus 리트리버 초기화에 실패했습니다. (컬렉션/접속/임베딩 설정 확인)"
                 }
 
             if mode == "full_exam":
@@ -223,46 +250,83 @@ class InfoProcessingExamAgent(BaseAgent):
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )
-            self.llm = ChatGroq(
-                model="moonshotai/kimi-k2-instruct",
-                temperature=0.0,
-                max_tokens=2048,
-                timeout=120,
-                max_retries=3
-            )
-            _ = self.llm.invoke("ping")
+            self.llm = ChatOpenAI(
+                model=OPENAI_LLM_MODEL,
+                temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_TOKENS,
+                timeout=LLM_TIMEOUT,
+                max_retries=LLM_MAX_RETRIES,
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+                api_key=os.getenv("OPENAI_API_KEY=REDACTED = self.llm.invoke("ping")
         except Exception as e:
             raise ValueError(f"모델 초기화 중 오류 발생: {e}")
 
-    def _build_vectorstore_from_all_pdfs(self) -> bool:
-        pdf_files = self.get_pdf_files()
-        if not pdf_files:
-            return False
-        if self.vectorstore and set(self.files_in_vectorstore) == set(pdf_files):
+    # ✅ Milvus 리트리버 초기화 (milvus_store 사용 또는 기존 컬렉션 접속)
+    def _build_retriever_from_milvus(self, input_data: Dict[str, Any]) -> bool:
+        """
+        우선순위:
+        1) input_data['milvus_question_path'] 또는 환경변수 MILVUS_QUESTION_PATH 가 있으면
+           milvus_store.load_questions_from_json으로 적재+리트리버 생성
+        2) 그렇지 않으면 기존 컬렉션에 접속하여 리트리버 생성
+        """
+        try:
+            question_path = input_data.get("milvus_question_path") or os.getenv("MILVUS_QUESTION_PATH")
+            host = self.milvus_conf["host"]
+            port = self.milvus_conf["port"]
+            collection = self.milvus_conf["collection"]
+            topk = self.milvus_conf["topk"]
+
+            # 연결 정리 후 재접속
+            if "default" in connections.list_connections():
+                connections.disconnect(alias="default")
+            connections.connect(alias="default", host=host, port=port)
+
+            if question_path and os.path.exists(question_path):
+                print(f"🆕 JSON 문제은행 적재 후 리트리버 준비: {question_path}")
+                out = load_questions_from_json({
+                    "question_path": question_path,
+                    "collection_name": collection,
+                    "milvus_host": host,
+                    "milvus_port": port,
+                    "drop_old": False,     # 필요 시 True로 초기화
+                    "k": topk,
+                })
+                self.vectorstore = out["vectorstore"]
+                self.retriever = out["retriever"]
+                self.files_in_vectorstore = []
+                return True
+
+            # 기존 컬렉션 접속
+            if not utility.has_collection(collection):
+                print(f"[DEBUG] Milvus 컬렉션이 없습니다: {collection}")
+                return False
+
+            print(f"✅ 기존 Milvus 컬렉션 사용: {collection}")
+            self.vectorstore = Milvus(
+                embedding_function=self.embeddings_model,
+                collection_name=collection,
+                connection_args={"host": host, "port": port},
+                index_params={"index_type": "AUTOINDEX", "metric_type": "IP"},
+                search_params={"metric_type": "IP"},
+            )
+            self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": topk})
+            self.files_in_vectorstore = []
             return True
 
-        all_documents = []
-        for pdf_path in pdf_files:
-            try:
-                loader = PyPDFLoader(pdf_path)
-                documents = loader.load()
-                for doc in documents:
-                    doc.metadata['source_file'] = os.path.basename(pdf_path)
-                all_documents.extend(documents)
-            except Exception:
-                continue
-
-        if not all_documents:
+        except Exception as e:
+            print(f"[DEBUG] _build_retriever_from_milvus error: {e}")
             return False
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = splitter.split_documents(all_documents)
-        self.vectorstore = FAISS.from_documents(splits, self.embeddings_model)
-        self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 15})
-        self.files_in_vectorstore = pdf_files
-        return True
+    # (이전 FAISS 경로 대체: 이름은 그대로 유지해도 내부는 Milvus 사용)
+    def _build_vectorstore_from_all_pdfs(self) -> bool:
+        """
+        과거 FAISS 구축 함수의 시그니처를 유지하기 위해 남겨두지만,
+        현재는 Milvus 리트리버를 초기화합니다.
+        """
+        return self._build_retriever_from_milvus({})
 
     def get_pdf_files(self) -> List[str]:
+        # Milvus 사용으로 의미는 적지만, 외부 호환을 위해 남김
         return glob.glob(os.path.join(self.data_folder, "*.pdf"))
 
     # ---- 공통 노드 구현(그대로 재사용) ----
@@ -274,7 +338,11 @@ class InfoProcessingExamAgent(BaseAgent):
             print(f"[DEBUG] _retrieve_documents: query='{query}', subject_area='{subject_area}', enhanced_query='{enhanced_query}'")
             documents = self.retriever.invoke(enhanced_query)
             print(f"[DEBUG] _retrieve_documents: found {len(documents)} documents")
-            source_files = [doc.metadata.get('source_file', 'Unknown') for doc in documents]
+            # Milvus 문서에는 source_file이 없을 수 있으므로 보완
+            source_files = []
+            for doc in documents:
+                src = doc.metadata.get('source_file') or doc.metadata.get('subject') or 'milvus'
+                source_files.append(src)
             used_sources = list(Counter(source_files).keys())
             return {**state, "documents": documents, "used_sources": used_sources}
         except Exception as e:
@@ -319,11 +387,15 @@ class InfoProcessingExamAgent(BaseAgent):
 
             generate_count = max(min(needed_count, 10), 1)
 
+            # 🔧 JSON 형식에 주석이 들어가던 문제 수정
             prompt_template = PromptTemplate(
                 input_variables=["context", "subject_area", "needed_count"],
                 template=(
                     "당신은 정보처리기사 출제 전문가입니다. 아래 문서 내용을 바탕으로 {subject_area} 과목의 객관식 문제 {needed_count}개를 생성하세요.\n\n"
-                    "**중요: 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트나 설명은 포함하지 마세요.**\n\n"
+                    "조건:\n"
+                    "• 보기에는 번호(1. 2. 3. 4.)를 붙이지 마십시오.\n"
+                    "• answer에는 정답의 '번호'만 문자열로 적으십시오. 예: \"2\"\n"
+                    "• 출력은 아래 JSON 형식만 포함하십시오. 다른 텍스트 금지.\n\n"
                     "[문서 내용]\n{context}\n\n"
                     "[응답 형식]\n"
                     "{{\n"
@@ -335,8 +407,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     "      \"explanation\": \"정답에 대한 간단한 해설\"\n"
                     "    }}\n"
                     "  ]\n"
-                    "}}\n\n"
-                    "**응답은 위 JSON 형식만 출력하세요. 다른 텍스트는 절대 포함하지 마세요.**"
+                    "}}\n"
                 )
             )
 
@@ -473,8 +544,8 @@ class InfoProcessingExamAgent(BaseAgent):
                 json_str = json_str_match.group(0)
                 print(f"[DEBUG] _parse_quiz_response: found JSON object, length={len(json_str)}")
 
-            # 3. JSON 문자열 정리
-            json_str = json_str.replace('\\u312f', '').replace('\\n', ' ').replace('\\', '')
+            # 3. JSON 문자열 정리 (과도한 백슬래시 제거는 JSON을 깨뜨릴 수 있으므로 최소화)
+            json_str = json_str.replace('\\u312f', '').replace('\\n', ' ')
             print(f"[DEBUG] _parse_quiz_response: cleaned JSON='{json_str[:200]}...'")
             
             # 4. JSON 파싱
@@ -491,7 +562,7 @@ class InfoProcessingExamAgent(BaseAgent):
                 if "options" in question and isinstance(question["options"], list):
                     numbered_options = []
                     for j, option_text in enumerate(question["options"], 1):
-                        cleaned_text = re.sub(r'^\s*\d+\.\s*', '', option_text).strip()
+                        cleaned_text = re.sub(r'^\s*\d+\.\s*', '', str(option_text)).strip()
                         numbered_options.append(f"  {j}. {cleaned_text}")
                     question["options"] = numbered_options
                 if "subject" not in question:
@@ -800,6 +871,7 @@ class InfoProcessingExamAgent(BaseAgent):
         }
         return partial_exam_result
 
+    # 파일 저장 함수는 기존과 동일(중복 정의는 마지막 정의가 유효)
     def _save_to_json(self, exam_result: Dict[str, Any], filename: str = None) -> str:
         save_dir = "C:\\ET_Agent\\teacher\\TestGenerator\\test"
         os.makedirs(save_dir, exist_ok=True)

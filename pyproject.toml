@@ -12,6 +12,7 @@ dependencies = [
     "langchain-community>=0.3.27",
     "langchain-core>=0.3.72",
     "langgraph>=0.6.3",
+    "langgraph-cli[inmem]",
     "openai>=1.98.0",
     "redis>=6.2.0",
     "streamlit>=1.48.0",
@@ -40,6 +41,9 @@ dependencies = [
     "docling>=2.43.0",
     "protobuf==5.27.2",
     "huggingface-hub[hf-xet]>=0.34.4",
+    "pdfminer.six>=20231228",
+    "pydantic>=2.0.0",
+    "pdfplumber>=0.11.7",
 ]
 
 [build-system]

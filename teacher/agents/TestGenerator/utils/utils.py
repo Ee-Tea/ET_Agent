@@ -2,7 +2,7 @@ import os
 import json
 import re
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +10,9 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from config import DEFAULT_SAVE_DIR, DEFAULT_WEAKNESS_DIR
+
+# LLM 모델 설정을 환경변수에서 가져오기
+DEFAULT_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
 
 def extract_quiz_params(
     user_question: str,

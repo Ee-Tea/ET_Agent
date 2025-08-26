@@ -94,6 +94,7 @@ class SolutionAgent(BaseAgent):
 
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
         print("\n🔍 [1단계] 유사 문제 검색 시작")
+        print(state["user_problem"], state["user_problem_options"])
         
         vectorstore = state.get("vectorstore")
         if vectorstore is None:
@@ -301,8 +302,8 @@ class SolutionAgent(BaseAgent):
         initial_state: SolutionState = {
             "user_input_txt": user_input_txt,
 
-            "user_problem": "",
-            "user_problem_options": [],
+            "user_problem": user_problem,
+            "user_problem_options": user_problem_options,
 
             "vectorstore": vectorstore,
 
@@ -323,14 +324,14 @@ class SolutionAgent(BaseAgent):
         final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
         
         # 그래프 시각화
-        try:
-            graph_image_path = "solution_agent_workflow.png"
-            with open(graph_image_path, "wb") as f:
-                f.write(self.graph.get_graph().draw_mermaid_png())
-            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        except Exception as e:
-            print(f"그래프 시각화 중 오류 발생: {e}")
-            print("워크플로우는 정상적으로 작동합니다.")
+        # try:
+        #     graph_image_path = "solution_agent_workflow.png"
+        #     with open(graph_image_path, "wb") as f:
+        #         f.write(self.graph.get_graph().draw_mermaid_png())
+        #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+        # except Exception as e:
+        #     print(f"그래프 시각화 중 오류 발생: {e}")
+        #     print("워크플로우는 정상적으로 작동합니다.")
 
         # 결과 확인 및 디버깅
         results = final_state.get("results", [])
@@ -367,14 +368,14 @@ if __name__ == "__main__":
     agent = SolutionAgent()
 
     # 그래프 시각화 (선택)
-    try:
-        graph_image_path = "solution_agent_workflow.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(agent.graph.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류 발생: {e}")
-        print("워크플로우는 정상적으로 작동합니다.")
+    # try:
+    #     graph_image_path = "solution_agent_workflow.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(agent.graph.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류 발생: {e}")
+    #     print("워크플로우는 정상적으로 작동합니다.")
 
     user_input_txt = input("\n❓ 사용자 질문: ").strip()
     user_problem = input("\n❓ 사용자 문제: ").strip()

@@ -1,11 +1,23 @@
 import json
 import os
-from typing import Dict, List, TypedDict, Annotated, Any, Literal, Union, TypeGuard
+from typing import Dict, List, TypedDict, Annotated, Any, Literal, Union, TypeGuard, Optional
+from dotenv import load_dotenv
+load_dotenv()
+
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from groq import Groq
+from openai import OpenAI
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 from ..base_agent import BaseAgent
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 class AnalysisState(TypedDict):
     """LangGraph 노드 간에 주고받는 분석 상태 컨테이너
@@ -70,7 +82,10 @@ class AnalysisAgent(BaseAgent):
         return "학습자 답안을 분석하고 개인화된 피드백을 생성합니다"
     
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY=REDACTED = "moonshotai/kimi-k2-instruct"
+        self.client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY=REDACTED=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
+        )
+        self.model = OPENAI_LLM_MODEL
         self.graph = self._create_graph()
     
     def _create_graph(self) -> StateGraph:
@@ -109,34 +124,79 @@ class AnalysisAgent(BaseAgent):
     
     
     def _generate_feedback(self, state: AnalysisState) -> AnalysisState:
-        """LLM 피드백 생성
-        - 입력: problem/problem_types/user_answer/solution_answer/solution/grade_result
-        - 준비: 과목명(subject)만 활용하여 문항 단위 items 생성
-        - 출력: detailed_analysis / overall_assessment 만 상태에 저장
-        """
-        problems = state["problem"]
-        subjects = state["problem_types"]
-        user_answers = state["user_answer"]
-        solution_answers = state["solution_answer"]
-        solutions = state["solution"]
-        grade_result = state["grade_result"]
-
-        # 문항 단위(items) 데이터 구성(LLM 입력 최적화)
+        """LLM을 사용하여 분석 및 피드백 생성"""
+        print(f"\n🔍 [AnalysisAgent] _generate_feedback 시작")
+        print(f"  - state 키: {list(state.keys())}")
+        
+        problems = state.get("problem", [])
+        subjects = state.get("problem_types", [])
+        user_answers = state.get("user_answer", [])
+        solution_answers = state.get("solution_answer", [])
+        solutions = state.get("solution", [])
+        grade_result = state.get("grade_result", [])
+        
+        print(f"  - problems: {len(problems)}개")
+        print(f"  - subjects: {len(subjects)}개")
+        print(f"  - user_answers: {len(user_answers)}개")
+        print(f"  - solution_answers: {len(solution_answers)}개")
+        print(f"  - solutions: {len(solutions)}개")
+        print(f"  - grade_result: {len(grade_result)}개")
+        
+        # 데이터 길이 검증
+        lengths = [len(problems), len(subjects), len(user_answers), len(solution_answers), len(solutions), len(grade_result)]
+        print(f"  - 각 필드 길이: {lengths}")
+        
+        if len(set(lengths)) > 1:
+            print(f"❌ [AnalysisAgent] 데이터 길이 불일치: {lengths}")
+            # 최소 길이로 맞춤
+            min_length = min(lengths)
+            problems = problems[:min_length]
+            subjects = subjects[:min_length]
+            user_answers = user_answers[:min_length]
+            solution_answers = solution_answers[:min_length]
+            solutions = solutions[:min_length]
+            grade_result = grade_result[:min_length]
+            print(f"  - 최소 길이({min_length})로 맞춤")
+        
+        # 데이터 타입 검증 및 변환
+        try:
+            # user_answers를 정수 리스트로 변환
+            if user_answers and isinstance(user_answers[0], str):
+                user_answers = [int(ans) if ans.isdigit() else 0 for ans in user_answers]
+                print(f"  - user_answers를 정수로 변환: {user_answers}")
+            
+            # solution_answers를 정수 리스트로 변환
+            if solution_answers and isinstance(solution_answers[0], str):
+                solution_answers = [int(ans) if ans.isdigit() else 0 for ans in solution_answers]
+                print(f"  - solution_answers를 정수로 변환: {solution_answers}")
+                
+        except Exception as e:
+            print(f"⚠️ [AnalysisAgent] 데이터 변환 중 오류: {e}")
+            # 기본값 설정
+            user_answers = [0] * len(problems)
+            solution_answers = [0] * len(problems)
+        
+        print(f"✅ [AnalysisAgent] 데이터 전처리 완료")
+        
+        # items 구성
         items = [
             {
                 "number": i + 1,
                 "problem": problem,
-                "subject": subject,  # 과목명만 유지
+                "subject": subject,
                 "user_answer": user_ans,
-                "solution_answer": correct_ans,
-                "is_correct": bool(is_correct),
+                "correct_answer": correct_ans,
                 "solution": solution,
+                "is_correct": bool(is_correct),
             }
             for i, (problem, subject, user_ans, correct_ans, solution, is_correct) in enumerate(
                 zip(problems, subjects, user_answers, solution_answers, solutions, grade_result)
             )
         ]
+        
+        print(f"  - 생성된 items: {len(items)}개")
         mistakes = [it for it in items if not it["is_correct"]]
+        print(f"  - 오답 개수: {len(mistakes)}개")
 
         analysis_data = {
             "items": items,
@@ -146,21 +206,28 @@ class AnalysisAgent(BaseAgent):
                 "incorrect_numbers": [it["number"] for it in mistakes],
             },
         }
+        
+        print(f"  - analysis_data 구성 완료")
+        print(f"    - correct_count: {analysis_data['summary']['correct_count']}")
+        print(f"    - total_count: {analysis_data['summary']['total_count']}")
+        print(f"    - incorrect_numbers: {analysis_data['summary']['incorrect_numbers']}")
 
         if len(mistakes) > 0:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """당신은 학생의 학습 데이터를 분석하는 전문 학습 코치입니다.
+            print(f"🚀 [AnalysisAgent] 오답 분석 LLM 호출 시작")
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """당신은 학생의 학습 데이터를 분석하는 전문 학습 코치입니다.
 각 문항 데이터는 'items' 배열에 문항 단위 객체로 제공됩니다.
 subject 는 각 문항의 과목명(문자열)입니다.
 응답은 지정된 JSON 스키마만 출력하고, 불필요한 자연어 설명은 포함하지 마십시오."""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""다음 학생의 풀이 결과를 문항 단위로 제공합니다. 오답 패턴을 분석하고 맞춤 피드백을 생성하세요.
+                        },
+                        {
+                            "role": "user",
+                            "content": f"""다음 학생의 풀이 결과를 문항 단위로 제공합니다. 오답 패턴을 분석하고 맞춤 피드백을 생성하세요.
 
 {json.dumps(analysis_data, ensure_ascii=False, indent=2)}
 
@@ -194,35 +261,47 @@ subject 는 각 문항의 과목명(문자열)입니다.
   }}
 }}
 ```
-모든 내용은 한국어로 작성."""
-                    }
-                ],
-                temperature=0,
-                max_completion_tokens=4096,
-                top_p=1,
-                stream=False,
-                response_format={"type": "json_object"},
-                stop=None
-            )
+모든 내용은 한국어로 작성해주세요."""
+                        }
+                    ],
+                    temperature=LLM_TEMPERATURE,
+                    max_completion_tokens=LLM_MAX_TOKENS,
+                    top_p=1,
+                    stream=False,
+                    response_format={"type": "json_object"},
+                    stop=None
+                )
 
-            feedback_content = completion.choices[0].message.content
-            try:
-                parsed_feedback = json.loads(feedback_content)
-            except json.JSONDecodeError:
-                parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
-            state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
-            state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+                feedback_content = completion.choices[0].message.content
+                print(f"✅ [AnalysisAgent] LLM 응답 완료: {len(feedback_content)}자")
+                
+                try:
+                    parsed_feedback = json.loads(feedback_content)
+                    print(f"✅ [AnalysisAgent] JSON 파싱 성공")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ [AnalysisAgent] JSON 파싱 실패: {e}")
+                    parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
+                    
+                state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
+                state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+                
+            except Exception as e:
+                print(f"❌ [AnalysisAgent] LLM 호출 실패: {e}")
+                state["detailed_analysis"] = []
+                state["overall_assessment"] = {"error": f"LLM 분석 실패: {str(e)}"}
         else:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "당신은 학생의 잠재력을 파악하고 더 높은 단계로 이끌어주는 전문 학습 코치입니다. 학생이 모든 문제를 맞혔을 때, 칭찬과 함께 심화 학습 방향을 구체적으로 제시해주세요."
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""학생은 모든 문제({len(grade_result)}문제)를 정답 처리했습니다.
+            print(f"🚀 [AnalysisAgent] 전부 정답 - 심화 학습 LLM 호출 시작")
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "당신은 학생의 잠재력을 파악하고 더 높은 단계로 이끌어주는 전문 학습 코치입니다. 학생이 모든 문제를 맞혔을 때, 칭찬과 함께 심화 학습 방향을 구체적으로 제시해주세요."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"""학생은 모든 문제({len(grade_result)}문제)를 정답 처리했습니다.
 items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 구조적으로 설명하고 다음 학습 단계를 제안하세요.
 과목명은 각 item의 subject를 사용하세요.
 
@@ -232,44 +311,50 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
 ```json
 {{
   "overall_assessment": {{
-    "title": "완벽한 결과! 다음 도전을 위한 제안",
-    "strengths_analysis": "문항 과목별 정답률 100%를 바탕으로, 학생이 어떤 개념과 문제 해결 능력이 뛰어난지 구체적으로 분석하고 칭찬해주세요.",
+    "title": "완벽한 성취!",
+    "strengths_analysis": "과목별 강점 분석 (구체적이고 구체적으로)",
     "deepen_learning_plan": {{
-      "title": "실력 유지를 위한 심화 학습 계획",
-      "recommendations": [
-        "현재 지식을 더 깊게 만들기 위한 구체적인 학습 활동 제안 (예: '관련 심화 문제집 풀이', '유사한 개념을 다른 과목과 연결해보기')",
-        "새로운 도전 과제 제안 (예: '경시대회 문제 맛보기', '관련 주제에 대한 프로젝트 학습')"
-      ],
-      "recommended_resources": ["심화 학습에 도움이 될 만한 자료나 책, 강의 링크 (있을 경우)"]
+      "title": "심화 학습 계획",
+      "recommendations": ["구체적 권장사항 1", "구체적 권장사항 2", "구체적 권장사항 3"],
+      "recommended_resources": ["심화 자료/강의 (선택)"]
     }},
-    "final_message": "학생의 성취를 축하하고, 앞으로의 성장을 응원하는 격려의 메시지."
+    "final_message": "격려와 도전 의식을 자극하는 메시지"
   }}
 }}
 ```
-모든 내용은 한국어로 작성해주세요.
-"""
-                    }
-                ],
-                temperature=0,
-                max_completion_tokens=1024,
-                top_p=1,
-                stream=False,
-                response_format={"type": "json_object"},
-                stop=None
-            )
+모든 내용은 한국어로 작성해주세요."""
+                        }
+                    ],
+                    temperature=LLM_TEMPERATURE,
+                    max_completion_tokens=LLM_MAX_TOKENS,
+                    top_p=1,
+                    stream=False,
+                    response_format={"type": "json_object"},
+                    stop=None
+                )
 
-            feedback_content = completion.choices[0].message.content
-            try:
-                parsed_feedback = json.loads(feedback_content)
-            except json.JSONDecodeError:
-                parsed_feedback = {"overall_assessment": {}}
-            state["detailed_analysis"] = []
-            state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+                feedback_content = completion.choices[0].message.content
+                print(f"✅ [AnalysisAgent] 심화 학습 LLM 응답 완료: {len(feedback_content)}자")
+                
+                try:
+                    parsed_feedback = json.loads(feedback_content)
+                    print(f"✅ [AnalysisAgent] 심화 학습 JSON 파싱 성공")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ [AnalysisAgent] 심화 학습 JSON 파싱 실패: {e}")
+                    parsed_feedback = {"overall_assessment": {}}
+                    
+                state["detailed_analysis"] = []
+                state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+            except Exception as e:
+                print(f"❌ [AnalysisAgent] 심화 학습 LLM 호출 실패: {e}")
+                state["detailed_analysis"] = []
+                state["overall_assessment"] = {"error": f"심화 학습 LLM 분석 실패: {str(e)}"}
 
         state["messages"].append(AIMessage(content="분석 및 피드백 생성 완료"))
+        print(f"✅ [AnalysisAgent] _generate_feedback 완료")
         return state
 
-    def execute(self, input_data: Dict) -> AnalysisResult:
+    def invoke(self, input_data: Dict) -> AnalysisResult:
         """메인 실행
         1) 입력 검증: 필수 필드 유무/길이 일치 확인
         2) 상태 구성: grade_result는 ScoreEngine의 results([0,1]) 사용
@@ -277,17 +362,34 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
         4) 반환: analysis만 포함한 최소 스키마
         """
         try:
+            print(f"\n🔍 [AnalysisAgent] invoke 시작")
+            print(f"  - 입력 데이터 키: {list(input_data.keys())}")
+            print(f"  - 입력 데이터 타입: {type(input_data)}")
+            
+            # 각 필드별 상세 로깅
+            for field in ["problem", "problem_types", "user_answer", "solution_answer", "solution", "results"]:
+                value = input_data.get(field)
+                if value is not None:
+                    print(f"  - {field}: {type(value)} = {len(value) if isinstance(value, (list, dict)) else value}")
+                else:
+                    print(f"  - {field}: None (누락)")
+            
             # 입력 데이터 검증
-            required_fields = ["problem", "problem_types", "user_answer", "solution_answer", "solution", "results"]
+            required_fields = ["problem", "problem_types", "user_answer", "solution_answer", "results"]
             missing_fields = [field for field in required_fields if field not in input_data]
             if missing_fields:
+                print(f"❌ [AnalysisAgent] 필수 필드 누락: {missing_fields}")
                 return _error(f"필수 필드가 누락되었습니다: {missing_fields}")
 
             # 데이터 길이 일치 확인
             lengths = [len(input_data[field]) for field in required_fields]
+            print(f"  - 각 필드 길이: {dict(zip(required_fields, lengths))}")
             if len(set(lengths)) > 1:
+                print(f"❌ [AnalysisAgent] 데이터 길이 불일치: {dict(zip(required_fields, lengths))}")
                 return _error(f"모든 필드의 데이터 길이가 일치하지 않습니다: {dict(zip(required_fields, lengths))}")
 
+            print(f"✅ [AnalysisAgent] 입력 데이터 검증 통과")
+            
             # 초기 상태 설정
             initial_state = AnalysisState(
                 messages=[HumanMessage(content="분석을 시작합니다.")],
@@ -295,14 +397,26 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
                 problem_types=input_data.get("problem_types", []),
                 user_answer=input_data.get("user_answer", []),
                 solution_answer=input_data.get("solution_answer", []),
-                solution=input_data.get("solution", []),
+                solution=input_data.get("solution", []),  # 선택적 필드
                 grade_result=input_data.get("results", []),
                 detailed_analysis=[],
                 overall_assessment={},
             )
+            
+            print(f"✅ [AnalysisAgent] 초기 상태 설정 완료")
+            print(f"  - problem: {len(initial_state['problem'])}개")
+            print(f"  - problem_types: {len(initial_state['problem_types'])}개")
+            print(f"  - user_answer: {len(initial_state['user_answer'])}개")
+            print(f"  - solution_answer: {len(initial_state['solution_answer'])}개")
+            print(f"  - solution: {len(initial_state['solution'])}개")
+            print(f"  - grade_result: {len(initial_state['grade_result'])}개")
 
             # 그래프 실행
+            print(f"🚀 [AnalysisAgent] 그래프 실행 시작")
             result = self.graph.invoke(initial_state)
+            print(f"✅ [AnalysisAgent] 그래프 실행 완료")
+            print(f"  - 결과 타입: {type(result)}")
+            print(f"  - 결과 키: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
 
             return _success(
                 analysis={
@@ -312,6 +426,9 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
             )
 
         except Exception as e:
+            print(f"❌ [AnalysisAgent] 예외 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return _error(f"분석 실행 중 오류 발생: {str(e)}")
 
 # 사용 예제(콘솔 출력용 유틸리티)

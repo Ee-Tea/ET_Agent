@@ -1,5 +1,5 @@
 from openai import OpenAI
-from typing import List
+from typing import List, Dict, Any, Optional
 import os 
 import json
 import re
@@ -183,3 +183,105 @@ def parse_generator_input(user_question: str) -> dict:
             "mode": "full_exam",
             "difficulty": "중급"
         }
+
+# teacher_nodes.py
+# 노드 내부에서 사용되는 헬퍼 함수들과 라우팅 로직
+
+# ========== 기존 함수들 ==========
+def get_user_answer(user_query: str) -> List[str]:
+    """사용자 입력에서 답안 추출"""
+    # 기존 구현 유지
+    pass
+
+def parse_generator_input(user_query: str) -> Dict[str, Any]:
+    """사용자 입력에서 생성 파라미터 추출"""
+    # 기존 구현 유지
+    pass
+
+def user_intent(user_query: str) -> str:
+    """사용자 의도 분류"""
+    # 기존 구현 유지
+    pass
+
+# ========== 라우팅 함수들 ==========
+def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
+    """solution 노드 라우팅"""
+    # 우선순위: 전처리 필요 → 전처리 후 solution → 기존 문제로 solution
+    from teacher_util import has_files_to_preprocess, has_questions
+    
+    if has_files_to_preprocess(state):
+        next_node = "preprocess"
+        print("📄 PDF 파일 전처리 후 solution 실행")
+    elif has_questions(state):
+        next_node = "solution"
+        print("📄 기존 문제로 solution 실행")
+    else:
+        next_node = "mark_after_generator_solution"
+    
+    new_state = {**state}
+    new_state.setdefault("routing", {})
+    new_state["routing"]["solution_next"] = next_node
+    return new_state
+
+def route_score(state: Dict[str, Any]) -> Dict[str, Any]:
+    """score 노드 라우팅"""
+    from teacher_util import has_solution_answers
+    
+    next_node = "score" if has_solution_answers(state) else "mark_after_solution_score"
+    new_state = {**state}
+    new_state.setdefault("routing", {})
+    new_state["routing"]["score_next"] = next_node
+    return new_state
+
+def route_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
+    """analysis 노드 라우팅"""
+    from teacher_util import has_score
+    
+    next_node = "analysis" if has_score(state) else "mark_after_score_analysis"
+    new_state = {**state}
+    new_state.setdefault("routing", {})
+    new_state["routing"]["analysis_next"] = next_node
+    return new_state
+
+# ========== 마킹 함수들 ==========
+def mark_after_generator_solution(state: Dict[str, Any]) -> Dict[str, Any]:
+    """generator 후 solution 실행을 위한 마킹"""
+    ns = {**state}
+    ns.setdefault("routing", {})
+    ns["routing"]["after_generator"] = "solution"
+    return ns
+
+def mark_after_solution_score(state: Dict[str, Any]) -> Dict[str, Any]:
+    """solution 후 score 실행을 위한 마킹"""
+    ns = {**state}
+    ns.setdefault("routing", {})
+    ns["routing"]["after_solution"] = "score"
+    return ns
+
+def mark_after_score_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
+    """score 후 analysis 실행을 위한 마킹"""
+    ns = {**state}
+    ns.setdefault("routing", {})
+    ns["routing"]["after_score"] = "analysis"
+    return ns
+
+# ========== 포스트 라우팅 함수들 ==========
+def post_generator_route(state: Dict[str, Any]) -> str:
+    """generator 실행 후 다음 노드 결정"""
+    nxt = ((state.get("routing") or {}).get("after_generator") or "").strip()
+    return nxt if nxt else "generate_problem_pdf"  # 기본적으로 문제집 PDF 생성
+
+def post_solution_route(state: Dict[str, Any]) -> str:
+    """solution 실행 후 다음 노드 결정"""
+    nxt = ((state.get("routing") or {}).get("after_solution") or "").strip()
+    return nxt if nxt else "generate_answer_pdf"  # 기본적으로 답안집 PDF 생성
+
+def post_score_route(state: Dict[str, Any]) -> str:
+    """score 실행 후 다음 노드 결정"""
+    nxt = ((state.get("routing") or {}).get("after_score") or "").strip()
+    return nxt if nxt else "analysis"  # 기본적으로 분석 진행
+
+def post_analysis_route(state: Dict[str, Any]) -> str:
+    """analysis 실행 후 다음 노드 결정"""
+    nxt = ((state.get("routing") or {}).get("after_analysis") or "").strip()
+    return nxt if nxt else "generate_analysis_pdf"  # 기본적으로 분석 리포트 PDF 생성

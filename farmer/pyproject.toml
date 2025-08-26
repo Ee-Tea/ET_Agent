@@ -1,5 +1,5 @@
 [project]
-name = "ET-Agent-Farmer"
+name = "eejang"
 version = "0.1.0"
 description = "농업 정보 제공 RAG 시스템 (작물 추천, 재해 대응, 판매 지원)"
 authors = [

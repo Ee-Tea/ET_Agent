@@ -1,0 +1,260 @@
+import os
+import json
+from typing import TypedDict, Optional, Any, Dict, List
+from dotenv import load_dotenv, find_dotenv
+from pathlib import Path
+from datetime import datetime
+
+# 환경 변수 로드
+load_dotenv(find_dotenv())
+
+# Milvus / Embedding 설정
+MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "root:milvus")
+MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "hongyoungjun")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
+
+# LLM 설정
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
+
+# Web Search 설정
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY가 .env에 설정되어야 합니다.")
+
+# LangChain / LangGraph
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Milvus
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_groq import ChatGroq
+from langgraph.graph import StateGraph, END
+from langchain_core.runnables.graph import MermaidDrawMethod
+from pymilvus import connections
+
+# --- 프롬프트 ---
+RAG_PROMPT_TMPL = """
+당신은 대한민국 농업 작물 재배 방법 전문가입니다.
+아래 '문맥'만 사용해 질문에 답하세요.
+
+[문맥]
+{context}
+
+규칙:
+- 문맥에 없는 정보/추측/한자 금지.
+- 한글로만 작성.
+- 단계/설명은 "한 문장씩 줄바꿈".
+- 문맥에 근거 없으면: "주어진 정보로는 답변할 수 없습니다."
+
+질문: {question}
+답변:
+"""
+rag_prompt = ChatPromptTemplate.from_template(RAG_PROMPT_TMPL)
+
+WEB_PROMPT_TMPL = """
+당신은 대한민국 농업 작물 재배 방법 전문가입니다.
+아래 '웹 검색 결과'와 '질문'을 바탕으로 답변을 생성하세요.
+
+[웹 검색 결과]
+{search_results}
+
+규칙:
+- 검색 결과만 사용해 질문에 답하세요.
+- 한글로만 작성.
+- 답변이 불가능하면 "주어진 정보로는 답변할 수 없습니다."라고 작성하세요.
+
+🟢 질문: {question}
+✨ 답변:
+"""
+web_prompt = ChatPromptTemplate.from_template(WEB_PROMPT_TMPL)
+
+# --- 상태 정의 ---
+class GraphState(TypedDict):
+    """LangGraph의 상태를 정의합니다."""
+    question: Optional[str]
+    vectorstore: Optional[Milvus]
+    context: Optional[str]
+    answer: Optional[str]
+    web_search_results: Optional[str]
+
+# --- Embeddings 및 LLM ---
+embedding_model = HuggingFaceEmbeddings(
+    model_name=EMBED_MODEL_NAME,
+    model_kwargs={"device": "cpu"}
+)
+
+def make_llm() -> ChatGroq:
+    """ChatGroq LLM 인스턴스를 생성합니다."""
+    return ChatGroq(model_name=GROQ_MODEL, temperature=TEMPERATURE, api_key=GROQ_API_KEY)
+
+# --- LangGraph 노드들 ---
+def load_milvus_node(state: GraphState) -> Dict[str, Any]:
+    """Milvus 벡터스토어를 로드하고 상태에 추가합니다."""
+    print("--- 🧩 노드 시작: Milvus 벡터스토어 로드 ---")
+    
+    if "default" not in connections.list_connections() or not connections.has_connection("default"):
+        print("    - Milvus 연결이 존재하지 않아 새로 연결을 시도합니다.")
+        connections.connect(alias="default", host="localhost", port="19530")
+
+    try:
+        vs = Milvus(
+            embedding_model,
+            collection_name=MILVUS_COLLECTION,
+            connection_args={"host": "localhost", "port": "19530"}
+        )
+        print("    ✅ Milvus 벡터스토어 로드 완료. (컬렉션: {})".format(MILVUS_COLLECTION))
+        return {**state, "vectorstore": vs}
+    except Exception as e:
+        print(f"    ❌ Milvus 벡터스토어 로드 실패: {e}")
+        raise ConnectionError("Milvus 벡터스토어 로드 실패")
+
+def retrieve_node(state: GraphState) -> Dict[str, Any]:
+    """질문에 대한 관련 문서를 Milvus에서 검색하고 유사도 점수를 출력합니다."""
+    print("--- 🧩 노드 시작: 문서 검색 ---")
+    question = state.get("question")
+    vectorstore = state.get("vectorstore")
+
+    if not question or not vectorstore:
+        print("    ❌ 오류: 질문 또는 벡터스토어가 누락되었습니다.")
+        raise ValueError("질문 또는 벡터스토어가 누락되었습니다.")
+
+    print(f"    - 질문: '{question}'")
+    # 유사도 점수와 함께 문서 검색
+    docs_with_scores = vectorstore.similarity_search_with_score(question, k=5)
+    
+    context = ""
+    print(f"    ✅ {len(docs_with_scores)}개의 관련 문서 검색 완료.")
+    print("    📄 **검색된 문서 및 유사도 점수:**")
+    for i, (doc, score) in enumerate(docs_with_scores):
+        context += f"\n\n{doc.page_content}"
+        print(f"    - 문서 {i+1} (점수: {score:.4f}): '{doc.page_content[:100]}...'")
+
+    return {**state, "context": context}
+
+def generate_rag_node(state: GraphState) -> Dict[str, Any]:
+    """검색된 문맥과 질문을 바탕으로 LLM을 사용해 답변을 생성합니다."""
+    print("--- 🧩 노드 시작: RAG 답변 생성 ---")
+    context = state.get("context")
+    question = state.get("question")
+
+    if not context or not question:
+        print("    ❌ 오류: 문맥 또는 질문이 누락되었습니다.")
+        raise ValueError("문맥 또는 질문이 누락되었습니다.")
+    
+    print("\n    ➡️ **LLM이 참고하는 전체 문맥:**")
+    print("    " + "="*80)
+    print(f"    {context}")
+    print("    " + "="*80)
+    
+    print("\n    - LLM에 답변 생성을 요청합니다.")
+    chain = (
+        rag_prompt
+        | make_llm()
+        | StrOutputParser()
+    )
+    
+    ans = chain.invoke({"context": context, "question": question})
+    print("    ✅ RAG 답변 생성 완료.")
+    print(f"    - 생성된 답변: '{ans[:100]}...'")
+    return {**state, "answer": ans}
+
+def web_search_node(state: GraphState) -> Dict[str, Any]:
+    """Tavily를 사용해 웹 검색을 수행합니다."""
+    print("--- 🧩 노드 시작: 웹 검색 ---")
+    question = state.get("question")
+    if not question:
+        print("    ❌ 오류: 질문이 누락되었습니다.")
+        raise ValueError("질문이 누락되었습니다.")
+        
+    if not TAVILY_API_KEY:
+        print("    ⚠️ 경고: TAVILY_API_KEY가 설정되지 않아 웹 검색을 건너뜁니다.")
+        return {**state, "web_search_results": "웹 검색 비활성화"}
+        
+    print(f"    - 질문: '{question}'에 대한 웹 검색 시작...")
+    search_tool = TavilySearchResults(max_results=3)
+    results = search_tool.invoke({"query": question})
+    search_results_str = "\n\n".join([json.dumps(r) for r in results])
+    print("    ✅ 웹 검색 결과 수신.")
+    print(f"    - 검색 결과: {len(results)}개")
+    return {**state, "web_search_results": search_results_str}
+
+def generate_web_node(state: GraphState) -> Dict[str, Any]:
+    """웹 검색 결과를 바탕으로 답변을 생성합니다."""
+    print("--- 🧩 노드 시작: 웹 기반 답변 생성 ---")
+    question = state.get("question")
+    search_results = state.get("web_search_results")
+    
+    if not question or not search_results or search_results == "웹 검색 비활성화":
+        print("    ⚠️ 경고: 웹 검색 정보가 불충분하여 답변 생성이 불가능합니다.")
+        return {**state, "answer": "주어진 정보로는 답변할 수 없습니다."}
+        
+    print("    - LLM에 웹 검색 결과를 바탕으로 답변 생성을 요청합니다.")
+    chain = (
+        web_prompt
+        | make_llm()
+        | StrOutputParser()
+    )
+    
+    ans = chain.invoke({"question": question, "search_results": search_results})
+    print("    ✅ 웹 기반 답변 생성 완료.")
+    print(f"    - 생성된 답변: '{ans[:100]}...'")
+    return {**state, "answer": ans}
+
+# --- 조건부 라우팅 ---
+def route_to_web_search(state: GraphState) -> str:
+    """RAG 답변에 따라 다음 노드를 결정합니다."""
+    print("--- 🧭 라우터 시작: 다음 단계 결정 ---")
+    answer = state.get("answer")
+    if answer and "주어진 정보로는 답변할 수 없습니다." in answer:
+        print("    ↪️ RAG 답변 실패! '주어진 정보로는 답변할 수 없습니다.'가 포함되어 있습니다.")
+        print("    - 다음 노드로 'web_search'를 선택합니다.")
+        return "web_search"
+    else:
+        print("    🎉 RAG 답변 성공! 유효한 답변이 생성되었습니다.")
+        print("    - 파이프라인을 종료합니다.")
+        return "end"
+
+# --- 그래프 빌드 ---
+def build_graph():
+    """LangGraph를 사용하여 RAG 및 웹 검색 파이프라인을 정의하고 컴파일합니다."""
+    g = StateGraph(GraphState)
+    
+    g.add_node("load_milvus", load_milvus_node)
+    g.add_node("retrieve", retrieve_node)
+    g.add_node("generate_rag", generate_rag_node)
+    g.add_node("web_search", web_search_node)
+    g.add_node("generate_web", generate_web_node)
+
+    g.set_entry_point("load_milvus")
+    g.add_edge("load_milvus", "retrieve")
+    g.add_edge("retrieve", "generate_rag")
+    
+    g.add_conditional_edges(
+        "generate_rag",
+        route_to_web_search,
+        {"web_search": "web_search", "end": END}
+    )
+    
+    g.add_edge("web_search", "generate_web")
+    g.add_edge("generate_web", END)
+    
+    return g.compile()
+
+# --- 메인 실행 ---
+if __name__ == "__main__":
+    print("💬 Milvus 기반 LangGraph RAG + WebSearch 시작 (종료)")
+    
+    app = build_graph()
+    try:
+        graph_image_path = "milvus_agent_workflow_llm.png"
+        Path(graph_image_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(graph_image_path, "wb") as f:
+            f.write(app.get_graph().draw_mermaid_png(draw_method=MermaidDrawMethod.API))
+        print(f"\n✅ LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        print(f"❌ 그래프 시각화 중 오류 발생: {e}")
+        print(" (Mermaid API 호출 또는 네트워크 문제일 수 있습니다.)")

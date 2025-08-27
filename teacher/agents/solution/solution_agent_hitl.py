@@ -52,6 +52,11 @@ class SolutionState(TypedDict):
     interaction_count: int       # 상호작용 횟수
     max_interactions: int        # 최대 상호작용 횟수
     
+    # 품질 평가 관련 상태
+    quality_scores: Dict[str, float]  # 세부 품질 점수들
+    total_quality_score: float        # 총 품질 점수
+    quality_threshold: float          # 품질 임계값
+    
     results: List[Dict]
     validated: bool
     retry_count: int             # 검증 실패 시 재시도 횟수
@@ -61,8 +66,9 @@ class SolutionState(TypedDict):
 class SolutionAgent(BaseAgent):
     """Human-in-the-Loop가 포함된 문제 해답/풀이 생성 에이전트"""
 
-    def __init__(self, max_interactions: int = 5):
+    def __init__(self, max_interactions: int = 5, hitl_mode: str = "smart"):
         self.max_interactions = max_interactions
+        self.hitl_mode = hitl_mode  # "auto", "manual", "smart"
         self.graph = self._create_graph()
         
     @property
@@ -124,13 +130,185 @@ class SolutionAgent(BaseAgent):
         return graph.compile()
     
     def _route_after_validation(self, state: SolutionState) -> str:
-        """검증 후 라우팅 결정"""
+        """검증 후 라우팅 결정 (HITL 모드에 따라)"""
         if state["validated"]:
             return "ok"
         elif state.get("retry_count", 0) < 3:
             return "retry"
         else:
+            # HITL 모드에 따라 결정
+            if self.hitl_mode == "auto":
+                return "ok"  # 자동 모드에서는 검증 실패해도 통과
+            elif self.hitl_mode == "smart":
+                # 스마트 모드: 풀이 품질을 평가하여 결정
+                return self._smart_hitl_decision(state)
+            else:  # manual 모드
+                return "feedback_needed"
+    
+    def _smart_hitl_decision(self, state: SolutionState) -> str:
+        """스마트 HITL: 풀이 품질을 평가하여 HITL 적용 여부 결정"""
+        # 다차원 품질 평가 수행
+        quality_score = self._evaluate_solution_quality(state)
+        
+        print(f"📊 풀이 품질 점수: {quality_score:.2f}/100")
+        
+        # 품질 점수에 따른 HITL 적용 여부 결정
+        if quality_score >= 80:
+            print("✅ 품질이 높음 - 자동 통과")
+            return "ok"
+        elif quality_score >= 60:
+            print("⚠️ 품질이 보통 - HITL 적용")
             return "feedback_needed"
+        else:
+            print("❌ 품질이 낮음 - HITL 필수 적용")
+            return "feedback_needed"
+    
+    def _evaluate_solution_quality(self, state: SolutionState) -> float:
+        """다차원 풀이 품질 평가 (0-100점)"""
+        llm = self._llm(0)
+        
+        # 1. 정확성 평가 (30점)
+        accuracy_score = self._evaluate_accuracy(state, llm)
+        
+        # 2. 완성도 평가 (25점)
+        completeness_score = self._evaluate_completeness(state, llm)
+        
+        # 3. 이해도 평가 (25점)
+        clarity_score = self._evaluate_clarity(state, llm)
+        
+        # 4. 논리성 평가 (20점)
+        logic_score = self._evaluate_logic(state, llm)
+        
+        # 가중 평균 계산
+        total_score = (
+            accuracy_score * 0.30 +
+            completeness_score * 0.25 +
+            clarity_score * 0.25 +
+            logic_score * 0.20
+        )
+        
+        # 품질 점수들을 state에 저장
+        state["quality_scores"] = {
+            "accuracy": accuracy_score,
+            "completeness": completeness_score,
+            "clarity": clarity_score,
+            "logic": logic_score
+        }
+        state["total_quality_score"] = total_score
+        
+        print(f"📈 품질 세부 점수:")
+        print(f"   정확성: {accuracy_score:.1f}/100 (가중치: 30%)")
+        print(f"   완성도: {completeness_score:.1f}/100 (가중치: 25%)")
+        print(f"   이해도: {clarity_score:.1f}/100 (가중치: 25%)")
+        print(f"   논리성: {logic_score:.1f}/100 (가중치: 20%)")
+        print(f"   총점: {total_score:.1f}/100")
+        
+        return total_score
+    
+    def _evaluate_accuracy(self, state: SolutionState, llm) -> float:
+        """정확성 평가 (30점)"""
+        prompt = f"""
+        다음 풀이의 정확성을 평가해주세요:
+        
+        문제: {state['user_problem']}
+        보기: {state['user_problem_options']}
+        정답: {state['generated_answer']}
+        풀이: {state['generated_explanation']}
+        
+        다음 기준으로 평가하세요:
+        1. 정답이 올바른가? (10점)
+        2. 풀이 과정이 정확한가? (10점)
+        3. 기술적 내용이 정확한가? (10점)
+        
+        각 항목별로 점수를 매기고, 총점을 계산하여 0-100 사이의 숫자로만 답변하세요.
+        """
+        
+        try:
+            response = llm.invoke(prompt)
+            score_text = response.content.strip()
+            # 숫자만 추출
+            score_match = re.search(r'(\d+)', score_text)
+            if score_match:
+                return min(100, max(0, float(score_match.group(1))))
+            return 70  # 기본값
+        except:
+            return 70
+    
+    def _evaluate_completeness(self, state: SolutionState, llm) -> float:
+        """완성도 평가 (25점)"""
+        prompt = f"""
+        다음 풀이의 완성도를 평가해주세요:
+        
+        문제: {state['user_problem']}
+        풀이: {state['generated_explanation']}
+        
+        다음 기준으로 평가하세요:
+        1. 핵심 개념을 모두 포함하는가? (10점)
+        2. 단계별 설명이 충분한가? (10점)
+        3. 예시나 비유가 적절한가? (5점)
+        
+        각 항목별로 점수를 매기고, 총점을 계산하여 0-100 사이의 숫자로만 답변하세요.
+        """
+        
+        try:
+            response = llm.invoke(prompt)
+            score_text = response.content.strip()
+            score_match = re.search(r'(\d+)', score_text)
+            if score_match:
+                return min(100, max(0, float(score_match.group(1))))
+            return 70
+        except:
+            return 70
+    
+    def _evaluate_clarity(self, state: SolutionState, llm) -> float:
+        """이해도 평가 (25점)"""
+        prompt = f"""
+        다음 풀이의 이해도를 평가해주세요:
+        
+        풀이: {state['generated_explanation']}
+        
+        다음 기준으로 평가하세요:
+        1. 문장이 명확하고 읽기 쉬운가? (10점)
+        2. 전문 용어가 적절히 설명되었는가? (10점)
+        3. 전체적인 흐름이 자연스러운가? (5점)
+        
+        각 항목별로 점수를 매기고, 총점을 계산하여 0-100 사이의 숫자로만 답변하세요.
+        """
+        
+        try:
+            response = llm.invoke(prompt)
+            score_text = response.content.strip()
+            score_match = re.search(r'(\d+)', score_text)
+            if score_match:
+                return min(100, max(0, float(score_match.group(1))))
+            return 70
+        except:
+            return 70
+    
+    def _evaluate_logic(self, state: SolutionState, llm) -> float:
+        """논리성 평가 (20점)"""
+        prompt = f"""
+        다음 풀이의 논리성을 평가해주세요:
+        
+        문제: {state['user_problem']}
+        풀이: {state['generated_explanation']}
+        
+        다음 기준으로 평가하세요:
+        1. 논리적 추론이 올바른가? (10점)
+        2. 인과관계가 명확한가? (10점)
+        
+        각 항목별로 점수를 매기고, 총점을 계산하여 0-100 사이의 숫자로만 답변하세요.
+        """
+        
+        try:
+            response = llm.invoke(prompt)
+            score_text = response.content.strip()
+            score_match = re.search(r'(\d+)', score_text)
+            if score_match:
+                return min(100, max(0, float(score_match.group(1))))
+            return 70
+        except:
+            return 70
     
     def _route_after_feedback(self, state: SolutionState) -> str:
         """사용자 피드백 후 라우팅 결정"""
@@ -481,6 +659,8 @@ class SolutionAgent(BaseAgent):
             "validated": state["validated"],
             "interaction_count": state.get("interaction_count", 0),
             "user_feedback": state.get("user_feedback", ""),
+            "quality_scores": state.get("quality_scores", {}),
+            "total_quality_score": state.get("total_quality_score", 0.0),
             "chat_history": state.get("chat_history", [])
         }
         
@@ -491,6 +671,50 @@ class SolutionAgent(BaseAgent):
 
     def invoke(
             self, 
+            user_input_txt: str,
+            user_problem: str,
+            user_problem_options: List[str],
+            vectorstore: Optional[Milvus] = None,
+            recursion_limit: int = 1000,
+        ) -> Dict:
+        
+        print(f"🚀 HITL 모드: {self.hitl_mode}")
+        
+        # 단일 문제 처리
+        return self._process_single_problem(
+            user_input_txt, user_problem, user_problem_options, vectorstore, recursion_limit
+        )
+    
+    def invoke_batch(
+            self,
+            problems: List[Dict[str, Any]],  # [{"problem": "...", "options": [...], "input_txt": "..."}]
+            vectorstore: Optional[Milvus] = None,
+            recursion_limit: int = 1000,
+            batch_feedback: bool = True,  # 배치 단위로 피드백 수집
+        ) -> Dict[str, Any]:
+        """
+        여러 문제를 배치로 처리 (HITL 최적화)
+        
+        Args:
+            problems: 문제 리스트
+            vectorstore: 벡터스토어
+            recursion_limit: 재귀 제한
+            batch_feedback: 배치 단위 피드백 여부
+        """
+        print(f"🚀 배치 처리 시작: {len(problems)}개 문제, HITL 모드: {self.hitl_mode}")
+        
+        if self.hitl_mode == "auto":
+            # 자동 모드: 모든 문제를 자동으로 처리
+            return self._process_batch_auto(problems, vectorstore, recursion_limit)
+        elif batch_feedback and self.hitl_mode in ["manual", "smart"]:
+            # 배치 피드백 모드: 모든 문제 처리 후 한 번에 피드백
+            return self._process_batch_with_feedback(problems, vectorstore, recursion_limit)
+        else:
+            # 개별 HITL 모드: 문제별로 개별 처리
+            return self._process_batch_individual(problems, vectorstore, recursion_limit)
+    
+    def _process_single_problem(
+            self,
             user_input_txt: str,
             user_problem: str,
             user_problem_options: List[str],
@@ -539,6 +763,9 @@ class SolutionAgent(BaseAgent):
             "improved_explanation": "",
             "interaction_count": 0,
             "max_interactions": self.max_interactions,
+            "quality_scores": {},
+            "total_quality_score": 0.0,
+            "quality_threshold": 80.0,  # 기본 임계값
             "results": [],
             "chat_history": []
         }
@@ -558,6 +785,180 @@ class SolutionAgent(BaseAgent):
             print(f"   - final_state 내용: {final_state}")
         
         return final_state
+    
+    def _process_batch_auto(self, problems: List[Dict[str, Any]], vectorstore, recursion_limit) -> Dict[str, Any]:
+        """자동 모드: 모든 문제를 자동으로 처리 (HITL 없음)"""
+        print("🤖 자동 모드: 모든 문제를 자동으로 처리합니다.")
+        
+        results = []
+        for i, problem in enumerate(problems):
+            print(f"\n📝 문제 {i+1}/{len(problems)} 처리 중...")
+            
+            # HITL을 비활성화하고 자동 처리
+            original_mode = self.hitl_mode
+            self.hitl_mode = "auto"
+            
+            try:
+                result = self._process_single_problem(
+                    problem.get("input_txt", ""),
+                    problem.get("problem", ""),
+                    problem.get("options", []),
+                    vectorstore,
+                    recursion_limit
+                )
+                results.append(result)
+            finally:
+                self.hitl_mode = original_mode
+        
+        return {
+            "mode": "auto",
+            "total_problems": len(problems),
+            "processed_problems": len(results),
+            "results": results
+        }
+    
+    def _process_batch_with_feedback(self, problems: List[Dict[str, Any]], vectorstore, recursion_limit) -> Dict[str, Any]:
+        """배치 피드백 모드: 모든 문제 처리 후 한 번에 피드백 수집"""
+        print("💬 배치 피드백 모드: 모든 문제를 처리한 후 피드백을 수집합니다.")
+        
+        # 1단계: 모든 문제를 자동으로 처리
+        batch_results = []
+        for i, problem in enumerate(problems):
+            print(f"\n📝 문제 {i+1}/{len(problems)} 자동 처리 중...")
+            
+            # 임시로 자동 모드로 설정
+            original_mode = self.hitl_mode
+            self.hitl_mode = "auto"
+            
+            try:
+                result = self._process_single_problem(
+                    problem.get("input_txt", ""),
+                    problem.get("problem", ""),
+                    problem.get("options", []),
+                    vectorstore,
+                    recursion_limit
+                )
+                batch_results.append({
+                    "problem_data": problem,
+                    "result": result,
+                    "needs_improvement": not result.get("validated", False)
+                })
+            finally:
+                self.hitl_mode = original_mode
+        
+        # 2단계: 개선이 필요한 문제들만 사용자에게 피드백 요청
+        improvement_candidates = [r for r in batch_results if r["needs_improvement"]]
+        
+        if improvement_candidates:
+            print(f"\n🔍 {len(improvement_candidates)}개 문제에 대해 개선이 필요합니다.")
+            print("사용자 피드백을 수집하여 문제를 개선하겠습니다.")
+            
+            # 사용자에게 배치 피드백 요청
+            self._collect_batch_feedback(improvement_candidates)
+            
+            # 피드백을 바탕으로 문제 개선
+            for candidate in improvement_candidates:
+                self._improve_problem_with_feedback(candidate)
+        else:
+            print("✅ 모든 문제가 자동으로 처리되었습니다.")
+        
+        return {
+            "mode": "batch_feedback",
+            "total_problems": len(problems),
+            "auto_processed": len(batch_results) - len(improvement_candidates),
+            "improved_with_feedback": len(improvement_candidates),
+            "results": batch_results
+        }
+    
+    def _process_batch_individual(self, problems: List[Dict[str, Any]], vectorstore, recursion_limit) -> Dict[str, Any]:
+        """개별 HITL 모드: 문제별로 개별 HITL 처리"""
+        print("👤 개별 HITL 모드: 각 문제마다 개별적으로 피드백을 수집합니다.")
+        
+        results = []
+        for i, problem in enumerate(problems):
+            print(f"\n📝 문제 {i+1}/{len(problems)} HITL 처리 중...")
+            
+            result = self._process_single_problem(
+                problem.get("input_txt", ""),
+                problem.get("problem", ""),
+                problem.get("options", []),
+                vectorstore,
+                recursion_limit
+            )
+            results.append(result)
+        
+        return {
+            "mode": "individual_hitl",
+            "total_problems": len(problems),
+            "results": results
+        }
+    
+    def _collect_batch_feedback(self, improvement_candidates: List[Dict]) -> None:
+        """배치 단위로 사용자 피드백 수집"""
+        print(f"\n💬 {len(improvement_candidates)}개 문제에 대한 배치 피드백을 수집합니다.")
+        
+        # 문제 요약 제공
+        for i, candidate in enumerate(improvement_candidates):
+            problem = candidate["problem_data"]
+            result = candidate["result"]
+            print(f"\n문제 {i+1}: {problem.get('problem', '')[:50]}...")
+            print(f"현재 풀이: {result.get('generated_explanation', '')[:100]}...")
+        
+        # 실제 환경에서는 사용자 입력을 받아야 함
+        print("\n💭 전체적으로 어떤 부분을 개선하면 좋을지 피드백을 주세요.")
+        print("예시: '풀이를 더 쉽게', '용어 설명 추가', '전체적으로 만족' 등")
+        
+        # 시뮬레이션을 위한 자동 피드백
+        batch_feedback = "풀이를 더 쉽게 설명해주고, 중요한 용어에 대한 설명을 추가해주세요."
+        print(f"📝 배치 피드백: {batch_feedback}")
+        
+        # 각 문제에 배치 피드백 적용
+        for candidate in improvement_candidates:
+            candidate["batch_feedback"] = batch_feedback
+    
+    def _improve_problem_with_feedback(self, candidate: Dict) -> None:
+        """배치 피드백을 바탕으로 개별 문제 개선"""
+        problem = candidate["problem_data"]
+        result = candidate["result"]
+        batch_feedback = candidate.get("batch_feedback", "")
+        
+        print(f"\n✨ 문제 개선 중: {problem.get('problem', '')[:50]}...")
+        
+        # LLM을 사용하여 배치 피드백을 바탕으로 풀이 개선
+        llm = self._llm(0.3)
+        
+        improvement_prompt = f"""
+        다음 문제의 풀이를 사용자 피드백에 따라 개선해주세요:
+        
+        문제: {problem.get('problem', '')}
+        보기: {problem.get('options', [])}
+        현재 풀이: {result.get('generated_explanation', '')}
+        
+        사용자 피드백: {batch_feedback}
+        
+        위 피드백을 반영하여 풀이를 개선해주세요.
+        
+        출력 형식:
+        개선된 풀이: [개선된 풀이 내용]
+        개선 사항: [어떤 부분을 어떻게 개선했는지 설명]
+        """
+        
+        try:
+            response = llm.invoke(improvement_prompt)
+            improved_explanation = response.content.strip()
+            
+            # 개선된 풀이 파싱
+            explanation_match = re.search(r"개선된 풀이:\s*(.+)", improved_explanation, re.DOTALL)
+            if explanation_match:
+                candidate["improved_explanation"] = explanation_match.group(1).strip()
+                print("✅ 문제 개선 완료")
+            else:
+                candidate["improved_explanation"] = result.get("generated_explanation", "")
+                print("⚠️ 풀이 개선 실패, 원본 유지")
+                
+        except Exception as e:
+            print(f"⚠️ 풀이 개선 중 오류: {e}")
+            candidate["improved_explanation"] = result.get("generated_explanation", "")
 
 
 if __name__ == "__main__":
@@ -577,7 +978,22 @@ if __name__ == "__main__":
         connection_args={"host": "localhost", "port":"19530"}
     )
 
-    agent = SolutionAgent(max_interactions=5)
+    # HITL 모드 선택
+    print("\n🚀 HITL 모드를 선택하세요:")
+    print("1. auto - 자동 모드 (HITL 없음)")
+    print("2. smart - 스마트 모드 (품질에 따라 자동 결정)")
+    print("3. manual - 수동 모드 (항상 HITL)")
+    
+    mode_choice = input("모드를 선택하세요 (1-3, 기본값: 2): ").strip()
+    
+    if mode_choice == "1":
+        hitl_mode = "auto"
+    elif mode_choice == "3":
+        hitl_mode = "manual"
+    else:
+        hitl_mode = "smart"
+    
+    agent = SolutionAgent(max_interactions=5, hitl_mode=hitl_mode)
 
     user_input_txt = input("\n❓ 사용자 질문: ").strip()
     user_problem = input("\n❓ 사용자 문제: ").strip()
@@ -598,3 +1014,34 @@ if __name__ == "__main__":
     print(f"과목: {final_state.get('generated_subject', '')}")
     print(f"상호작용 횟수: {final_state.get('interaction_count', 0)}")
     print(f"사용자 피드백: {final_state.get('user_feedback', '')}")
+    
+    # 배치 처리 예시 (주석 처리)
+    """
+    # 여러 문제를 배치로 처리하는 예시
+    print("\n🚀 배치 처리 예시:")
+    
+    batch_problems = [
+        {
+            "problem": "프로세스와 스레드의 차이점은?",
+            "options": ["프로세스는 독립적, 스레드는 공유", "프로세스는 공유, 스레드는 독립적", "둘 다 독립적", "둘 다 공유"],
+            "input_txt": "프로세스와 스레드 개념을 이해하고 싶습니다."
+        },
+        {
+            "problem": "데이터베이스 정규화의 목적은?",
+            "options": ["데이터 중복 제거", "데이터 크기 증가", "쿼리 속도 저하", "복잡성 증가"],
+            "input_txt": "정규화의 장단점을 알고 싶습니다."
+        }
+    ]
+    
+    batch_result = agent.invoke_batch(
+        problems=batch_problems,
+        vectorstore=vectorstore,
+        batch_feedback=True
+    )
+    
+    print(f"\n📊 배치 처리 결과:")
+    print(f"모드: {batch_result['mode']}")
+    print(f"총 문제: {batch_result['total_problems']}")
+    print(f"자동 처리: {batch_result.get('auto_processed', 0)}")
+    print(f"피드백 개선: {batch_result.get('improved_with_feedback', 0)}")
+    """

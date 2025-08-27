@@ -280,8 +280,7 @@ def build_graph():
     g.set_entry_point("load_milvus")
     g.add_edge("load_milvus", "retrieve")
     g.add_edge("retrieve", "generate_rag")
-    g.add_conditional_edges("generate_rag", route_to_web_search,
-                            {"user_decision": "user_decision"})
+    g.add_edge("generate_rag", "user_decision")
     g.add_conditional_edges("user_decision", route_user_decision,
                             {"do_web_search": "web_search", "skip_web_search": "generate_answer"})
     g.add_edge("web_search", "generate_web")

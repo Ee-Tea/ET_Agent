@@ -18,18 +18,26 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
   raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
 
-def merge_context(wiki,ddg) -> str:
+def merge_context(wiki, ddg, milvus="") -> str:
     """
     여러 개의 context chunk를 하나의 문자열로 병합합니다.
     """
+    # MilvusDB 결과가 있는지 확인
+    milvus_section = ""
+    if milvus and milvus.strip():
+        milvus_section = f"""
+
+    [MilvusDB 벡터 검색 결과]
+    {milvus}"""
+    
     merge_prompt = f"""
-    다음 두 개의 검색 결과를 읽고 중복되는 내용을 제거한 후, 간결하게 통합하여 설명해 주세요.
+    다음 검색 결과들을 읽고 중복되는 내용을 제거한 후, 간결하게 통합하여 설명해 주세요.
 
     [Wikipedia 결과]
     {wiki}
 
     [DuckDuckGo 결과]
-    {ddg}
+    {ddg}{milvus_section}
 
     ==> 중복을 제거한 요약 결과:
     """

@@ -14,6 +14,7 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
+# print(openai_api_key,OPENAI_LLM_MODEL,LLM_TEMPERATURE,LLM_MAX_TOKENS)
 if not openai_api_key:
   raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다. .env 또는 환경변수에 키를 설정하세요.")
 
@@ -135,7 +136,7 @@ def query_reinforce(state: dict) -> str:
 
     llm = ChatOpenAI(
         api_key=openai_api_key,
-        base_url="https://api.groq.com/openai/v1",
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
         model=OPENAI_LLM_MODEL,
         temperature=0.3,
         max_tokens=LLM_MAX_TOKENS

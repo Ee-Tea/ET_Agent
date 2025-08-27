@@ -37,7 +37,8 @@ from teacher_nodes import (
     get_user_answer, parse_generator_input, user_intent,
     route_solution, route_score, route_analysis,
     mark_after_generator_solution, mark_after_solution_score, mark_after_score_analysis,
-    post_generator_route, post_solution_route, post_score_route, post_analysis_route
+    post_generator_route, post_solution_route, post_score_route, post_analysis_route,
+    generate_user_response
 )
 from file_path_mapper import FilePathMapper
 from datetime import datetime
@@ -1183,6 +1184,32 @@ class Orchestrator:
 
         return new_state
 
+    @traceable(name="teacher.generate_response")
+    def generate_response(self, state: TeacherState) -> TeacherState:
+        """
+        사용자에게 실행 결과를 요약해서 답변하는 노드
+        """
+        print("💬 사용자 답변 생성 노드 실행")
+        new_state: TeacherState = {**state}
+        
+        try:
+            # generate_user_response 함수를 호출하여 사용자 친화적인 답변 생성
+            user_response = generate_user_response(state)
+            
+            # 답변을 shared state에 저장
+            new_state = ensure_shared(new_state)
+            new_state["shared"]["user_response"] = user_response
+            
+            print(f"✅ 사용자 답변 생성 완료: {user_response[:100]}{'...' if len(user_response) > 100 else ''}")
+            
+        except Exception as e:
+            print(f"❌ 사용자 답변 생성 중 오류: {e}")
+            # 오류 발생 시 기본 답변 설정
+            new_state = ensure_shared(new_state)
+            new_state["shared"]["user_response"] = "작업이 완료되었습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
+        
+        return new_state
+
 
 
 
@@ -1260,6 +1287,9 @@ class Orchestrator:
         builder.add_node("generate_problem_pdf", RunnableLambda(self.generate_problem_pdf))
         builder.add_node("generate_answer_pdf", RunnableLambda(self.generate_answer_pdf))
         builder.add_node("generate_analysis_pdf", RunnableLambda(self.generate_analysis_pdf))
+
+        # User Response Generation node
+        builder.add_node("generate_response", RunnableLambda(self.generate_response))
 
         # Routing markers
         builder.add_node("mark_after_generator_solution", RunnableLambda(mark_after_generator_solution))
@@ -1355,7 +1385,8 @@ class Orchestrator:
         builder.add_edge("generate_analysis_pdf", "persist_state")
         builder.add_edge("generate_problem_pdf", "persist_state")
         builder.add_edge("generate_answer_pdf", "persist_state")
-        builder.add_edge("persist_state", END)
+        builder.add_edge("persist_state", "generate_response")
+        builder.add_edge("generate_response", END)
 
         return builder.compile()
     
@@ -1474,6 +1505,11 @@ if __name__ == "__main__":
             if score:
                 # 특정 키가 있다면 골라서 노출하세요 (여기선 크기만)
                 print(f"[Score] keys={list(score.keys())}")
+
+            # 사용자 답변 출력
+            user_response = shared.get("user_response")
+            if user_response:
+                print(f"\n💬 [사용자 답변] {user_response}")
 
             print("-----------------\n")
 

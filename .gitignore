@@ -245,3 +245,5 @@ data/
 data/**
 *.rdb
 *.aof
+keys/
+*.pem

@@ -137,6 +137,19 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# 로그 파일 폴더
+milvusdb_crop65llm_logs/
+
+# 파이썬 캐시 파일
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 파이썬 가상환경 폴더
+venv/
+.venv/
+
 # Environments
 .env
 .envrc

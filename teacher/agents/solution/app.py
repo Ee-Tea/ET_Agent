@@ -25,7 +25,7 @@ except Exception as e:
     st.stop()
 
 load_dotenv()
-GROQ_API_KEY=REDACTED("GROQ_API_KEY=REDACTED(page_title="🧠 문제 해답 생성기 (JSON+Milvus)", layout="wide")
+OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED(page_title="🧠 문제 해답 생성기 (JSON+Milvus)", layout="wide")
 st.title("🧠 문제 해답 생성기 (JSON + Milvus 필수)")
 st.caption("JSON 업로드 후 선택 실행/일괄 실행. 결과는 항상 Milvus에 저장됩니다.")
 
@@ -146,4 +146,4 @@ else:
     st.info("좌측에서 JSON 파일을 업로드하세요.")
 
 # -------- 키 안내 --------
-if not GROQ_API_KEY=REDACTED("ℹ️ `.env`의 GROQ_API_KEY=REDACTED 호출 실패 가능성이 있습니다.")
+if not OPENAI_API_KEY=REDACTED("ℹ️ `.env`의 OPENAI_API_KEY=REDACTED 호출 실패 가능성이 있습니다.")

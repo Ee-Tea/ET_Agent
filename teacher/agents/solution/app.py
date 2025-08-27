@@ -25,7 +25,7 @@ except Exception as e:
     st.stop()
 
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 st.set_page_config(page_title="🧠 문제 해답 생성기 (JSON+Milvus)", layout="wide")
 st.title("🧠 문제 해답 생성기 (JSON + Milvus 필수)")
@@ -148,5 +148,5 @@ else:
     st.info("좌측에서 JSON 파일을 업로드하세요.")
 
 # -------- 키 안내 --------
-if not GROQ_API_KEY:
-    st.caption("ℹ️ `.env`의 GROQ_API_KEY가 비어있습니다. LLM 호출 실패 가능성이 있습니다.")
+if not OPENAI_API_KEY:
+    st.caption("ℹ️ `.env`의 OPENAI_API_KEY가 비어있습니다. LLM 호출 실패 가능성이 있습니다.")

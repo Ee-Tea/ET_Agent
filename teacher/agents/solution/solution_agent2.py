@@ -9,6 +9,21 @@ from langchain_huggingface import HuggingFaceEmbeddings
 import json, re, hashlib
 from langchain_openai import ChatOpenAI
 from ..base_agent import BaseAgent
+from langchain_community.retrievers import BM25Retriever
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+try:
+    from rank_bm25 import BM25Okapi  # optional fallback(bm25 인덱스 없이 후보군 위에서 sparse 스코어링)
+    HAS_RANK_BM25 = True
+except Exception:
+    HAS_RANK_BM25 = False
+
+try:
+    from sentence_transformers import CrossEncoder
+    HAS_CROSS_ENCODER = True
+except Exception:
+    HAS_CROSS_ENCODER = False
+
 
 
 load_dotenv()
@@ -20,6 +35,7 @@ OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "meta-llama/llama-4-scout-17b-1
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
+    
 # ✅ 상태 정의
 class SolutionState(TypedDict):
     # 사용자 입력
@@ -49,6 +65,46 @@ class SolutionAgent(BaseAgent):
     """문제 해답/풀이 생성 에이전트"""
 
     def __init__(self):
+        # --- 하이브리드/리랭크 파라미터 ---
+        self.RETRIEVAL_FETCH_K = int(os.getenv("RETRIEVAL_FETCH_K", "30"))
+        self.HYBRID_TOPK       = int(os.getenv("HYBRID_TOPK", "12"))
+        self.RERANK_TOPK       = int(os.getenv("RERANK_TOPK", "5"))
+        self.HYBRID_ALPHA      = float(os.getenv("HYBRID_ALPHA", "0.5"))
+        self.CHUNK_SIZE        = int(os.getenv("CHUNK_SIZE", "800"))
+        self.CHUNK_OVERLAP     = int(os.getenv("CHUNK_OVERLAP", "150"))
+
+        # --- 반드시 기본값으로 생성해 두기 ---
+        self.bm25_retriever = None      # ← 없으면 AttributeError
+        self.reranker = None            # ← 리랭커도 안전하게 기본값
+        self.rerank_model_name = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+        # CrossEncoder 로드 (없으면 그대로 None)
+        try:
+            from sentence_transformers import CrossEncoder
+            self.reranker = CrossEncoder(self.rerank_model_name, device=os.getenv("RERANK_DEVICE","cpu"))
+            print(f"[Rerank] CrossEncoder loaded: {self.rerank_model_name}")
+        except Exception as e:
+            print(f"[Rerank] load skipped: {e}")
+
+        # (선택) BM25 말뭉치가 있다면 로드
+        bm25_jsonl = os.getenv("BM25_CORPUS_JSONL")
+        if bm25_jsonl and os.path.exists(bm25_jsonl):
+            from langchain_community.retrievers import BM25Retriever
+            from langchain_core.documents import Document
+            docs = []
+            with open(bm25_jsonl, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        docs.append(Document(page_content=obj.get("page_content",""),
+                                             metadata=obj.get("metadata",{})))
+                    except Exception:
+                        pass
+            if docs:
+                self.bm25_retriever = BM25Retriever.from_documents(docs)
+                print(f"[BM25] 인덱스 문서 수: {len(docs)}")
+
+        # 그래프는 맨 마지막에!
         self.graph = self._create_graph()
         
     @property
@@ -99,7 +155,7 @@ class SolutionAgent(BaseAgent):
     def _search_similar_questions(self, state: SolutionState) -> SolutionState:
         print("\n🔍 [1단계] 유사 문제 검색 시작")
         print(state["user_problem"], state["user_problem_options"])
-        
+            
         vectorstore = state.get("vectorstore")
         if vectorstore is None:
             print("⚠️ 벡터스토어가 없어 유사 문제 검색을 건너뜁니다.")
@@ -107,31 +163,125 @@ class SolutionAgent(BaseAgent):
             state["similar_questions_text"] = ""
             print("🔍 [1단계] 유사 문제 검색 함수 종료 (건너뜀)")
             return state
-        
+
+        q = state["user_problem"]
+
+        # ---------- (1) Dense 후보 넉넉히 수집 ----------
         try:
-            results = vectorstore.similarity_search(state["user_problem"], k=3)
+            # 점수 포함 버전이 가능하면 사용(없으면 아래 except에서 대체)
+            dense_scored = vectorstore.similarity_search_with_score(q, k=self.RETRIEVAL_FETCH_K)
+            dense_docs = [d for d, _ in dense_scored]
+            dense_scores = {id(d): float(s) for d, s in dense_scored}
+            # 주의: 어떤 백엔드는 "코사인거리/거리" 등 낮을수록 유사함. 랭크 기반으로 치환해 안정화.
+            print(f"[Dense] fetched: {len(dense_docs)}")
         except Exception as e:
-            print(f"⚠️ 유사 문제 검색 실패: {e}")
-            results = []
-        
+            print(f"[Dense] similarity_search_with_score 실패 → {e} → score 없이 fallback")
+            dense_docs = vectorstore.similarity_search(q, k=self.RETRIEVAL_FETCH_K)
+            dense_scores = {id(d): 1.0/(r+1) for r, d in enumerate(dense_docs)}  # 랭크 기반 가중치
+
+        # ---------- (2) Sparse 후보(BM25) 결합 ----------
+        sparse_docs = []
+        sparse_scores = {}  # id(doc) → score (rank 기반 또는 점수 정규화)
+
+        if self.bm25_retriever is not None:
+            try:
+                sparse_docs = self.bm25_retriever.get_relevant_documents(q)[:self.RETRIEVAL_FETCH_K]
+                for r, d in enumerate(sparse_docs):
+                    sparse_scores[id(d)] = 1.0/(r+1)  # 랭크 기반
+                print(f"[BM25] fetched: {len(sparse_docs)}")
+            except Exception as e:
+                print(f"[BM25] 실패 → {e}")
+
+        elif HAS_RANK_BM25 and dense_docs:
+            # 별도 인덱스가 없다면, dense 후보군 위에서만 BM25 근사 스코어 계산
+            try:
+                def tok(s: str) -> List[str]:
+                    return re.findall(r"[가-힣A-Za-z0-9_]+", (s or "").lower())
+                corpus_toks = [tok(d.page_content) for d in dense_docs]
+                bm25 = BM25Okapi(corpus_toks)
+                q_scores = bm25.get_scores(tok(q))
+                # 점수 정규화 (0~1)
+                if q_scores is not None and len(q_scores) == len(dense_docs):
+                    min_s, max_s = float(min(q_scores)), float(max(q_scores))
+                    rng = (max_s - min_s) or 1.0
+                    for d, s in zip(dense_docs, q_scores):
+                        sparse_scores[id(d)] = (float(s) - min_s) / rng
+                print(f"[BM25-lite] computed over dense pool: {len(dense_docs)}")
+            except Exception as e:
+                print(f"[BM25-lite] 실패 → {e}")
+
+        # ---------- (3) Dense + Sparse 앙상블 ----------
+        # 동일 문서가 양쪽에 섞여 들어올 수 있으므로 content+metadata 일부로 키를 만든다
+        def key_of(doc: Document) -> Tuple[str, str]:
+            return (doc.page_content[:150], json.dumps(doc.metadata, ensure_ascii=False, sort_keys=True)[:150])
+
+        pool: Dict[Tuple[str,str], Dict[str, Any]] = {}
+        # dense 쪽부터 적재
+        for r, d in enumerate(dense_docs):
+            k = key_of(d)
+            pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
+            # 랭크 기반 가중치(안전)
+            wd = 1.0/(r+1)
+            # 점수 있으면 둘 중 큰 것을 사용
+            wd = max(wd, dense_scores.get(id(d), 0.0))
+            pool[k]["dense"] = max(pool[k]["dense"], wd)
+
+        # sparse 쪽 반영
+        for r, d in enumerate(sparse_docs):
+            k = key_of(d)
+            pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
+            ws = 1.0/(r+1)
+            ws = max(ws, sparse_scores.get(id(d), 0.0))
+            pool[k]["sparse"] = max(pool[k]["sparse"], ws)
+
+        # 가중합
+        alpha = self.HYBRID_ALPHA  # 0~1, 1이면 dense만
+        scored = []
+        for k, v in pool.items():
+            score = alpha * v["dense"] + (1.0 - alpha) * v["sparse"]
+            scored.append((v["doc"], score))
+
+        # 상위 K 추림
+        scored.sort(key=lambda x: x[1], reverse=True)
+        hybrid_top = [d for d, _ in scored[:self.HYBRID_TOPK]]
+        print(f"[Hybrid] pool={len(pool)} → top{self.HYBRID_TOPK} 선정")
+
+        # ---------- (4) Cross-Encoder rerank ----------
+        try:
+            if self.reranker is not None and len(hybrid_top) > 0:
+                pairs = [[q, d.page_content] for d in hybrid_top]
+                scores = self.reranker.predict(pairs)  # shape: (len(hybrid_top),)
+                order = sorted(range(len(hybrid_top)), key=lambda i: float(scores[i]), reverse=True)
+                reranked = [hybrid_top[i] for i in order[:self.RERANK_TOPK]]
+                print(f"[Rerank] 최종 top{self.RERANK_TOPK} (CrossEncoder)")
+            else:
+                reranked = hybrid_top[:self.RERANK_TOPK]
+                print("[Rerank] 사용 안 함 → hybrid_top 그대로 사용")
+        except Exception as e:
+            print(f"[Rerank] 실패 → hybrid_top 그대로 사용: {e}")
+            reranked = hybrid_top[:self.RERANK_TOPK]
+
+
+        # ---------- (5) 기존 포맷/저장 ----------
+        results = reranked  # 최종 문서들
         similar_questions = []
-        for i, doc in enumerate(results):
-            metadata = doc.metadata
-            options = json.loads(metadata.get("options", "[]"))
+        for i, doc in enumerate(results, start=1):
+            metadata = doc.metadata or {}
+            options = json.loads(metadata.get("options", "[]")) if isinstance(metadata.get("options"), str) else metadata.get("options", []) or []
             answer = metadata.get("answer", "")
             explanation = metadata.get("explanation", "")
             subject = metadata.get("subject", "기타")
 
-            # 정답이 보기 번호(문자열)라면 해당 번호의 보기 텍스트를 찾아서 표시
+            # 정답 번호 → 텍스트
             answer_text = ""
             try:
                 answer_idx = int(answer) - 1
                 if 0 <= answer_idx < len(options):
                     answer_text = options[answer_idx]
             except Exception:
-                answer_text = ""
+                pass
 
-            formatted = f"""[유사문제 {i+1}]
+            formatted = f"""[유사문제 {i}]
                 문제: {doc.page_content}
                 보기:
                 """ + "\n".join([f"{idx + 1}. {opt}" for idx, opt in enumerate(options)]) + f"""
@@ -140,11 +290,11 @@ class SolutionAgent(BaseAgent):
                 과목: {subject}
                 """
             similar_questions.append(formatted)
-        
-        state["retrieved_docs"] = results
-        state["similar_questions_text"] = "\n\n".join(similar_questions) 
 
-        print(f"유사 문제 {len(results)}개 검색 완료.")
+        state["retrieved_docs"] = results
+        state["similar_questions_text"] = "\n\n".join(similar_questions)
+
+        print(f"유사 문제 {len(results)}개 (dense fetch={len(dense_docs)}, hybrid_pool={len(pool)})")
         print("🔍 [1단계] 유사 문제 검색 함수 종료")
         return state
 

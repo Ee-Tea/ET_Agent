@@ -206,10 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-*.[Pp][Dd][Ff]
-
-# cropinfo 폴더 전체 무시
-Rookies_project/cropinfo/
-
-# 혹은 PDF만 무시
-Rookies_project/cropinfo/**/*.pdf
+# goldenset 테스트 산출물/이미지 예시
+farmer/**/Goldenset_test/*.png
+farmer/**/Goldenset_test/llm*.txt
+farmer/**/Goldenset_test/sample*.csv
+farmer/**/Goldenset_test/evaluation_report.json

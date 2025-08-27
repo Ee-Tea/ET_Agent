@@ -1,4 +1,4 @@
-
+# run_graph.py  (채팅/평가 겸용)
 # - 실행 시 메뉴에서 1) 채팅  2) 평가 선택
 # - 두 모드 모두 LLM 참고 컨텍스트(원문 RAW)를 콘솔 출력 및 used_context_log.txt에 저장
 # - LLM이 참고한 문서 출처를 번호/파일명 DataFrame으로 보여줌
@@ -6,18 +6,12 @@ import os, json, re
 from typing import TypedDict, Optional, Any, Dict, List, Tuple
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
-from datetime import datetime
-from pathlib import Path 
-# =========================
 
 # ===== 사용자 요청: 경로/인자 바꾸지 않음 =====
-GOLDENSET_CSV = r"C:\Rookies_project\ET_Agent\farmer\작물추천\Goldenset_test\Goldenset_test1.csv"
+GOLDENSET_CSV = r"C:\Rookies_project\ET_Agent\ET_Agent-dev-eejang\farmer\작물추천\Goldenset_test\Goldenset_test1.csv"
 
 # === 설정 ===
-# 실행 파일 위치: Goldenset_test
-# 벡터스토어 위치: ../Crop Recommedations DB/faiss_pdf_db
-VECTOR_DB_PATH = Path("../faiss_pdf_db")
-
+VECTOR_DB_PATH   = os.getenv("VECTOR_DB_PATH", "faiss_pdf_db")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -27,141 +21,6 @@ SIM_THRESHOLD = float(os.getenv("SIM_THRESHOLD", "0.75"))
 
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY가 .env에 설정되어야 합니다.")
-
-# === 벡터스토어 경로 처리 ===
-BASE_DIR = Path(__file__).resolve().parent        # Goldenset_test
-vector_db_dir = (BASE_DIR / VECTOR_DB_PATH).resolve()
-
-print("[VectorDB] 로드 경로 =", vector_db_dir)
-if not vector_db_dir.exists():
-    raise FileNotFoundError(f"벡터스토어 경로가 존재하지 않습니다: {vector_db_dir}")
-
-print("실행 스크립트 위치(BASE_DIR):", BASE_DIR)
-print("벡터DB 경로(VECTOR_DB_PATH):", VECTOR_DB_PATH.resolve())
-print("index.faiss 존재:", (VECTOR_DB_PATH / "index.faiss").exists())
-print("index.pkl 존재:", (VECTOR_DB_PATH / "index.pkl").exists())
-
-# =========================
-# [로그 관리 유틸 추가 - 자동 롤링 포함]
-# - 채팅(1): 선택/유지되는 활성 로그 파일에 누적 (+ 크기 초과 시 자동 롤오버)
-# - 평가(2): 실행마다 신규 파일로 교체 (+ 크기 초과 시 자동 롤오버)
-#   환경변수:
-#     LOG_MAX_MB   (기본 10MB)  — 파일 최대 크기
-#     LOG_KEEP     (기본 50개)  — 보관할 로그 파일 개수(초과분은 오래된 것 삭제)
-# =========================
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# 환경 변수
-try:
-    _LOG_MAX_MB = max(1, int(os.getenv("LOG_MAX_MB", "10")))
-except Exception:
-    _LOG_MAX_MB = 10
-
-try:
-    _LOG_KEEP = max(1, int(os.getenv("LOG_KEEP", "50")))
-except Exception:
-    _LOG_KEEP = 50
-
-# 내부 상태: 활성 로그 파일명(디렉터리 제외)
-_active_log_file: Optional[str] = None
-
-def _unique_log_name() -> str:
-    """충돌 방지를 위해 타임스탬프 + 카운터로 고유 파일명 생성"""
-    base = datetime.now().strftime("used_context_log_%Y%m%d_%H%M%S")
-    name = f"{base}.txt"
-    if not os.path.exists(os.path.join(LOG_DIR, name)):
-        return name
-    counter = 1
-    while True:
-        name = f"{base}_{counter:02d}.txt"
-        if not os.path.exists(os.path.join(LOG_DIR, name)):
-            return name
-        counter += 1
-
-def _default_new_log_name() -> str:
-    return _unique_log_name()
-
-def _list_all_logs_sorted_newfirst() -> List[str]:
-    files = [f for f in os.listdir(LOG_DIR) if f.startswith("used_context_log_") and f.endswith(".txt")]
-    files.sort(reverse=True)  # 최신 우선
-    return files
-
-def _prune_old_logs(keep: int = _LOG_KEEP) -> None:
-    """최신 keep개만 남기고 오래된 로그 삭제"""
-    files = _list_all_logs_sorted_newfirst()
-    for f in files[keep:]:
-        try:
-            os.remove(os.path.join(LOG_DIR, f))
-        except Exception:
-            pass
-
-def _get_active_log_path() -> str:
-    """활성 로그 파일 경로(없으면 새로 생성)"""
-    global _active_log_file
-    if _active_log_file is None:
-        _active_log_file = _default_new_log_name()
-        _prune_old_logs()
-    return os.path.join(LOG_DIR, _active_log_file)
-
-def _force_new_log_file() -> str:
-    """항상 새 로그 파일로 활성 파일 교체 (평가 모드/롤오버에 사용)"""
-    global _active_log_file
-    _active_log_file = _default_new_log_name()
-    path = os.path.join(LOG_DIR, _active_log_file)
-    _prune_old_logs()
-    return path
-
-def _maybe_roll_log() -> None:
-    """
-    활성 로그 파일이 LOG_MAX_MB를 초과하면 자동으로 새 파일로 롤오버.
-    - 활성 파일이 없으면 생성만 함.
-    """
-    path = _get_active_log_path()
-    try:
-        size_bytes = os.path.getsize(path) if os.path.exists(path) else 0
-    except Exception:
-        size_bytes = 0
-    if size_bytes >= (_LOG_MAX_MB * 1024 * 1024):
-        new_path = _force_new_log_file()
-        print(f"[로그 롤오버] 최대 크기 {_LOG_MAX_MB}MB 초과 → 새 파일로 교체: {os.path.basename(new_path)}")
-
-def list_log_files() -> List[str]:
-    """로그 파일 목록(최신순)"""
-    return _list_all_logs_sorted_newfirst()
-
-def choose_log_file(index_or_name: Any) -> str:
-    """인덱스(최신=0) 또는 파일명(.txt)으로 활성 파일 선택"""
-    global _active_log_file
-    files = list_log_files()
-    if isinstance(index_or_name, int):
-        if not files:
-            raise FileNotFoundError("logs 폴더에 로그 파일이 없습니다.")
-        if index_or_name < 0 or index_or_name >= len(files):
-            raise IndexError(f"인덱스 범위 오류: 0~{len(files)-1}")
-        _active_log_file = files[index_or_name]
-    else:
-        name = str(index_or_name)
-        if not name.endswith(".txt"):
-            raise ValueError("파일명은 .txt로 끝나야 합니다.")
-        path = os.path.join(LOG_DIR, name)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"해당 파일이 없습니다: {name}")
-        _active_log_file = name
-    return _active_log_file
-
-def read_log_file(filename: Optional[str] = None) -> str:
-    target = filename if filename else _active_log_file
-    if target is None:
-        raise FileNotFoundError("활성 로그 파일이 없습니다. 먼저 선택하거나 기록을 남기세요.")
-    path = os.path.join(LOG_DIR, target)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"파일을 찾을 수 없습니다: {target}")
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-def get_active_log_file() -> Optional[str]:
-    return _active_log_file
 
 # === LangChain / LangGraph ===
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -366,17 +225,12 @@ def _sources_to_dataframe(sources: Optional[List[Dict[str, Any]]]) -> pd.DataFra
         rows.append({"번호": s.get("rank"), "파일명": fname})
     return pd.DataFrame(rows, columns=["번호", "파일명"])
 
-def _append_used_context_log(index: Any,
-                             question: str,
-                             generated_answer: str,
-                             context_raw: str,
+def _append_used_context_log(index: Any, question: str, generated_answer: str, context_raw: str,
                              golden_answer: Optional[str] = None,
                              sources: Optional[List[Dict[str, Any]]] = None) -> None:
-    """활성 로그 파일에 Q/A/컨텍스트 RAW와 참고 소스 기록."""
-    _maybe_roll_log()  # ✅ 크기 초과 시 자동 롤오버
-    log_path = _get_active_log_path()
+    """used_context_log.txt에 Q/A/컨텍스트(원문 RAW)와 참고 소스 기록"""
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
+        with open("used_context_log.txt", "a", encoding="utf-8") as f:
             f.write(f"[#{index}] ------------------------------------------------\n")
             f.write(f"질문: {question}\n")
             if golden_answer is not None:
@@ -385,7 +239,6 @@ def _append_used_context_log(index: Any,
             f.write("----- CONTEXT START (RAW) -----\n")
             f.write(context_raw if context_raw else "(컨텍스트 없음)")
             f.write("\n----- CONTEXT END -----\n\n")
-
             if sources:
                 f.write("----- SOURCES (번호/파일명) -----\n")
                 for s in sources:
@@ -399,7 +252,6 @@ def _append_used_context_log(index: Any,
 # =======================
 # 🔥 골든셋 평가 함수
 # =======================
-import numpy as np
 def _cosine(a: List[float], b: List[float]) -> float:
     va = np.array(a, dtype=float); vb = np.array(b, dtype=float)
     na = np.linalg.norm(va); nb = np.linalg.norm(vb)
@@ -415,10 +267,6 @@ def _search_similarity_max(vs: Any, embeddings: HuggingFaceEmbeddings, question:
     return max((_cosine(qvec, dv) for dv in dvecs), default=0.0)
 
 def evaluate_goldenset(app, csv_path: str, threshold: float = 0.75, out_path: str = "evaluation_report.json") -> None:
-    # ✅ 평가 모드 시작 시: 항상 새 로그 파일로 교체
-    new_log = _force_new_log_file()
-    print(f"[LOG] 평가용 신규 로그 파일: {os.path.basename(new_log)}")
-
     # 1) 데이터 로드(+스키마 보정)
     raw = _read_csv_any(csv_path)
     df = _ensure_qa_columns(raw)
@@ -484,7 +332,7 @@ def evaluate_goldenset(app, csv_path: str, threshold: float = 0.75, out_path: st
             print(src_df.to_string(index=False))
             print()
 
-        # --- 파일 로그 저장 (평가 모드도 새 파일에 누적 기록) ---
+        # --- 파일 로그 저장 ---
         _append_used_context_log(index=i, question=q, golden_answer=g, generated_answer=a, context_raw=raw_ctx, sources=srcs)
 
         # 유사도(골든↔생성)
@@ -550,28 +398,6 @@ def chat(app) -> None:
     종료: 빈 줄 입력 또는 'exit'/'quit'
     """
     print("\n=== 채팅 모드 시작 ===")
-    # ✅ 채팅 모드: 기존 로그 파일을 선택해 계속 누적할 수 있게 안내
-    files = list_log_files()
-    if files:
-        print("\n[로그] 기존 파일 목록 (최신순, 인덱스 선택 가능):")
-        for i, name in enumerate(files):
-            print(f"  {i}: {name}")
-        sel = input("기존 로그 사용? 인덱스 입력(엔터=새 파일): ").strip()
-        if sel:
-            try:
-                choose_log_file(int(sel))
-                print(f"[로그] 활성 파일: {get_active_log_file()}")
-            except Exception as e:
-                print(f"[로그] 선택 실패 → 새 파일 사용: {e}")
-                _force_new_log_file()
-                print(f"[로그] 활성 파일: {get_active_log_file()}")
-        else:
-            _force_new_log_file()
-            print(f"[로그] 신규 파일 생성: {get_active_log_file()}")
-    else:
-        _force_new_log_file()
-        print(f"[로그] 신규 파일 생성: {get_active_log_file()}")
-
     print("질문을 입력하세요. (종료: 빈 줄 또는 exit/quit)\n")
     turn = 1
     while True:
@@ -591,13 +417,8 @@ def chat(app) -> None:
             raw_ctx = state.get("context", "") if isinstance(state, dict) else ""
             srcs = state.get("sources") or []
 
-            print("답변:")
-            if a:
-                for paragraph in a.strip().split("\n"):
-                    if paragraph.strip():
-                        print(f"\n{paragraph.strip()}")
-            else:
-                print("(답변 없음)")
+            print("\n답변:")
+            print(a if a else "(답변 없음)")
             print("\n--- ⬇ LLM에 전달된 컨텍스트(원문 RAW, 전체) ⬇ ---")
             print(raw_ctx if raw_ctx else "(컨텍스트 없음)")
             print("--- ⬆ 컨텍스트 끝 ⬆ ---\n")
@@ -609,7 +430,7 @@ def chat(app) -> None:
                 print(src_df.to_string(index=False))
                 print()
 
-            # ✅ 채팅 모드만 로그 누적 기록 (자동 롤링 포함)
+            # 로그 저장 (골든셋 답변은 기록하지 않음)
             _append_used_context_log(index=f"chat-{turn}", question=q, generated_answer=a, context_raw=raw_ctx, sources=srcs)
             turn += 1
         except Exception as e:

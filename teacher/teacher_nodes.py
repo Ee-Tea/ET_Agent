@@ -312,3 +312,100 @@ def post_analysis_route(state: Dict[str, Any]) -> str:
     """analysis 실행 후 다음 노드 결정"""
     nxt = ((state.get("routing") or {}).get("after_analysis") or "").strip()
     return nxt if nxt else "generate_analysis_pdf"  # 기본적으로 분석 리포트 PDF 생성
+
+def generate_user_response(state: Dict[str, Any]) -> str:
+    """
+    사용자에게 실행 결과를 요약해서 답변하는 함수
+    """
+    system_prompt = f"""당신은 사용자 친화적인 챗봇입니다. 
+    사용자의 질문과 실행 결과를 바탕으로 친근하고 이해하기 쉽게 답변해주세요.
+    
+    답변 형식:
+    1. 사용자 질문에 대한 간단한 인사
+    2. 실행된 작업들의 요약 (간결하게)
+    3. 주요 결과 요약
+    4. 추가 도움이 필요한 부분이 있다면 안내
+    
+    답변은 한국어로 작성하고, 친근하고 도움이 되는 톤으로 작성해주세요.
+    """
+    
+    user_query = state.get("user_query", "")
+    intent = state.get("intent", "")
+    shared = state.get("shared", {})
+    generation = state.get("generation", {})
+    solution = state.get("solution", {})
+    score = state.get("score", {})
+    analysis = state.get("analysis", {})
+    retrieval = state.get("retrieval", {})
+    artifacts = state.get("artifacts", {})
+    
+    # 실행된 작업들 파악
+    executed_tasks = []
+    results_summary = []
+    
+    if intent == "retrieve" and retrieval:
+        executed_tasks.append("정보 검색")
+        if shared.get("retrieve_answer"):
+            results_summary.append("관련 정보를 검색했습니다")
+    
+    if intent == "generate" and generation:
+        executed_tasks.append("문제 생성")
+        question_count = len(shared.get("question", []))
+        if question_count > 0:
+            results_summary.append(f"{question_count}개의 문제를 생성했습니다")
+    
+    if intent == "solution" or "solution" in executed_tasks:
+        executed_tasks.append("문제 풀이")
+        answer_count = len(shared.get("answer", []))
+        if answer_count > 0:
+            results_summary.append(f"{answer_count}개 문제의 답안과 해설을 생성했습니다")
+    
+    if intent == "score" or "score" in executed_tasks:
+        executed_tasks.append("채점")
+        correct_count = shared.get("correct_count", 0)
+        total_count = shared.get("total_count", 0)
+        if total_count > 0:
+            accuracy = (correct_count / total_count) * 100
+            results_summary.append(f"채점 결과: {correct_count}/{total_count} 정답 ({accuracy:.1f}%)")
+    
+    if intent == "analyze" or "analysis" in executed_tasks:
+        executed_tasks.append("오답 분석")
+        weak_types = shared.get("weak_type", [])
+        if weak_types:
+            results_summary.append(f"취약점 분석 완료: {', '.join(map(str, weak_types[:3]))}{'...' if len(weak_types) > 3 else ''}")
+    
+    # PDF 생성 확인
+    generated_pdfs = artifacts.get("generated_pdfs", [])
+    if generated_pdfs:
+        executed_tasks.append("PDF 생성")
+        pdf_count = len(generated_pdfs)
+        results_summary.append(f"{pdf_count}개의 PDF 파일을 생성했습니다")
+    
+    # 사용자 친화적인 답변 생성
+    user_prompt = f"""사용자 질문: {user_query}
+    
+실행된 작업들: {', '.join(executed_tasks) if executed_tasks else '없음'}
+주요 결과: {'; '.join(results_summary) if results_summary else '결과 없음'}
+
+위 정보를 바탕으로 사용자에게 친근하고 도움이 되는 답변을 해주세요."""
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=LLM_TEMPERATURE
+        )
+        
+        result = response.choices[0].message.content.strip()
+        return result if result else "작업이 완료되었습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
+        
+    except Exception as e:
+        print(f"답변 생성 중 오류: {e}")
+        # 기본 답변 반환
+        if executed_tasks:
+            return f"안녕하세요! {', '.join(executed_tasks)} 작업을 완료했습니다. {'; '.join(results_summary)}"
+        else:
+            return "안녕하세요! 요청하신 작업을 처리했습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."

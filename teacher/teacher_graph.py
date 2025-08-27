@@ -86,6 +86,7 @@ class TeacherState(TypedDict):
     session: NotRequired[dict]            # 실행 플래그(예: {"loaded": True})
     artifacts: NotRequired[dict]          # 파일/중간 산출물 메타
     routing: NotRequired[dict]            # 의존성-복귀 플래그
+    llm_response: NotRequired[str]        # LLM이 생성한 사용자 친화적 답변
 
 
 # ========== Orchestrator ==========
@@ -1196,17 +1197,15 @@ class Orchestrator:
             # generate_user_response 함수를 호출하여 사용자 친화적인 답변 생성
             user_response = generate_user_response(state)
             
-            # 답변을 shared state에 저장
-            new_state = ensure_shared(new_state)
-            new_state["shared"]["user_response"] = user_response
+            # 답변을 TeacherState에 직접 저장
+            new_state["llm_response"] = user_response
             
             print(f"✅ 사용자 답변 생성 완료: {user_response[:100]}{'...' if len(user_response) > 100 else ''}")
             
         except Exception as e:
             print(f"❌ 사용자 답변 생성 중 오류: {e}")
             # 오류 발생 시 기본 답변 설정
-            new_state = ensure_shared(new_state)
-            new_state["shared"]["user_response"] = "작업이 완료되었습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
+            new_state["llm_response"] = "작업이 완료되었습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
         
         return new_state
 
@@ -1507,9 +1506,9 @@ if __name__ == "__main__":
                 print(f"[Score] keys={list(score.keys())}")
 
             # 사용자 답변 출력
-            user_response = shared.get("user_response")
-            if user_response:
-                print(f"\n💬 [사용자 답변] {user_response}")
+            llm_response = result.get("llm_response")
+            if llm_response:
+                print(f"\n💬 [LLM 답변] {llm_response}")
 
             print("-----------------\n")
 

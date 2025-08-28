@@ -71,6 +71,18 @@ class SolutionState(TypedDict):
 
     chat_history: List[str]
     
+    # 풀이 평가 및 피드백 관련
+    solution_score: float        # 풀이 품질 점수 (0-100)
+    feedback_analysis: str      # 사용자 피드백 분석 결과
+    needs_improvement: bool     # 풀이 개선 필요 여부
+    improved_solution: str      # 개선된 풀이
+    search_results: str         # 검색 결과
+    
+    # 테스트 모드 관련
+    test_mode: bool             # 테스트 모드 활성화 여부
+    test_score: int             # 테스트용 강제 점수
+    test_feedback_type: str     # 테스트용 강제 피드백 타입
+
 class SolutionAgent(BaseAgent):
     """문제 해답/풀이 생성 에이전트"""
 
@@ -110,6 +122,9 @@ class SolutionAgent(BaseAgent):
 
         self.vectorstore_p = None
         self.vectorstore_c = None
+        
+        # checkpointer 추가
+        self.checkpointer = InMemorySaver()
         self.graph = self._create_graph()
 
 
@@ -205,39 +220,141 @@ class SolutionAgent(BaseAgent):
             temperature=temperature,
         )
     
-    def _build_concept_query(self, problem: str, options: List[str]) -> str:
-        opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
-        return f"{(problem or '').strip()}\n{opts}"
-    
-    @tool
-    def user_feedback(self, query: str) -> str:
-        """사용자로부터 풀이에 대한 피드백을 수집하고 LLM을 통해 분석합니다."""
-        human_response = interrupt("풀이에 대한 의견을 자유롭게 입력해주세요.")
-        user_input = human_response["data"]
+    def _evaluate_solution(self, state: SolutionState) -> SolutionState:
+        """LLM을 활용하여 풀이의 정확성과 설명의 충분함을 평가합니다."""
+        print("\n📊 [평가] 풀이 품질 평가 시작")
         
-        # LLM을 통해 사용자 피드백 분석
-        analysis_prompt = f"""
-        사용자의 피드백을 분석하여 다음 세 가지 항목을 판단해주세요:
+        evaluation_prompt = f"""
+        다음 문제와 풀이를 평가하여 0-100점 사이의 점수를 매기고 개선이 필요한지 판단해주세요.
 
-        사용자 피드백: {user_input}
+        문제: {state.get('user_problem', '')}
+        보기: {state.get('user_problem_options', [])}
+        정답: {state.get('generated_answer', '')}
+        풀이: {state.get('generated_explanation', '')}
 
-        다음 기준과 예시에 따라 str 형태로 응답해주세요:
-        답변 예시 : "understand", "easier_explanation", "term_explanation"
+        다음 기준으로 평가해주세요:
+        1. 정확성 (40점): 정답이 맞는지, 논리가 올바른지
+        2. 설명의 충분함 (30점): 단계별 설명이 충분한지, 이해하기 쉬운지
+        3. 용어 설명 (20점): 전문 용어나 개념에 대한 설명이 있는지
+        4. 전체적인 품질 (10점): 전체적으로 잘 작성되었는지
 
-        분석 기준:
-        1. "understand" : 풀이가 이해되었습니다.
-        2. "easier_explanation" : 더 쉬운 풀이가 필요합니다.
-        3. "term_explanation" : 용어 설명이 필요합니다.
+        반드시 다음 JSON 형태로만 응답해주세요. 다른 텍스트는 포함하지 마세요:
+        {{
+            "score": 점수,
+            "needs_improvement": true/false,
+            "improvement_reasons": ["개선이 필요한 이유들"],
+            "evaluation_summary": "평가 요약"
+        }}
+
+        점수가 70점 미만이면 needs_improvement를 true로 설정해주세요.
         """
         
         try:
-            # LLM을 사용하여 분석 수행
-            llm_analyzer = self._llm(0.3)  # 낮은 temperature로 일관된 분석
-            analysis_response = llm_analyzer.invoke(analysis_prompt)
-                
+            llm_evaluator = self._llm(0.3)
+            evaluation_response = llm_evaluator.invoke(evaluation_prompt)
+            
+            # JSON 파싱 - 더 안전하게 처리
+            import json
+            import re
+            
+            response_content = evaluation_response.content.strip()
+            print(f"🔍 LLM 평가 응답: {response_content[:200]}...")
+            
+            # JSON 부분만 추출 (```json ... ``` 형태일 수 있음)
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # JSON 객체만 찾기
+                json_match = re.search(r'\{.*\}', response_content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = response_content
+            
+            try:
+                evaluation_result = json.loads(json_str)
+                print("✅ JSON 파싱 성공")
+            except json.JSONDecodeError as json_err:
+                print(f"⚠️ JSON 파싱 실패, 기본값 사용: {json_err}")
+                # 기본값으로 평가 결과 생성
+                evaluation_result = {
+                    "score": 70.0,
+                    "needs_improvement": True,
+                    "improvement_reasons": ["LLM 응답 파싱 실패"],
+                    "evaluation_summary": "평가 중 오류 발생"
+                }
+            
+            state["solution_score"] = evaluation_result.get("score", 70.0)
+            # state["needs_improvement"] = evaluation_result.get("needs_improvement", True)
+            state["needs_improvement"] = True
+            
+            print(f"📊 풀이 평가 점수: {state['solution_score']}/100")
+            print(f"📊 개선 필요: {state['needs_improvement']}")
+            
         except Exception as e:
-            print(f"⚠️ LLM 분석 중 오류 발생: {e}")
-            return user_input
+            print(f"⚠️ 풀이 평가 중 오류 발생: {e}")
+            state["solution_score"] = 70.0
+            state["needs_improvement"] = True
+        
+        return state
+
+    def _collect_user_feedback(self, state: SolutionState) -> SolutionState:
+        """사용자로부터 피드백을 수집하고 분석합니다."""
+        print("\n💬 [피드백] 사용자 피드백 수집 시작")
+        
+        if not state.get("needs_improvement", False):
+            print("💬 개선이 필요하지 않아 피드백 수집을 건너뜁니다.")
+            return state
+        
+        # Command(resume)을 통해 전달된 사용자 피드백 처리
+        # 이 노드는 tools 노드에서 interrupt 후 resume 시 실행됨
+        # 사용자 피드백은 이미 state에 포함되어 있음
+        
+        # 피드백 분석을 위한 상태 설정
+        state["feedback_analysis"] = "easier_explanation"  # 기본값
+        print("💬 피드백 수집을 위한 상태 설정 완료")
+        
+        return state
+
+    def _improve_solution(self, state: SolutionState) -> SolutionState:
+        """사용자 피드백을 바탕으로 풀이를 개선합니다."""
+        print("\n🔧 [개선] 풀이 개선 시작")
+        
+        if not state.get("needs_improvement", False):
+            print("🔧 개선이 필요하지 않아 풀이 개선을 건너뜁니다.")
+            return state
+        
+        feedback = state.get("feedback_analysis", "understand")
+        original_solution = state.get("generated_explanation", "")
+        
+        improvement_prompt = f"""
+        다음 피드백을 바탕으로 풀이를 개선해주세요.
+
+        원본 풀이: {original_solution}
+        사용자 피드백: {feedback}
+
+        피드백 분석 결과에 따라:
+        - "easier_explanation": 더 쉬운 단계별 설명으로 개선
+        - "term_explanation": 전문 용어와 개념에 대한 자세한 설명 추가
+        - "term_easier_explanation": 용어 설명과 쉬운 설명 모두 개선
+        - "understand": 원본 풀이 유지
+
+        개선된 풀이를 생성해주세요.
+        """
+        
+        try:
+            llm_improver = self._llm(0.7)
+            improvement_response = llm_improver.invoke(improvement_prompt)
+            
+            state["improved_solution"] = improvement_response.content
+            print("🔧 풀이 개선 완료")
+            
+        except Exception as e:
+            print(f"⚠️ 풀이 개선 중 오류 발생: {e}")
+            state["improved_solution"] = original_solution
+        
+        return state
     
     #----------------------------------------create graph------------------------------------------------------
 
@@ -256,20 +373,56 @@ class SolutionAgent(BaseAgent):
         graph.add_node("generate_solution", self._generate_solution)
         graph.add_node("validate", self._validate_solution)
         graph.add_node("store", self._store_to_vector_db)
+        
+        # 새로운 노드들
+        graph.add_node("evaluate_solution", self._evaluate_solution)
+        graph.add_node("collect_feedback", self._collect_user_feedback)
+        graph.add_node("improve_solution", self._improve_solution)
+        graph.add_node("search_additional_info", self._search_additional_info)
+        graph.add_node("finalize_solution", self._finalize_solution)
 
+        # 도구 노드 추가
+        tools = [self.user_feedback]
+        tool_node = ToolNode(tools=tools)
+        graph.add_node("tools", tool_node)
+
+        # 시작점 설정
         graph.set_entry_point("retrieve_parallel")
+        
+        # 기본 흐름
         graph.add_edge("retrieve_parallel", "generate_solution")
         graph.add_edge("generate_solution", "validate")
-        graph.add_edge("store", END)
-
+        
+        # 검증 후 분기
         graph.add_conditional_edges(
             "validate", 
-            # 검증 실패 → retry<5이면 back, 아니면 그냥 store로 진행
-            lambda s: "ok" if s["validated"] else ("back" if s.get("retry_count", 0) < 5 else "force_store"),
-            {"ok": "store", "back": "generate_solution", "force_store": "store"}
+            # 검증 실패 → retry<5이면 back, 아니면 evaluate로 진행
+            lambda s: "ok" if s["validated"] else ("back" if s.get("retry_count", 0) < 5 else "evaluate"),
+            {"ok": "evaluate_solution", "back": "generate_solution", "evaluate": "evaluate_solution"}
         )
+        
+        # 풀이 평가 후 분기
+        graph.add_conditional_edges(
+            "evaluate_solution",
+            lambda s: "needs_improvement" if s.get("needs_improvement", False) else "store",
+            {"needs_improvement": "collect_feedback", "store": "store"}
+        )
+        
+        # 개선이 필요한 경우의 흐름
+        graph.add_edge("collect_feedback", "tools")  # collect_feedback 후 tools 노드로
+        graph.add_conditional_edges(
+            "tools",
+            tools_condition,
+            {"tools": "improve_solution"}
+        )
+        graph.add_edge("improve_solution", "search_additional_info")
+        graph.add_edge("search_additional_info", "finalize_solution")
+        graph.add_edge("finalize_solution", "store")
+        
+        # 최종 저장
+        graph.add_edge("store", END)
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer)
     
     #----------------------------------------nodes------------------------------------------------------
 
@@ -640,6 +793,72 @@ class SolutionAgent(BaseAgent):
 
         return state
 
+    def _search_additional_info(self, state: SolutionState) -> SolutionState:
+        """필요한 경우 추가 정보를 검색합니다."""
+        print("\n🔍 [검색] 추가 정보 검색 시작")
+        
+        feedback = state.get("feedback_analysis", "understand")
+        
+        # 용어 설명이나 추가 정보가 필요한 경우에만 검색
+        if "term_explanation" in feedback or "term_easier_explanation" in feedback:
+            try:
+                # retrieve_agent를 실행하여 관련 정보 검색
+                search_query = f"{state.get('user_problem', '')} {state.get('generated_explanation', '')}"
+                
+                # 벡터스토어에서 관련 개념 검색
+                if state.get("vectorstore_c"):
+                    concept_results = state["vectorstore_c"].similarity_search(search_query, k=3)
+                    concept_texts = [doc.page_content for doc in concept_results]
+                    state["search_results"] = "\n\n".join(concept_texts)
+                    print(f"🔍 관련 개념 {len(concept_results)}개 검색 완료")
+                else:
+                    state["search_results"] = "벡터스토어를 사용할 수 없습니다."
+                    print("⚠️ 개념 벡터스토어를 사용할 수 없습니다.")
+                    
+            except Exception as e:
+                print(f"⚠️ 검색 중 오류 발생: {e}")
+                state["search_results"] = "검색 중 오류가 발생했습니다."
+        else:
+            state["search_results"] = ""
+            print("🔍 추가 검색이 필요하지 않습니다.")
+        
+        return state
+
+    def _finalize_solution(self, state: SolutionState) -> SolutionState:
+        """최종 풀이를 정리합니다."""
+        print("\n✨ [정리] 최종 풀이 정리 시작")
+        
+        if state.get("needs_improvement", False) and state.get("improved_solution"):
+            # 개선된 풀이가 있는 경우
+            final_solution = state["improved_solution"]
+            
+            # 검색 결과가 있으면 추가
+            if state.get("search_results"):
+                final_solution += f"\n\n📚 추가 참고 자료:\n{state['search_results']}"
+            
+            state["generated_explanation"] = final_solution
+            print("✨ 개선된 풀이로 최종 정리 완료")
+        else:
+            print("✨ 원본 풀이 유지")
+        
+        return state
+    
+    def _build_concept_query(self, problem: str, options: List[str]) -> str:
+        opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
+        return f"{(problem or '').strip()}\n{opts}"
+    
+    @tool
+    def user_feedback(self, query: str) -> str:
+        """사용자로부터 풀이에 대한 피드백을 수집하고 LLM을 통해 분석합니다."""
+        print("interrupt 실행!!!!!!!!!!!!!!")
+        
+        # interrupt를 통해 워크플로우 중단 및 사용자 입력 요청
+        interrupt({"query": "풀이에 대한 의견을 자유롭게 입력해주세요."})
+        
+        # interrupt 후에는 이 코드가 실행되지 않음
+        # 실제 사용자 입력은 Command(resume)을 통해 전달됨
+        return "pending_feedback"
+
     # ✅ 정합성 검증 (간단히 길이 기준 사용)
 
     def _validate_solution(self, state: SolutionState) -> SolutionState:
@@ -860,6 +1079,7 @@ class SolutionAgent(BaseAgent):
             vectorstore_p: Optional[Milvus] = None,
             vectorstore_c: Optional[Milvus] = None,
             recursion_limit: int = 1000,
+            memory_key: Optional[str] = None,  # 숏텀 메모리 키 추가
         ) -> Dict:  
 
         # # 1) 외부에서 하나라도 안 넘겼으면 내부 디폴트 준비
@@ -901,17 +1121,58 @@ class SolutionAgent(BaseAgent):
             "chat_history": []
         }
         
-        final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
-        
-        # 그래프 시각화
         try:
-            graph_image_path = "solution_agent_workflow.png"
-            with open(graph_image_path, "wb") as f:
-                f.write(self.graph.get_graph().draw_mermaid_png())
-            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+            # thread_id를 포함한 config 생성
+            graph_config = {
+                "recursion_limit": recursion_limit,
+                "configurable": {
+                    "thread_id": memory_key or "default"
+                }
+            }
+            final_state = self.graph.invoke(initial_state, config=graph_config)
         except Exception as e:
-            print(f"그래프 시각화 중 오류 발생: {e}")
-            print("워크플로우는 정상적으로 작동합니다.")
+            print(f"⚠️ 그래프 실행 중 오류 발생: {e}")
+            if "interrupt" in str(e).lower():
+                print("🔄 interrupt가 발생했습니다. 현재 상태를 반환합니다.")
+                
+                # memory_key가 있으면 숏텀 메모리에 상태 저장
+                if memory_key:
+                    try:
+                        from common.short_term.redis_memory import RedisMemory
+                        redis_memory = RedisMemory()
+                        # 현재 상태를 숏텀 메모리에 저장
+                        state_data = {
+                            "user_input_txt": user_input_txt,
+                            "user_problem": user_problem,
+                            "user_problem_options": user_problem_options,
+                            "generated_answer": initial_state.get("generated_answer", ""),
+                            "generated_explanation": initial_state.get("generated_explanation", ""),
+                            "generated_subject": initial_state.get("generated_subject", ""),
+                            "interrupt_occurred": True,
+                            "interrupt_message": str(e),
+                            "memory_key": memory_key
+                        }
+                        redis_memory.set(memory_key, state_data, ttl=3600)  # 1시간 TTL
+                        print(f"💾 상태를 숏텀 메모리에 저장: {memory_key}")
+                    except Exception as mem_err:
+                        print(f"⚠️ 숏텀 메모리 저장 실패: {mem_err}")
+                
+                # interrupt 발생 시 현재 상태를 결과로 반환
+                current_state = {
+                    "user_input_txt": user_input_txt,
+                    "user_problem": user_problem,
+                    "user_problem_options": user_problem_options,
+                    "generated_answer": initial_state.get("generated_answer", ""),
+                    "generated_explanation": initial_state.get("generated_explanation", ""),
+                    "generated_subject": initial_state.get("generated_subject", ""),
+                    "interrupt_occurred": True,
+                    "interrupt_message": str(e),
+                    "memory_key": memory_key
+                }
+                return current_state
+            else:
+                raise
+        
 
         # 결과 확인 및 디버깅
         results = final_state.get("results", [])

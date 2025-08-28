@@ -99,11 +99,151 @@ def get_user_answer(user_question: str) -> list:
         # 숫자도 없는 경우 빈 리스트 반환
         return []
         
-    except (json.JSONDecodeError, ValueError):
-        # JSON 파싱 실패 시 정규표현식으로 숫자 추출
-        import re
-        numbers = re.findall(r'\d+', result)
-        return numbers if numbers else []
+    except Exception as e:
+        print(f"⚠️ 답변 파싱 중 오류 발생: {e}")
+        return []
+
+def extract_problem_and_options(user_query: str) -> Dict[str, Any]:
+    """
+    사용자 질문에서 문제와 보기를 추출합니다.
+    
+    Args:
+        user_query: 사용자 입력 문자열
+        
+    Returns:
+        Dict containing:
+        - problem: 문제 문자열
+        - options: 보기 리스트
+        - has_problem: 문제가 있는지 여부
+    """
+    print(f"🔍 [extract_problem_and_options] 입력: {user_query}")
+    
+    if not user_query or not user_query.strip():
+        print("⚠️ [extract_problem_and_options] user_query가 비어있습니다.")
+        return {
+            "problem": "",
+            "options": [],
+            "has_problem": False
+        }
+    
+    system_prompt = f"""다음 사용자 질문에서 문제와 보기를 추출하세요:
+    사용자 질문: {user_query}
+    
+    다음 형식으로 JSON으로 응답하세요:
+    {{
+        "problem": "추출된 문제 내용",
+        "options": ["보기1", "보기2", "보기3", "보기4"],
+        "has_problem": true/false
+    }}
+    
+    추출 규칙:
+    1. 문제가 명확하게 보이면 "problem"에 추출
+    2. 보기가 명확하게 보이면 "options"에 리스트로 추출
+    3. 문제나 보기가 명확하지 않으면 "has_problem": false
+    4. 보기는 보통 4개이지만, 3개나 5개일 수도 있음
+    5. 문제나 보기가 없으면 빈 문자열이나 빈 리스트로 설정
+    
+    예시:
+    - "소프트웨어 설계에서 사용되는 대표적인 추상화 기법이 아닌 것은? 자료 추상화, 제어 추상화, 과정 추상화, 강도 추상화"
+    → {{
+        "problem": "소프트웨어 설계에서 사용되는 대표적인 추상화 기법이 아닌 것은?",
+        "options": ["자료 추상화", "제어 추상화", "과정 추상화", "강도 추상화"],
+        "has_problem": true
+    }}
+    
+    - "안녕하세요"
+    → {{
+        "problem": "",
+        "options": [],
+        "has_problem": false
+    }}
+    
+    반드시 유효한 JSON 형식으로만 응답하세요.
+    """
+
+    try:
+        print(f"🔍 [extract_problem_and_options] LLM 호출 시작...")
+        response = client.chat.completions.create(
+            model=OPENAI_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ],
+            temperature=LLM_TEMPERATURE
+        )
+        
+        result = response.choices[0].message.content.strip()
+        print(f"🔍 [extract_problem_and_options] LLM 응답: {result}")
+        
+        # JSON 파싱 시도
+        import json
+        try:
+            # 백틱(```)으로 감싸진 JSON 처리
+            cleaned_result = result.strip()
+            if cleaned_result.startswith('```') and cleaned_result.endswith('```'):
+                # 첫 번째와 마지막 백틱 제거
+                cleaned_result = cleaned_result[3:-3].strip()
+                # 첫 번째 줄이 json이 아닌 경우 제거
+                if not cleaned_result.startswith('{'):
+                    lines = cleaned_result.split('\n')
+                    cleaned_result = '\n'.join([line for line in lines if line.strip() and not line.strip().startswith('```')])
+            
+            parsed_result = json.loads(cleaned_result)
+            print(f"🔍 [extract_problem_and_options] 파싱 결과: {parsed_result}")
+            
+            if isinstance(parsed_result, dict):
+                final_result = {
+                    "problem": str(parsed_result.get("problem", "")).strip(),
+                    "options": parsed_result.get("options", []) if isinstance(parsed_result.get("options"), list) else [],
+                    "has_problem": bool(parsed_result.get("has_problem", False))
+                }
+                
+                # options가 문자열 리스트인지 확인하고 정규화
+                if final_result["options"]:
+                    normalized_options = []
+                    for opt in final_result["options"]:
+                        if isinstance(opt, str) and opt.strip():
+                            normalized_options.append(opt.strip())
+                    final_result["options"] = normalized_options
+                
+                print(f"🔍 [extract_problem_and_options] 최종 결과: {final_result}")
+                return final_result
+            else:
+                print("⚠️ [extract_problem_and_options] 파싱된 결과가 딕셔너리가 아닙니다.")
+                return {
+                    "problem": "",
+                    "options": [],
+                    "has_problem": False
+                }
+                
+        except json.JSONDecodeError as json_error:
+            print(f"❌ [extract_problem_and_options] JSON 파싱 오류: {json_error}")
+            print(f"🔍 파싱 실패한 응답: {result}")
+            
+            # JSON 파싱 실패 시 간단한 추출 시도
+            if "?" in user_query and any(word in user_query for word in ["보기", "선택", "1", "2", "3", "4"]):
+                # 문제와 보기가 있는 것 같음
+                return {
+                    "problem": user_query.split("?")[0] + "?",
+                    "options": user_query.split("?")[1].strip().split(", ") if "?" in user_query else [],
+                    "has_problem": True
+                }
+            else:
+                return {
+                    "problem": "",
+                    "options": [],
+                    "has_problem": False
+                }
+        
+    except Exception as e:
+        print(f"❌ [extract_problem_and_options] 문제/보기 추출 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "problem": "",
+            "options": [],
+            "has_problem": False
+        }
 
 def parse_generator_input(user_question: str) -> dict:
     """
@@ -189,7 +329,7 @@ def parse_generator_input(user_question: str) -> dict:
 
 # ========== 라우팅 함수들 ==========
 def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
-    """solution 노드 라우팅 - 파일 탐색 포함"""
+    """solution 노드 라우팅 - 항상 preprocess를 먼저 거침"""
     from teacher_util import has_questions, extract_image_paths
     from pdf_preprocessor import extract_pdf_paths
     
@@ -224,18 +364,9 @@ def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
         current_artifacts["pdf_ids"] = pdf_filenames
         print(f"📄 [route_solution] PDF 파일 발견: {pdf_filenames}")
     
-    # 파일이 발견되었는지 확인
-    has_files = bool(current_artifacts.get("image_ids")) or bool(current_artifacts.get("pdf_ids"))
-    
-    if has_files:
-        next_node = "preprocess"
-        print("📄 PDF/이미지 파일 전처리 후 solution 실행")
-    elif has_questions(state):
-        next_node = "solution"
-        print("📄 기존 문제로 solution 실행")
-    else:
-        next_node = "mark_after_generator_solution"
-        print("📄 문제 생성 후 solution 실행")
+    # 항상 preprocess를 먼저 거치도록 설정
+    next_node = "preprocess"
+    print("🔄 항상 preprocess를 먼저 거쳐서 문제를 확인합니다")
     
     print(f"🔍 [route_solution] 다음 노드: {next_node}")
     

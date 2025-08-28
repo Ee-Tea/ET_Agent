@@ -13,6 +13,7 @@ load_dotenv()
 
 from langsmith import traceable
 from langgraph.graph import START, END, StateGraph
+from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.runnables import RunnableLambda
 from typing_extensions import TypedDict, NotRequired
 
@@ -32,13 +33,14 @@ from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
-from agents.solution.solution_agent import SolutionAgent as solution_agent
+# from agents.solution.solution_agent import SolutionAgent as solution_agent
+from agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
 from teacher_nodes import (
-    get_user_answer, parse_generator_input, user_intent,
+    get_user_answer, parse_generator_input, user_intent,                                    
     route_solution, route_score, route_analysis,
     mark_after_generator_solution, mark_after_solution_score, mark_after_score_analysis,
     post_generator_route, post_solution_route, post_score_route, post_analysis_route,
-    generate_user_response
+    generate_user_response, extract_problem_and_options
 )
 from file_path_mapper import FilePathMapper
 from datetime import datetime
@@ -130,6 +132,10 @@ class Orchestrator:
             self.score_runner     = None
             self.analyst_runner   = None
 
+        # LangGraph 기반 그래프 생성
+        self.checkpointer = InMemorySaver()
+        self.graph = self._create_graph()
+
     # ── Memory IO ────────────────────────────────────────────────────────────
     def load_state(self, state: TeacherState) -> TeacherState:
         """그래프 시작 시 단 1번만 메모리에서 상태를 불러와 state에 병합."""
@@ -144,6 +150,208 @@ class Orchestrator:
         """그래프 리프 종료 후 단 1곳에서 메모리에 반영."""
         self.memory.save(state, state)
         return state
+
+    def _create_graph(self) -> StateGraph:
+        """LangGraph 기반의 워크플로우 그래프를 생성합니다."""
+        print("🔧 LangGraph 기반 워크플로우 그래프 생성 중...")
+        
+        builder = StateGraph(TeacherState)
+
+        # Core nodes
+        builder.add_node("load_state", RunnableLambda(self.load_state))
+        builder.add_node("persist_state", RunnableLambda(self.persist_state))
+        builder.add_node("intent_classifier", RunnableLambda(self.intent_classifier))
+
+        builder.add_node("generator", RunnableLambda(self.generator))
+        builder.add_node("solution", RunnableLambda(self.solution))
+        builder.add_node("score", RunnableLambda(self.score))
+        builder.add_node("analysis", RunnableLambda(self.analysis))
+        builder.add_node("retrieve", RunnableLambda(self.retrieve))
+
+        # Preprocess
+        builder.add_node("preprocess", RunnableLambda(self.preprocess))
+
+        # PDF Generation nodes
+        builder.add_node("generate_pdfs", RunnableLambda(self.generate_pdfs))
+        builder.add_node("generate_problem_pdf", RunnableLambda(self.generate_problem_pdf))
+        builder.add_node("generate_answer_pdf", RunnableLambda(self.generate_answer_pdf))
+        builder.add_node("generate_analysis_pdf", RunnableLambda(self.generate_analysis_pdf))
+
+        # Routing markers
+        builder.add_node("mark_after_generator_solution", RunnableLambda(mark_after_generator_solution))
+        builder.add_node("mark_after_solution_score", RunnableLambda(mark_after_solution_score))
+        builder.add_node("mark_after_score_analysis", RunnableLambda(mark_after_score_analysis))
+
+        # Routers
+        builder.add_node("route_solution", RunnableLambda(route_solution))
+        builder.add_node("route_score", RunnableLambda(route_score))
+        builder.add_node("route_analysis", RunnableLambda(route_analysis))
+
+        # Start → load → intent
+        builder.add_edge(START, "load_state")
+        builder.add_edge("load_state", "intent_classifier")
+
+        # intent branching (with routers)
+        builder.add_conditional_edges(
+            "intent_classifier",
+            self.select_agent,
+            {
+                "retrieve": "retrieve",
+                "generator": "generator",
+                "route_analysis": "route_analysis",
+                "preprocess": "preprocess",  # solution 의도일 때 preprocess로
+                "route_score": "route_score",
+            },
+        )
+
+        # route_solution
+        builder.add_conditional_edges(
+            "route_solution",
+            lambda state: state.get("routing", {}).get("solution_next", "mark_after_generator_solution"),
+            {
+                "solution": "solution",
+                "mark_after_generator_solution": "mark_after_generator_solution",
+            },
+        )
+        builder.add_conditional_edges(
+            "preprocess",
+            lambda state: "solution" if state.get("artifacts", {}).get("extracted_problem_count", 0) > 0 or state.get("artifacts", {}).get("pdf_added_count", 0) > 0 else "mark_after_generator_solution",
+            {
+                "solution": "solution",
+                "mark_after_generator_solution": "mark_after_generator_solution",
+            },
+        )
+        builder.add_edge("mark_after_generator_solution", "generator")
+
+        # route_score
+        builder.add_conditional_edges(
+            "route_score",
+            lambda state: state.get("routing", {}).get("score_next", "mark_after_solution_score"),
+            {
+                "score": "score",
+                "mark_after_solution_score": "mark_after_solution_score",
+            },
+        )
+        builder.add_edge("mark_after_solution_score", "solution")
+
+        # route_analysis
+        builder.add_conditional_edges(
+            "route_analysis",
+            lambda state: state.get("routing", {}).get("analysis_next", "mark_after_score_analysis"),
+            {
+                "analysis": "analysis",
+                "mark_after_score_analysis": "mark_after_score_analysis",
+            },
+        )
+        builder.add_edge("mark_after_score_analysis", "score")
+
+        # post dependencies - 자동 PDF 생성 강화
+        builder.add_conditional_edges(
+            "generator",
+            post_generator_route,
+            {
+                "solution": "solution",
+                "generate_problem_pdf": "generate_problem_pdf",
+            },
+        )
+        builder.add_conditional_edges(
+            "solution",
+            post_solution_route,
+            {
+                "score": "score",
+                "generate_answer_pdf": "generate_answer_pdf",
+            },
+        )
+        builder.add_conditional_edges(
+            "score",
+            post_score_route,
+            {
+                "analysis": "analysis",
+                "generate_answer_pdf": "generate_answer_pdf",  # 채점 후 답안집 PDF 생성
+            },
+        )
+
+        # retrieve → persist, analysis → generate_analysis_pdf → persist → END
+        builder.add_edge("retrieve", "persist_state")
+        builder.add_edge("analysis", "generate_analysis_pdf")
+        builder.add_edge("generate_analysis_pdf", "persist_state")
+        builder.add_edge("generate_problem_pdf", "persist_state")
+        builder.add_edge("generate_answer_pdf", "persist_state")
+        builder.add_edge("persist_state", END)
+
+        print("✅ LangGraph 워크플로우 그래프 생성 완료")
+        return builder.compile(checkpointer=self.checkpointer)
+
+    def invoke(self, state: TeacherState, config: Optional[Dict] = None) -> TeacherState:
+        """LangGraph 기반으로 워크플로우를 실행합니다."""
+        if config is None:
+            config = {"configurable": {"thread_id": "default"}}
+        
+        # 체크포인터와 함께 그래프 실행
+        try:
+            result = self.graph.invoke(state, config)
+            return result
+        except Exception as e:
+            print(f"❌ 그래프 실행 중 오류 발생: {e}")
+            # interrupt가 발생한 경우 체크포인터에서 상태 복구 시도
+            if "interrupt" in str(e).lower():
+                print("🔄 interrupt가 발생했습니다. 체크포인터에서 상태를 확인하세요.")
+                print("💡 Command(resume)을 사용하여 워크플로우를 재개할 수 있습니다.")
+            raise
+
+    def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> TeacherState:
+        """Command(resume)을 사용하여 중단된 워크플로우를 재개합니다."""
+        if config is None:
+            config = {"configurable": {"thread_id": "default"}}
+        
+        # LangGraph 버전에 따른 Command import 시도
+        try:
+            from langgraph.checkpoint.memory import Command
+        except ImportError:
+            try:
+                from langgraph import Command
+            except ImportError:
+                try:
+                    from langgraph.types import Command
+                except ImportError:
+                    print("❌ Command를 import할 수 없습니다. LangGraph 버전을 확인해주세요.")
+                    raise ImportError("Command import 실패")
+        
+        try:
+            print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
+            print(f"🔍 체크포인터 상태 확인: {self.checkpointer}")
+            
+            # 숏텀 메모리에서 solution_agent 상태 복구 시도
+            try:
+                from common.short_term.redis_memory import RedisMemory
+                redis_memory = RedisMemory()
+                
+                # solution_agent의 메모리 키들을 찾아서 상태 복구
+                memory_keys = redis_memory.keys("solution_*")
+                if memory_keys:
+                    print(f"🔍 숏텀 메모리에서 solution 상태 발견: {len(memory_keys)}개")
+                    for key in memory_keys:
+                        state_data = redis_memory.get(key)
+                        if state_data and state_data.get("interrupt_occurred"):
+                            print(f"💾 복구된 상태: {key}")
+                            # 상태를 체크포인터에 저장
+                            if hasattr(self, 'checkpointer') and self.checkpointer:
+                                self.checkpointer.put(config.get("configurable", {}).get("thread_id", "default"), state_data)
+            except Exception as mem_err:
+                print(f"⚠️ 숏텀 메모리 복구 실패: {mem_err}")
+            
+            # Command(resume)을 사용하여 중단된 지점부터 재개
+            resume_command = Command(resume={"data": resume_data})
+            print(f"📤 Command(resume) 전송: {resume_command}")
+            
+            # 체크포인터가 설정된 그래프로 재개
+            result = self.graph.invoke(resume_command, config)
+            print("✅ 워크플로우 재개 완료")
+            return result
+        except Exception as e:
+            print(f"❌ 워크플로우 재개 실패: {e}")
+            print(f"🔍 오류 상세: {type(e).__name__}: {str(e)}")
+            raise
 
     # ── Intent & Routing ────────────────────────────────────────────────────
 
@@ -169,7 +377,7 @@ class Orchestrator:
             "retrieve": "retrieve",
             "generate": "generator",
             "analyze": "route_analysis",
-            "solution": "route_solution",
+            "solution": "preprocess",  # solution 의도일 때 preprocess를 먼저 거침
             "score": "route_score",
         }
         chosen = mapping.get(intent, "retrieve")
@@ -242,6 +450,67 @@ class Orchestrator:
 
         if not external_file_paths:
             print("⚠️ 전처리할 파일이 없습니다.")
+            print(f"🔍 user_query: {uq}")
+            
+            # user_query에서 문제와 보기 추출 시도
+            if uq and uq.strip():
+                print("🔍 user_query에서 문제와 보기 추출 시도...")
+                try:
+                    print(f"🔍 extract_problem_and_options 함수 호출 시작...")
+                    extracted = extract_problem_and_options(uq.strip())
+                    print(f"🔍 추출 결과: {extracted}")
+                    
+                    if extracted and isinstance(extracted, dict):
+                        has_problem = extracted.get("has_problem", False)
+                        problem = extracted.get("problem", "")
+                        options = extracted.get("options", [])
+                        
+                        print(f"🔍 has_problem: {has_problem}")
+                        print(f"🔍 problem: {problem}")
+                        print(f"🔍 options: {options}")
+                        
+                        if has_problem and problem and options and len(options) > 0:
+                            print(f"✅ 문제 추출 성공: {problem[:100]}...")
+                            print(f"✅ 보기 추출 성공: {len(options)}개")
+                            
+                            # 추출된 문제를 shared 상태에 추가
+                            new_state = ensure_shared({**state})
+                            shared = new_state["shared"]
+                            
+                            # 기존 문제 리스트에 추가
+                            shared.setdefault("question", [])
+                            shared.setdefault("options", [])
+                            shared["question"].append(problem)
+                            shared["options"].append(options)
+                            
+                            # artifacts에 추가된 문제 정보 기록
+                            current_artifacts["extracted_problem_count"] = 1
+                            current_artifacts["extracted_problem_start_index"] = len(shared["question"]) - 1
+                            current_artifacts["extracted_problem_end_index"] = len(shared["question"]) - 1
+                            
+                            print(f"📝 추출된 문제를 shared state에 추가: 1개")
+                            print(f"📂 shared state 총 문제 수: {len(shared['question'])}개")
+                            print(f"📂 artifacts: {current_artifacts}")
+                            
+                            # artifacts 업데이트
+                            new_state["artifacts"] = current_artifacts
+                            return new_state
+                        else:
+                            print("⚠️ user_query에서 문제와 보기를 추출할 수 없습니다.")
+                            print(f"🔍 has_problem: {has_problem}")
+                            print(f"🔍 problem: {problem}")
+                            print(f"🔍 options: {options}")
+                    else:
+                        print("⚠️ extract_problem_and_options 함수가 올바른 형식의 결과를 반환하지 않았습니다.")
+                        print(f"🔍 반환된 결과: {extracted}")
+                        
+                except Exception as e:
+                    print(f"❌ 문제 추출 중 오류 발생: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("⚠️ user_query가 비어있거나 None입니다.")
+            
             return state
 
         try:
@@ -342,77 +611,148 @@ class Orchestrator:
         shared = new_state["shared"]
 
         pdf_added_count = int(artifacts.get("pdf_added_count", 0) or 0)
+        extracted_problem_count = int(artifacts.get("extracted_problem_count", 0) or 0)
         start_index = artifacts.get("pdf_added_start_index", None)
         end_index = artifacts.get("pdf_added_end_index", None)
+        extracted_start_index = artifacts.get("extracted_problem_start_index", None)
+        extracted_end_index = artifacts.get("extracted_problem_end_index", None)
 
-        if pdf_added_count <= 0 or start_index is None or end_index is None or end_index < start_index:
-            print("⚠️ PDF에서 추가된 문제가 없거나 인덱스가 유효하지 않습니다.")
+        # PDF 문제나 추출된 문제가 있는지 확인
+        total_problems = pdf_added_count + extracted_problem_count
+        
+        if total_problems <= 0:
+            print("⚠️ 처리할 문제가 없습니다.")
             return new_state
 
-        all_questions = shared.get("question", [])
-        all_options = shared.get("options", [])
+        # PDF 문제 처리
+        if pdf_added_count > 0 and start_index is not None and end_index is not None and end_index >= start_index:
+            all_questions = shared.get("question", [])
+            all_options = shared.get("options", [])
 
-        # 범위 보정
-        start = max(0, min(int(start_index), len(all_questions)))
-        end = min(int(end_index), len(all_questions) - 1)
+            # 범위 보정
+            start = max(0, min(int(start_index), len(all_questions)))
+            end = min(int(end_index), len(all_questions) - 1)
 
-        pdf_questions = all_questions[start:end + 1]
-        pdf_options = all_options[start:end + 1]
+            pdf_questions = all_questions[start:end + 1]
+            pdf_options = all_options[start:end + 1]
 
-        print(f"🎯 [Solution] 처리할 문제: 인덱스 {start}~{end} ({len(pdf_questions)}개)")
+            print(f"🎯 [Solution] PDF 문제 처리: 인덱스 {start}~{end} ({len(pdf_questions)}개)")
 
-        agent = self.solution_runner
-        if agent is None:
-            raise RuntimeError("solution_runner is not initialized (init_agents=False).")
+            agent = self.solution_runner
+            if agent is None:
+                raise RuntimeError("solution_runner is not initialized (init_agents=False).")
 
-        generated_answers: List[str] = []
-        generated_explanations: List[str] = []
+            generated_answers: List[str] = []
+            generated_explanations: List[str] = []
 
-        for i, (q, opts) in enumerate(zip(pdf_questions, pdf_options), start=1):
-            # 옵션 정규화
-            if isinstance(opts, str):
-                opts = [x.strip() for x in opts.splitlines() if x.strip()]
-            opts = [str(x).strip() for x in (opts or []) if str(x).strip()]
+            for i, (q, opts) in enumerate(zip(pdf_questions, pdf_options), start=1):
+                # 옵션 정규화
+                if isinstance(opts, str):
+                    opts = [x.strip() for x in opts.splitlines() if x.strip()]
+                opts = [str(x).strip() for x in (opts or []) if str(x).strip()]
 
-            if not q or not opts:
-                generated_answers.append("")
-                generated_explanations.append("")
-                continue
+                if not q or not opts:
+                    generated_answers.append("")
+                    generated_explanations.append("")
+                    continue
 
-            problem_payload = {"question": q, "options": opts}
-            print(f"🎯 [Solution] 처리할 문제: {problem_payload}")
-            print(problem_payload["question"], problem_payload["options"])
-            # # 여러 구현과 호환을 위해 가능한 키들을 모두 전달
-            # agent_input_state = {
-            #     "user_input_txt": state.get("user_query", ""),
-            #     "user_problem": problem_payload["question"],
-            #     "user_problem_options": problem_payload["options"],
-            # }
-            # print(f"🎯 [Solution] 처리할 문제: {agent_input_state}")
-            try:
-                agent_result = agent.invoke(user_problem=q, user_problem_options=opts, user_input_txt=state.get("user_query", ""))
-            except Exception as e:
-                print(f"❌ SolutionAgent invoke 실행 실패({i}/{len(pdf_questions)}): {e}")
-                agent_result = None
+                problem_payload = {"question": q, "options": opts}
+                print(f"🎯 [Solution] 처리할 문제: {problem_payload}")
+                print(problem_payload["question"], problem_payload["options"])
+                
+                try:
+                    agent_result = agent.invoke(user_problem=q, user_problem_options=opts, user_input_txt=state.get("user_query", ""))
+                except Exception as e:
+                    print(f"❌ SolutionAgent invoke 실행 실패({i}/{len(pdf_questions)}): {e}")
+                    agent_result = None
 
-            ans, exp = "", ""
-            if agent_result:
-                if isinstance(agent_result, dict) and agent_result.get("results"):
-                    r0 = agent_result["results"][0]
-                    ans = r0.get("generated_answer", "")
-                    exp = r0.get("generated_explanation", "")
-                else:
-                    ans = agent_result.get("generated_answer", "")
-                    exp = agent_result.get("generated_explanation", "")
+                ans, exp = "", ""
+                if agent_result:
+                    if isinstance(agent_result, dict) and agent_result.get("results"):
+                        r0 = agent_result["results"][0]
+                        ans = r0.get("generated_answer", "")
+                        exp = r0.get("generated_explanation", "")
+                    else:
+                        ans = agent_result.get("generated_answer", "")
+                        exp = agent_result.get("generated_explanation", "")
 
-            generated_answers.append(ans or "")
-            generated_explanations.append(exp or "")
+                generated_answers.append(ans or "")
+                generated_explanations.append(exp or "")
 
-        # 결과 반영
-        shared.setdefault("answer", [])
-        shared.setdefault("explanation", [])
-        shared["answer"].extend(generated_answers)
-        shared["explanation"].extend(generated_explanations)
+            # 결과 반영
+            shared.setdefault("answer", [])
+            shared.setdefault("explanation", [])
+            shared["answer"].extend(generated_answers)
+            shared["explanation"].extend(generated_explanations)
+
+        # 추출된 문제 처리
+        if extracted_problem_count > 0 and extracted_start_index is not None and extracted_end_index is not None:
+            all_questions = shared.get("question", [])
+            all_options = shared.get("options", [])
+
+            # 범위 보정
+            start = max(0, min(int(extracted_start_index), len(all_questions)))
+            end = min(int(extracted_end_index), len(all_questions) - 1)
+
+            extracted_questions = all_questions[start:end + 1]
+            extracted_options = all_options[start:end + 1]
+
+            print(f"🎯 [Solution] 추출된 문제 처리: 인덱스 {start}~{end} ({len(extracted_questions)}개)")
+
+            agent = self.solution_runner
+            if agent is None:
+                raise RuntimeError("solution_runner is not initialized (init_agents=False).")
+
+            generated_answers: List[str] = []
+            generated_explanations: List[str] = []
+
+            for i, (q, opts) in enumerate(zip(extracted_questions, extracted_options), start=1):
+                print(f"🎯 [Solution] 추출된 문제 처리: {q[:100]}...")
+                print(f"🎯 [Solution] 추출된 보기: {opts}")
+                
+                try:
+                    # solution_agent는 키워드 인수를 받도록 설계됨
+                    # 숏텀 메모리 키를 포함하여 호출
+                    memory_key = f"solution_{start}_{i}"  # 고유한 메모리 키 생성
+                    agent_result = agent.invoke(
+                        user_problem=q, 
+                        user_problem_options=opts, 
+                        user_input_txt=state.get("user_query", ""),
+                        memory_key=memory_key  # 숏텀 메모리 키 전달
+                    )
+                    print(f"✅ 추출된 문제 풀이 완료")
+                    
+                    # 결과에서 답변과 설명 추출
+                    ans, exp = "", ""
+                    if agent_result:
+                        if isinstance(agent_result, dict) and agent_result.get("results"):
+                            r0 = agent_result["results"][0]
+                            ans = r0.get("generated_answer", "")
+                            exp = r0.get("generated_explanation", "")
+                        else:
+                            ans = agent_result.get("generated_answer", "")
+                            exp = agent_result.get("generated_explanation", "")
+                    
+                    generated_answers.append(ans or "")
+                    generated_explanations.append(exp or "")
+                    
+                    # 결과를 solution 상태에도 저장
+                    if "extracted_problem_results" not in new_state["solution"]:
+                        new_state["solution"]["extracted_problem_results"] = []
+                    new_state["solution"]["extracted_problem_results"].append(agent_result)
+                    
+                except Exception as e:
+                    print(f"❌ 추출된 문제 풀이 중 오류 발생: {e}")
+                    print(f"🔍 오류 상세: {type(e).__name__}: {e}")
+                    generated_answers.append("")
+                    generated_explanations.append("")
+                    raise
+
+            # 추출된 문제 결과를 shared 상태에 반영
+            shared.setdefault("answer", [])
+            shared.setdefault("explanation", [])
+            shared["answer"].extend(generated_answers)
+            shared["explanation"].extend(generated_explanations)
 
         # subject 패딩
         need = len(shared["question"]) - len(shared.get("subject", []))
@@ -421,11 +761,7 @@ class Orchestrator:
 
         validate_qas(shared)
 
-        # (중요) 여기서 예전처럼 자동으로 답안집을 바로 만들지 않습니다.
-        # 라우팅에 의해 generate_answer_pdf 노드가 실행되도록 둡니다.
-
         return new_state
-
 
     @traceable(name="teacher.generator")
     def generator(self, state: TeacherState) -> TeacherState:
@@ -1312,7 +1648,7 @@ class Orchestrator:
                 "retrieve": "retrieve",
                 "generator": "generator",
                 "route_analysis": "route_analysis",
-                "route_solution": "route_solution",  # solution 의도일 때 route_solution으로
+                "preprocess": "preprocess",  # solution 의도일 때 preprocess로
                 "route_score": "route_score",
             },
         )
@@ -1323,11 +1659,17 @@ class Orchestrator:
             lambda state: state.get("routing", {}).get("solution_next", "mark_after_generator_solution"),
             {
                 "solution": "solution",
-                "preprocess": "preprocess",
                 "mark_after_generator_solution": "mark_after_generator_solution",
             },
         )
-        builder.add_edge("preprocess", "solution")
+        builder.add_conditional_edges(
+            "preprocess",
+            lambda state: "solution" if state.get("artifacts", {}).get("extracted_problem_count", 0) > 0 or state.get("artifacts", {}).get("pdf_added_count", 0) > 0 else "mark_after_generator_solution",
+            {
+                "solution": "solution",
+                "mark_after_generator_solution": "mark_after_generator_solution",
+            },
+        )
         builder.add_edge("mark_after_generator_solution", "generator")
 
         # route_score
@@ -1387,8 +1729,82 @@ class Orchestrator:
         builder.add_edge("persist_state", "generate_response")
         builder.add_edge("generate_response", END)
 
-        return builder.compile()
-    
+        print("✅ LangGraph 워크플로우 그래프 생성 완료")
+        return builder.compile(checkpointer=self.checkpointer)
+
+    def invoke(self, state: TeacherState, config: Optional[Dict] = None) -> TeacherState:
+        """LangGraph 기반으로 워크플로우를 실행합니다."""
+        if config is None:
+            config = {"configurable": {"thread_id": "default"}}
+        
+        # 체크포인터와 함께 그래프 실행
+        try:
+            result = self.graph.invoke(state, config)
+            return result
+        except Exception as e:
+            print(f"❌ 그래프 실행 중 오류 발생: {e}")
+            # interrupt가 발생한 경우 체크포인터에서 상태 복구 시도
+            if "interrupt" in str(e).lower():
+                print("🔄 interrupt가 발생했습니다. 체크포인터에서 상태를 확인하세요.")
+                print("💡 Command(resume)을 사용하여 워크플로우를 재개할 수 있습니다.")
+            raise
+
+    def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> TeacherState:
+        """Command(resume)을 사용하여 중단된 워크플로우를 재개합니다."""
+        if config is None:
+            config = {"configurable": {"thread_id": "default"}}
+        
+        # LangGraph 버전에 따른 Command import 시도
+        try:
+            from langgraph.checkpoint.memory import Command
+        except ImportError:
+            try:
+                from langgraph import Command
+            except ImportError:
+                try:
+                    from langgraph.types import Command
+                except ImportError:
+                    print("❌ Command를 import할 수 없습니다. LangGraph 버전을 확인해주세요.")
+                    raise ImportError("Command import 실패")
+        
+        try:
+            print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
+            print(f"🔍 체크포인터 상태 확인: {self.checkpointer}")
+            
+            # 숏텀 메모리에서 solution_agent 상태 복구 시도
+            try:
+                from common.short_term.redis_memory import RedisMemory
+                redis_memory = RedisMemory()
+                
+                # solution_agent의 메모리 키들을 찾아서 상태 복구
+                memory_keys = redis_memory.keys("solution_*")
+                if memory_keys:
+                    print(f"🔍 숏텀 메모리에서 solution 상태 발견: {len(memory_keys)}개")
+                    for key in memory_keys:
+                        state_data = redis_memory.get(key)
+                        if state_data and state_data.get("interrupt_occurred"):
+                            print(f"💾 복구된 상태: {key}")
+                            # 상태를 체크포인터에 저장
+                            if hasattr(self, 'checkpointer') and self.checkpointer:
+                                self.checkpointer.put(config.get("configurable", {}).get("thread_id", "default"), state_data)
+            except Exception as mem_err:
+                print(f"⚠️ 숏텀 메모리 복구 실패: {mem_err}")
+            
+            # Command(resume)을 사용하여 중단된 지점부터 재개
+            resume_command = Command(resume={"data": resume_data})
+            print(f"📤 Command(resume) 전송: {resume_command}")
+            
+            # 체크포인터가 설정된 그래프로 재개
+            result = self.graph.invoke(resume_command, config)
+            print("✅ 워크플로우 재개 완료")
+            return result
+        except Exception as e:
+            print(f"❌ 워크플로우 재개 실패: {e}")
+            print(f"🔍 오류 상세: {type(e).__name__}: {str(e)}")
+            raise
+
+    # ── Memory IO ────────────────────────────────────────────────────────────
+
     
     # Streamlit 앱에서 사용할 함수
 def create_app() -> Any:

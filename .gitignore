@@ -221,3 +221,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 모든 .json 파일 제외
+*.json
+
+# 지정된 Goldenset_test 폴더 제외
+farmer/작물추천/Goldenset_test/

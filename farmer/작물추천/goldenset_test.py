@@ -8,7 +8,7 @@ from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
 # ===== 사용자 요청: 경로/인자 바꾸지 않음 =====
-GOLDENSET_CSV = r"C:\Rookies_project\ET_Agent\ET_Agent-dev-eejang\farmer\작물추천\Goldenset_test\Goldenset_test1.csv"
+GOLDENSET_CSV = r"C:\Rookies_project\ET_Agent\farmer\작물추천\Goldenset_test\Goldenset_test1.csv"
 
 # === 설정 ===
 VECTOR_DB_PATH   = os.getenv("VECTOR_DB_PATH", "faiss_pdf_db")

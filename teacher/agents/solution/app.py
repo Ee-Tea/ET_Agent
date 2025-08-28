@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 # --- 패키지 임포트 안전화 ---
 try:
-    from teacher.agents.solution.solution_agent import SolutionAgent
+    from teacher.agents.solution.solution_agent2 import SolutionAgent
 except Exception:
     THIS_DIR = os.path.dirname(os.path.abspath(__file__))
     ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_DIR)))  # .../llm-T
@@ -15,13 +15,29 @@ except Exception:
         sys.path.insert(0, ROOT)
     from teacher.agents.solution.solution_agent import SolutionAgent
 
+# --- asyncio 루프 보장 (Streamlit 스레드) ---
+import asyncio
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    # Windows에서 pymilvus의 Async 클라이언트 경고 방지
+    if sys.platform.startswith("win"):
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            pass
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 # --- Milvus 필수 ---
 try:
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_milvus import Milvus
     from pymilvus import connections
 except Exception as e:
-    st.error(f"Milvus 관련 라이브러리가 필요합니다: {e}\n\npip/uv로 다음을 설치하세요: langchain-milvus, pymilvus, langchain-huggingface")
+    st.error(
+        f"Milvus 관련 라이브러리가 필요합니다: {e}\n\n"
+        "pip/uv로 다음을 설치하세요: langchain-milvus, pymilvus, langchain-huggingface"
+    )
     st.stop()
 
 load_dotenv()
@@ -39,36 +55,79 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🗄️ Milvus 연결(필수)")
-    milvus_host = st.text_input("Host", value="localhost")
-    milvus_port = st.text_input("Port", value="19530")
-    collection_name = st.text_input("Collection", value="problems")
+    milvus_host = st.text_input("Host", value=os.getenv("MILVUS_HOST", "localhost"))
+    milvus_port = st.text_input("Port", value=os.getenv("MILVUS_PORT", "19530"))
+    st.caption("collections: problems, concept_summary")
 
-# -------- 리소스: Milvus / Agent --------
+
+# --- 리소스: Milvus / Agent --------
 @st.cache_resource
-def init_vectorstore(host: str, port: str, coll: str) -> Milvus:
-    try:
-        emb = HuggingFaceEmbeddings(
-            model_name="jhgan/ko-sroberta-multitask",
-            model_kwargs={"device": "cpu"},
-        )
-        if "default" in connections.list_connections():
-            connections.disconnect("default")
+def init_vectorstore(host: str, port: str, coll: str,
+                     *, text_field: str | None = None,
+                     vector_field: str | None = None,
+                     metric_type: str | None = None) -> Milvus:
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_milvus import Milvus
+    from pymilvus import connections, Collection
+
+    emb = HuggingFaceEmbeddings(
+        model_name="jhgan/ko-sroberta-multitask",
+        model_kwargs={"device": "cpu"},
+    )
+
+    if "default" not in connections.list_connections():
         connections.connect(alias="default", host=host, port=port)
-        vs = Milvus(
-            embedding_function=emb,
-            collection_name=coll,
-            connection_args={"host": host, "port": port},
-        )
-        return vs
-    except Exception as e:
-        st.error(f"Milvus 연결 실패: {e}")
-        st.stop()
+
+    # 1) 컬렉션의 실제 인덱스 metric 확인
+    actual_metric = metric_type
+    try:
+        col = Collection(coll)
+        # 이미 인덱스가 있다면 그 metric을 사용
+        if col.indexes:
+            # 보통 하나만 존재
+            params = col.indexes[0].params or {}
+            # pymilvus 버전에 따라 키가 다를 수 있어 두 가지 모두 시도
+            actual_metric = params.get("metric_type") or params.get("metric_type".upper())
+    except Exception:
+        pass
+
+    if not actual_metric:
+        # 인덱스가 없거나 조회 실패 시 기본값(당신의 환경에 맞게 선택)
+        actual_metric = "L2"   # or "COSINE"
+
+    # 2) langchain-milvus에 전달
+    kwargs = {
+        "embedding_function": emb,
+        "collection_name": coll,
+        "connection_args": {"host": host, "port": port},
+        # 인덱스는 '이미 있는 것'을 그대로 쓰도록 index_params는 넣지 않음
+        "search_params": {"metric_type": actual_metric, "params": {"nprobe": 10}},
+    }
+    if text_field is not None:
+        kwargs["text_field"] = text_field
+    if vector_field is not None:
+        kwargs["vector_field"] = vector_field
+
+    return Milvus(**kwargs)
+
+
+
 
 @st.cache_resource
 def get_agent() -> SolutionAgent:
     return SolutionAgent()
 
-vectorstore = init_vectorstore(milvus_host, milvus_port, collection_name)
+# problems 컬렉션: (LangChain로 만든 기본 스키마면) 필드 지정 없이
+vectorstore_p = init_vectorstore(milvus_host, milvus_port, "problems")
+
+# concept_summary 컬렉션: 사용자 정의 스키마 → content / embedding 필드 지정 필요
+vectorstore_c = init_vectorstore(
+    milvus_host, milvus_port, "concept_summary",
+    text_field="content",
+    vector_field="embedding", 
+)
+
+
 agent = get_agent()
 
 # -------- 입력: 공통 지시문 --------
@@ -91,28 +150,19 @@ if problems:
     st.markdown("**미리보기**")
     st.write(sel.get("question", ""))
     for i, o in enumerate(sel.get("options", []), 1):
-        st.write(f"{o}")
+        st.write(f"{i}. {o}")
 
     col1, col2 = st.columns(2)
 
     def run_one(p: Dict[str, Any]):
-        init_state = {
-            "user_input_txt": user_instr,
-            "user_problem": p.get("question", ""),
-            "user_problem_options": p.get("options", []),
-            "vectorstore": vectorstore,                 # ✅ 항상 연결
-            "retrieved_docs": [],
-            "similar_questions_text": "",
-            "generated_answer": "",
-            "generated_explanation": "",
-            "generated_subject": "",
-            "validated": False,
-            "retry_count": 0,
-            "results": [],
-            "chat_history": [],
-            "source_type": "external",                  # ✅ 항상 외부 저장
-        }
-        return agent.graph.invoke(init_state, config={"recursion_limit": 200})
+        return agent.invoke(
+            user_input_txt=user_instr,
+            user_problem=p.get("question", ""),
+            user_problem_options=p.get("options", []),
+            vectorstore_p=vectorstore_p,              # ✅ 에이전트에 명시 전달
+            vectorstore_c=vectorstore_c,              # ✅ 에이전트에 명시 전달
+            recursion_limit=200,
+        )
 
     with col1:
         if st.button("▶️ 선택 문제 풀이"):
@@ -123,7 +173,7 @@ if problems:
                     last = results[-1]
                     st.markdown(f"**정답(번호)**: {last.get('generated_answer','-')}")
                     st.markdown(f"**과목**: {last.get('generated_subject','-')}")
-                    st.markdown(f"**풀이**: {last.get('generated_explanation','-')}")
+                    st.markdown("**풀이**")
                     st.write(last.get("generated_explanation","-"))
                 else:
                     st.error("결과가 비어 있습니다.")

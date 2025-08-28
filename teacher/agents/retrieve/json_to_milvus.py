@@ -4,7 +4,7 @@ import uuid
 from typing import List, Dict, Any
 from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
 import numpy as np
-import openai
+from sentence_transformers import SentenceTransformer
 import logging
 
 # 로깅 설정
@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class MilvusDBManager:
-    def __init__(self, host: str = None, port: str = None, openai_api_key: str = None):
+    def __init__(self, host: str = None, port: str = None):
         """MilvusDB 연결 관리자 초기화"""
         # 환경변수에서 MilvusDB 연결 정보 가져오기
         self.host = host or os.getenv("MILVUS_HOST", "localhost")
@@ -20,15 +20,9 @@ class MilvusDBManager:
         self.port = port or os.getenv("MILVUS_PORT", "19530")
         print(self.port)
         self.collection_name = "concept_summary"
-        self.dimension = 1536  ***REMOVED*** text-embedding-ada-002 임베딩 차원
-        self.openai_client = None
+        self.dimension = 768  # ko-sroberta-multitask 임베딩 차원
+        self.embeddings_model = None
         self.collection = None
-        
-        ***REMOVED*** API 키 설정
-        if openai_api_key:
-            openai.api_key = openai_api_key
-        elif os.getenv("OPENAI_API_KEY=REDACTED = os.getenv("OPENAI_API_KEY=REDACTED:
-            logger.warning("OpenAI API 키가 설정되지 않았습니다. 환경변수 OPENAI_API_KEY=REDACTED 파라미터를 전달하세요.")
         
     def connect(self):
         """MilvusDB에 연결"""
@@ -41,29 +35,23 @@ class MilvusDBManager:
             return False
     
     def load_embedding_model(self):
-        """OpenAI 임베딩 모델 초기화"""
+        """HuggingFace 임베딩 모델 초기화"""
         try:
-            if not openai.api_key:
-                raise ValueError("OpenAI API 키가 설정되지 않았습니다.")
-            
-            ***REMOVED*** 클라이언트 초기화
-            self.openai_client = openai.OpenAI(api_key=openai.api_key)
+            # HuggingFace 임베딩 모델 로드
+            self.embeddings_model = SentenceTransformer('jhgan/ko-sroberta-multitask')
             
             # 간단한 테스트 임베딩 생성
-            test_response = self.openai_client.embeddings.create(
-                model="text-embedding-ada-002",
-                input="테스트"
-            )
+            test_embedding = self.embeddings_model.encode("테스트")
             
-            if test_response.data and len(test_response.data[0].embedding) == self.dimension:
-                logger.info("OpenAI 임베딩 모델이 성공적으로 초기화되었습니다.")
+            if len(test_embedding) == self.dimension:
+                logger.info("HuggingFace 임베딩 모델이 성공적으로 초기화되었습니다.")
                 return True
             else:
-                logger.error("OpenAI 임베딩 모델 초기화 실패")
+                logger.error("HuggingFace 임베딩 모델 초기화 실패")
                 return False
                 
         except Exception as e:
-            logger.error(f"OpenAI 임베딩 모델 초기화 실패: {e}")
+            logger.error(f"HuggingFace 임베딩 모델 초기화 실패: {e}")
             return False
     
     def create_collection(self):
@@ -107,30 +95,27 @@ class MilvusDBManager:
             return False
     
     def generate_embedding(self, text: str) -> List[float]:
-        """텍스트를 OpenAI 임베딩 벡터로 변환"""
+        """텍스트를 HuggingFace 임베딩 벡터로 변환"""
         try:
-            if not self.openai_client:
-                raise ValueError("OpenAI 클라이언트가 초기화되지 않았습니다.")
+            if not self.embeddings_model:
+                raise ValueError("HuggingFace 임베딩 모델이 초기화되지 않았습니다.")
             
             # 텍스트 전처리 (너무 긴 텍스트는 잘라내기)
-            if len(text) > 8000:  ***REMOVED*** text-embedding-ada-002 토큰 제한
+            if len(text) > 8000:  # HuggingFace 토큰 제한
                 text = text[:8000]
             
-            ***REMOVED*** 임베딩 생성
-            response = self.openai_client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=text
-            )
+            # HuggingFace 임베딩 생성
+            embedding = self.embeddings_model.encode(text)
             
-            if response.data and len(response.data) > 0:
-                embedding = response.data[0].embedding
-                return embedding
+            if embedding is not None and len(embedding) > 0:
+                # numpy 배열을 리스트로 변환
+                return embedding.tolist()
             else:
-                logger.error("OpenAI 임베딩 응답이 비어있습니다.")
+                logger.error("HuggingFace 임베딩 응답이 비어있습니다.")
                 return [0.0] * self.dimension
                 
         except Exception as e:
-            logger.error(f"OpenAI 임베딩 생성 실패: {e}")
+            logger.error(f"HuggingFace 임베딩 생성 실패: {e}")
             return [0.0] * self.dimension
     
     def chunk_content(self, content: str, max_length: int = 8000) -> List[str]:
@@ -357,10 +342,6 @@ class MilvusDBManager:
 
 def main():
     """메인 함수"""
-    ***REMOVED*** API 키 확인
-    if not os.getenv("OPENAI_API_KEY=REDACTED("환경변수 OPENAI_API_KEY=REDACTED("예시: export OPENAI_API_KEY=REDACTED'")
-        return
-    
     # MilvusDB 관리자 초기화
     db_manager = MilvusDBManager()
     
@@ -369,9 +350,9 @@ def main():
         logger.error("MilvusDB 연결에 실패했습니다.")
         return
     
-    ***REMOVED*** 임베딩 모델 초기화
+    # HuggingFace 임베딩 모델 초기화
     if not db_manager.load_embedding_model():
-        logger.error("OpenAI 임베딩 모델 초기화에 실패했습니다.")
+        logger.error("HuggingFace 임베딩 모델 초기화에 실패했습니다.")
         return
     
     # 컬렉션 생성

@@ -11,13 +11,19 @@ from langchain_openai import ChatOpenAI
 from ..base_agent import BaseAgent
 from datetime import datetime
 
+# LangGraph HITL 관련 import 추가
+from langgraph.types import Command, interrupt
+from langgraph.checkpoint.memory import InMemorySaver
+
 # 검색 에이전트 import (retrieve_agent 연동)
 try:
     from ..retrieve.retrieve_agent import retrieve_agent
     SEARCH_AGENT_AVAILABLE = True
-except ImportError:
+    print("✅ 검색 에이전트 import 성공")
+except ImportError as e:
     SEARCH_AGENT_AVAILABLE = False
-    print("⚠️ 검색 에이전트를 import할 수 없습니다. 검색 기능은 비활성화됩니다.")
+    print(f"⚠️ 검색 에이전트를 import할 수 없습니다: {e}")
+    print("   - 검색 기능은 비활성화됩니다.")
 
 load_dotenv()
 OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED 모델 설정을 환경변수에서 가져오기
@@ -34,7 +40,7 @@ class SolutionState(TypedDict):
     user_problem: str
     user_problem_options: List[str]
     
-    vectorstore: Milvus
+    # vectorstore는 상태에 저장하지 않음 (직렬화 문제 방지)
 
     retrieved_docs: List[Document]
     similar_questions_text : str
@@ -69,7 +75,8 @@ class SolutionAgent(BaseAgent):
     def __init__(self, max_interactions: int = 5, hitl_mode: str = "smart"):
         self.max_interactions = max_interactions
         self.hitl_mode = hitl_mode  # "auto", "manual", "smart"
-        self.graph = self._create_graph()
+        self.memory = self._create_custom_checkpointer()  # 체크포인터 먼저 초기화
+        self.graph = self._create_graph()  # 그 다음 그래프 생성
         
     @property
     def name(self) -> str:
@@ -127,7 +134,7 @@ class SolutionAgent(BaseAgent):
         graph.add_edge("search_additional_info", "improve_explanation")
         graph.add_edge("improve_explanation", "collect_user_feedback")
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.memory)
     
     def _route_after_validation(self, state: SolutionState) -> str:
         """검증 후 라우팅 결정 (HITL 모드에 따라)"""
@@ -327,7 +334,8 @@ class SolutionAgent(BaseAgent):
         print("\n🔍 [1단계] 유사 문제 검색 시작")
         print(state["user_problem"], state["user_problem_options"])
         
-        vectorstore = state.get("vectorstore")
+        # vectorstore는 외부에서 전달받아야 함 (직렬화 문제 방지)
+        vectorstore = getattr(self, '_current_vectorstore', None)
         if vectorstore is None:
             print("⚠️ 벡터스토어가 없어 유사 문제 검색을 건너뜁니다.")
             state["retrieved_docs"] = []
@@ -437,7 +445,13 @@ class SolutionAgent(BaseAgent):
 
         # ✅ '네'가 포함된 응답일 경우에만 유효한 풀이로 판단
         print("📌 검증 응답:", result_text)
-        state["validated"] = "네" in result_text
+        
+        # manual 모드에서는 항상 HITL 적용
+        if self.hitl_mode == "manual":
+            state["validated"] = False
+            print(" Manual 모드: 강제로 HITL 적용")
+        else:
+            state["validated"] = "네" in result_text
         
         if not state["validated"]:
             state["retry_count"] = state.get("retry_count", 0) + 1
@@ -448,56 +462,112 @@ class SolutionAgent(BaseAgent):
         return state
 
     def _collect_user_feedback(self, state: SolutionState) -> SolutionState:
-        """사용자로부터 풀이에 대한 피드백 수집"""
+        """사용자로부터 풀이에 대한 피드백 수집 (interrupt 사용)"""
         print("\n💬 [HITL] 사용자 피드백 수집")
         
-        # 실제 환경에서는 사용자 입력을 받아야 하지만, 여기서는 시뮬레이션
+        # 현재 풀이 상태 표시
         print(f"\n📝 현재 풀이:")
         print(f"정답: {state['generated_answer']}")
         print(f"풀이: {state['generated_explanation']}")
         print(f"과목: {state['generated_subject']}")
         
-        # 사용자 피드백 시뮬레이션 (실제로는 input() 사용)
-        feedback_options = [
-            "이 풀이가 이해가 됩니다. 만족합니다.",
-            "풀이를 더 쉽게 설명해주세요.",
-            "특정 용어에 대해 더 자세히 설명해주세요.",
-            "검색해서 관련 정보를 찾아주세요."
-        ]
+        # interrupt를 사용하여 사용자 입력 받기
+        feedback_query = {
+            "query": "풀이에 대한 의견을 자유롭게 입력해주세요",
+            "examples": {
+                "이해됨": ["이해가 됩니다", "좋습니다", "만족합니다", "충분합니다", "괜찮습니다"],
+                "더 쉬운 풀이 필요": ["더 쉽게 설명해주세요", "복잡해요", "어려워요", "간단하게", "초보자도 이해할 수 있게"],
+                "용어 설명 필요": ["이 용어가 뭔지 모르겠어요", "설명이 부족해요", "용어를 더 자세히", "개념 설명 추가"]
+            },
+            "current_problem": state['user_problem'],
+            "current_answer": state['generated_answer'],
+            "current_explanation": state['generated_explanation']
+        }
         
-        print("\n💭 피드백 옵션:")
-        for i, option in enumerate(feedback_options, 1):
-            print(f"{i}. {option}")
+        print("\n💭 풀이에 대한 의견을 자유롭게 입력해주세요:")
+        print("예시:")
+        print("- '이해가 됩니다', '좋습니다', '만족합니다' → 이해됨")
+        print("- '더 쉽게 설명해주세요', '복잡해요', '어려워요' → 더 쉬운 풀이 필요")
+        print("- '이 용어가 뭔지 모르겠어요', '설명이 부족해요' → 용어 설명 필요")
         
-        # 실제 환경에서는 사용자 입력을 받아야 함
-        # feedback_choice = input("\n어떤 피드백을 주시겠습니까? (1-4): ").strip()
+        # interrupt를 사용하여 실행 일시 중단 및 사용자 입력 대기
+        human_response = interrupt(feedback_query)
         
-        # 시뮬레이션을 위해 자동 선택 (실제로는 사용자 입력)
-        feedback_choice = "2"  # 풀이를 더 쉽게 설명해주세요
+        # Command 객체에서 사용자 입력 추출
+        if isinstance(human_response, dict) and "data" in human_response:
+            user_input = human_response["data"]
+        else:
+            user_input = str(human_response)
         
-        try:
-            choice_idx = int(feedback_choice) - 1
-            if 0 <= choice_idx < len(feedback_options):
-                state["user_feedback"] = feedback_options[choice_idx]
-                if choice_idx == 0:  # 만족
-                    state["feedback_type"] = "comprehension"
-                elif choice_idx == 1:  # 더 쉽게
-                    state["feedback_type"] = "improvement"
-                elif choice_idx == 2:  # 용어 설명
-                    state["feedback_type"] = "clarification"
-                else:  # 검색
-                    state["feedback_type"] = "search"
-            else:
-                state["user_feedback"] = "풀이를 더 쉽게 설명해주세요."
-                state["feedback_type"] = "improvement"
-        except ValueError:
-            state["user_feedback"] = "풀이를 더 쉽게 설명해주세요."
-            state["feedback_type"] = "improvement"
+        if not user_input:
+            # 입력이 없으면 기본값 설정
+            user_input = "풀이를 더 쉽게 설명해주세요"
+            print(f"⚠️ 입력이 없어 기본값을 사용합니다: {user_input}")
         
+        state["user_feedback"] = user_input
         state["interaction_count"] = state.get("interaction_count", 0) + 1
-        print(f"✅ 피드백 수집 완료: {state['user_feedback']}")
+        
+        print(f"✅ 피드백 수집 완료: {user_input}")
         
         return state
+
+    def _route_after_feedback(self, state: SolutionState) -> str:
+        """사용자 피드백을 LLM이 분석하여 라우팅 결정"""
+        print(f"\n🧠 [HITL] 사용자 피드백 분석 중...")
+        
+        llm = self._llm(0.1)  # 일관된 분류를 위해 낮은 temperature 사용
+        
+        analysis_prompt = f"""
+        사용자가 제시한 풀이에 대한 피드백을 분석하여 다음 3가지 카테고리 중 하나로 분류해주세요:
+
+        사용자 피드백: {state['user_feedback']}
+
+        분류 기준:
+        1. "이해됨" - 사용자가 풀이를 이해했고 만족하는 경우
+           예시: "이해가 됩니다", "좋습니다", "만족합니다", "충분합니다", "괜찮습니다"
+        
+        2. "더 쉬운 풀이 필요" - 사용자가 풀이가 너무 복잡하거나 어렵다고 느끼는 경우
+           예시: "더 쉽게 설명해주세요", "복잡해요", "어려워요", "간단하게", "초보자도 이해할 수 있게"
+        
+        3. "용어 설명 필요" - 사용자가 특정 용어나 개념에 대한 추가 설명을 요청하는 경우
+           예시: "이 용어가 뭔지 모르겠어요", "설명이 부족해요", "용어를 더 자세히", "개념 설명 추가"
+
+        위 3가지 중 하나로만 답변하세요. 답변은 반드시 다음 중 하나여야 합니다:
+        - 이해됨
+        - 더 쉬운 풀이 필요  
+        - 용어 설명 필요
+        """
+        
+        try:
+            response = llm.invoke(analysis_prompt)
+            feedback_type = response.content.strip()
+            
+            print(f"📊 LLM 분석 결과: {feedback_type}")
+            
+            # 분류 결과를 state에 저장
+            if "이해됨" in feedback_type:
+                state["feedback_type"] = "comprehension"
+                print("✅ 사용자 의도: 이해됨 → 바로 저장으로 진행")
+                return "continue"
+            elif "더 쉬운 풀이 필요" in feedback_type:
+                state["feedback_type"] = "improvement"
+                print("⚠️ 사용자 의도: 더 쉬운 풀이 필요 → 풀이 개선 진행")
+                return "improve"
+            elif "용어 설명 필요" in feedback_type:
+                state["feedback_type"] = "clarification"
+                print("🔍 사용자 의도: 용어 설명 필요 → 검색 노드 실행")
+                return "search"
+            else:
+                # 명확하지 않은 경우 기본값으로 개선 진행
+                print("⚠️ 명확하지 않은 피드백 → 기본값으로 개선 진행")
+                state["feedback_type"] = "improvement"
+                return "improve"
+                
+        except Exception as e:
+            print(f"⚠️ LLM 분석 중 오류 발생: {e}")
+            print("⚠️ 기본값으로 개선 진행")
+            state["feedback_type"] = "improvement"
+            return "improve"
 
     def _process_feedback(self, state: SolutionState) -> SolutionState:
         """사용자 피드백을 분석하고 처리 방향 결정"""
@@ -524,21 +594,23 @@ class SolutionAgent(BaseAgent):
             return state
         
         try:
-            # 검색 에이전트 실행
-            search_query = f"{state['user_problem']} {state['generated_explanation']}"
-            search_results = retrieve_agent().execute({
-                "query": search_query,
-                "max_results": 3
+            # 검색 쿼리 구성 - 유저 피드백 포함
+            user_feedback = state.get('user_feedback', '')
+            search_query = f"{state['user_problem']} {state['generated_explanation']} {user_feedback}"
+            
+            print(f"🔍 검색 쿼리: {search_query[:100]}...")
+            print(f"💬 유저 피드백: {user_feedback}")
+            
+            # 검색 에이전트 실행 (invoke 메서드 사용)
+            search_results = retrieve_agent().invoke({
+                "retrieval_question": search_query
             })
             
-            if search_results and "results" in search_results:
+            if search_results and "answer" in search_results:
                 # 검색 결과를 텍스트로 변환
-                results_text = []
-                for i, result in enumerate(search_results["results"][:3]):
-                    results_text.append(f"[검색결과 {i+1}]\n{result.get('content', '')}")
-                
-                state["search_results"] = "\n\n".join(results_text)
-                print(f"✅ 검색 완료: {len(search_results['results'])}개 결과")
+                answer_content = search_results.get("answer", "")
+                state["search_results"] = f"[검색결과]\n{answer_content}"
+                print(f"✅ 검색 완료: 답변 길이 {len(answer_content)}자")
             else:
                 state["search_results"] = "검색 결과를 찾을 수 없습니다."
                 print("⚠️ 검색 결과가 없습니다.")
@@ -554,33 +626,83 @@ class SolutionAgent(BaseAgent):
         print(f"\n✨ [HITL] 풀이 개선 시작")
         
         llm = self._llm(0.3)
+        feedback_type = state.get("feedback_type", "improvement")
         
-        # 개선 프롬프트 구성
-        improvement_prompt = f"""
-        원본 문제: {state['user_problem']}
-        원본 보기: {state['user_problem_options']}
-        원본 정답: {state['generated_answer']}
-        원본 풀이: {state['generated_explanation']}
-        
-        사용자 피드백: {state['user_feedback']}
-        피드백 유형: {state['feedback_type']}
-        
-        추가 검색 결과:
-        {state.get('search_results', '검색 결과 없음')}
-        
-        위 정보를 바탕으로 풀이를 개선해주세요:
-        
-        1. 피드백 유형에 따라 적절히 개선:
-           - improvement: 더 쉽고 이해하기 쉽게 설명
-           - clarification: 특정 용어나 개념을 더 자세히 설명
-           - search: 검색 결과를 활용하여 풀이를 보강
-        
-        2. 출력 형식:
-        정답: [개선된 정답]
-        풀이: [개선된 풀이]
-        과목: [과목]
-        개선사항: [어떤 부분을 어떻게 개선했는지 설명]
-        """
+        # 피드백 유형에 따른 개선 프롬프트 구성
+        if feedback_type == "improvement":
+            improvement_prompt = f"""
+            원본 문제: {state['user_problem']}
+            원본 보기: {state['user_problem_options']}
+            원본 정답: {state['generated_answer']}
+            원본 풀이: {state['generated_explanation']}
+            
+            사용자 피드백: {state['user_feedback']}
+            
+            위 정보를 바탕으로 풀이를 더 쉽고 이해하기 쉽게 개선해주세요:
+            
+            개선 요구사항:
+            1. 복잡한 용어를 쉬운 말로 바꾸기
+            2. 단계별로 명확하게 설명하기
+            3. 초보자도 이해할 수 있도록 간단하게
+            4. 필요시 비유나 예시 추가하기
+            
+            출력 형식:
+            정답: [정답]
+            풀이: [개선된 풀이]
+            과목: [과목]
+            개선사항: [어떤 부분을 어떻게 개선했는지 설명]
+            """
+            
+        elif feedback_type == "clarification":
+            improvement_prompt = f"""
+            원본 문제: {state['user_problem']}
+            원본 보기: {state['user_problem_options']}
+            원본 정답: {state['generated_answer']}
+            원본 풀이: {state['generated_explanation']}
+            
+            사용자 피드백: {state['user_feedback']}
+            
+            추가 검색 결과:
+            {state.get('search_results', '검색 결과 없음')}
+            
+            위 정보를 바탕으로 풀이를 개선해주세요:
+            
+            개선 요구사항:
+            1. 사용자가 요청한 용어나 개념에 대한 상세한 설명 추가
+            2. 검색 결과를 활용하여 관련 개념 보강
+            3. 용어의 정의와 예시 제공
+            4. 전체적인 맥락에서 이해할 수 있도록 설명
+            5. 사용자 피드백에서 언급된 구체적인 부분에 집중하여 설명
+             
+            출력 형식:
+            정답: [정답]
+            풀이: [개선된 풀이]
+            과목: [과목]
+            개선사항: [어떤 부분을 어떻게 개선했는지 설명]
+            """
+            
+        else:  # 기본 개선
+            improvement_prompt = f"""
+            원본 문제: {state['user_problem']}
+            원본 보기: {state['user_problem_options']}
+            원본 정답: {state['generated_answer']}
+            원본 풀이: {state['generated_explanation']}
+            
+            사용자 피드백: {state['user_feedback']}
+            
+            위 정보를 바탕으로 풀이를 개선해주세요:
+            
+            개선 요구사항:
+            1. 사용자 피드백에 맞게 적절히 개선
+            2. 이해하기 쉽고 명확하게 설명
+            3. 필요한 경우 추가 정보나 예시 제공
+            
+            출력 형식:
+            정답: [정답]
+            풀이: [개선된 풀이]
+            과목: [과목]
+            개선사항: [어떤 부분을 어떻게 개선했는지 설명]
+            """
         
         try:
             response = llm.invoke(improvement_prompt)
@@ -601,16 +723,17 @@ class SolutionAgent(BaseAgent):
             if improvement_match:
                 improvement_note = improvement_match.group(1).strip()
             else:
-                improvement_note = "사용자 피드백에 따라 풀이를 개선했습니다."
+                improvement_note = f"사용자 피드백({feedback_type})에 따라 풀이를 개선했습니다."
             
             # 개선된 풀이를 메인 풀이로 설정
             if state.get("improved_explanation"):
                 state["generated_explanation"] = state["improved_explanation"]
             
             # 채팅 히스토리에 개선 과정 추가
-            state["chat_history"].append(f"개선: {improvement_note}")
+            state["chat_history"].append(f"개선({feedback_type}): {improvement_note}")
             
             print(f"✅ 풀이 개선 완료: {improvement_note}")
+            print(f"📝 개선 유형: {feedback_type}")
             
         except Exception as e:
             print(f"⚠️ 풀이 개선 중 오류 발생: {e}")
@@ -622,26 +745,32 @@ class SolutionAgent(BaseAgent):
     def _store_to_vector_db(self, state: SolutionState) -> SolutionState:  
         print("\n🧩 [4단계] 임베딩 및 벡터 DB 저장 시작")
 
-    
-        vectorstore = state["vectorstore"] 
-
-        # 중복 문제 확인
-        similar = vectorstore.similarity_search(state["user_problem"], k=1)
-        if similar and state["user_problem"].strip() in similar[0].page_content:
-            print("⚠️ 동일한 문제가 존재하여 저장 생략")
+        # vectorstore는 외부에서 전달받아야 함 (직렬화 문제 방지)
+        vectorstore = getattr(self, '_current_vectorstore', None)
+        if vectorstore is None:
+            print("⚠️ 벡터스토어가 없어 DB 저장을 건너뜁니다.")
         else:
-            # 문제, 해답, 풀이를 각각 metadata로 저장
-            doc = Document(
-                page_content=state["user_problem"],
-                metadata={
-                    "options": json.dumps(state.get("user_problem_options", [])), 
-                    "answer": state["generated_answer"],
-                    "explanation": state["generated_explanation"],
-                    "subject": state["generated_subject"],
-                }
-            )
-            vectorstore.add_documents([doc])
-            print("✅ 문제+해답+풀이 저장 완료")
+            try:
+                # 중복 문제 확인
+                similar = vectorstore.similarity_search(state["user_problem"], k=1)
+                if similar and state["user_problem"].strip() in similar[0].page_content:
+                    print("⚠️ 동일한 문제가 존재하여 저장 생략")
+                else:
+                    # 문제, 해답, 풀이를 각각 metadata로 저장
+                    doc = Document(
+                        page_content=state["user_problem"],
+                        metadata={
+                            "options": json.dumps(state.get("user_problem_options", [])), 
+                            "answer": state["generated_answer"],
+                            "explanation": state["generated_explanation"],
+                            "subject": state["generated_subject"],
+                        }
+                    )
+                    vectorstore.add_documents([doc])
+                    print("✅ 문제+해답+풀이 저장 완료")
+            except Exception as e:
+                print(f"⚠️ 벡터 DB 저장 중 오류 발생: {e}")
+                print("   - 결과만 저장하고 계속 진행합니다.")
 
         # 결과를 state에 저장 (항상 실행)
         print(f"\n📝 결과 저장 시작:")
@@ -745,11 +874,13 @@ class SolutionAgent(BaseAgent):
                 print("   - 벡터스토어 없이 실행을 계속합니다.")
                 vectorstore = None
         
+        # vectorstore를 인스턴스 변수로 설정 (직렬화 문제 방지)
+        self._current_vectorstore = vectorstore
+        
         initial_state: SolutionState = {
             "user_input_txt": user_input_txt,
             "user_problem": user_problem,
             "user_problem_options": user_problem_options,
-            "vectorstore": vectorstore,
             "retrieved_docs": [],
             "similar_questions_text": "",
             "generated_answer": "",
@@ -770,7 +901,16 @@ class SolutionAgent(BaseAgent):
             "chat_history": []
         }
         
-        final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
+        final_state = self.graph.invoke(
+            initial_state, 
+            config={
+                "recursion_limit": recursion_limit,
+                "configurable": {
+                    "thread_id": "default",
+                    "checkpoint_id": "default"
+                }
+            }
+        )
 
         # 결과 확인 및 디버깅
         results = final_state.get("results", [])
@@ -960,88 +1100,119 @@ class SolutionAgent(BaseAgent):
             print(f"⚠️ 풀이 개선 중 오류: {e}")
             candidate["improved_explanation"] = result.get("generated_explanation", "")
 
+    def _create_custom_checkpointer(self):
+        """vectorstore 직렬화 문제를 해결하는 커스텀 체크포인터"""
+        from langgraph.checkpoint.memory import InMemorySaver
+        
+        # 기본 InMemorySaver 사용 (안정적이고 호환성 좋음)
+        return InMemorySaver()
+
 
 if __name__ == "__main__":
-    # ✅ Milvus 연결 및 벡터스토어 생성
-    embedding_model = HuggingFaceEmbeddings(
-        model_name="jhgan/ko-sroberta-multitask",
-        model_kwargs={"device": "cpu"}
-    )
-
-    if "default" in connections.list_connections():
-        connections.disconnect("default")
-    connections.connect(alias="default", host="localhost", port="19530")
-
-    vectorstore = Milvus(
-        embedding_function=embedding_model,
-        collection_name="problems",
-        connection_args={"host": "localhost", "port":"19530"}
-    )
-
+    print("🚀 HITL 피드백 시스템 테스트")
+    print("=" * 50)
+    
     # HITL 모드 선택
-    print("\n🚀 HITL 모드를 선택하세요:")
+    print("\n🎯 HITL 모드를 선택하세요:")
     print("1. auto - 자동 모드 (HITL 없음)")
     print("2. smart - 스마트 모드 (품질에 따라 자동 결정)")
     print("3. manual - 수동 모드 (항상 HITL)")
     
-    mode_choice = input("모드를 선택하세요 (1-3, 기본값: 2): ").strip()
+    mode_choice = input("모드를 선택하세요 (1-3, 기본값: 3): ").strip()
     
     if mode_choice == "1":
         hitl_mode = "auto"
-    elif mode_choice == "3":
-        hitl_mode = "manual"
-    else:
+    elif mode_choice == "2":
         hitl_mode = "smart"
+    else:
+        hitl_mode = "manual"
+    
+    print(f"\n✅ 선택된 모드: {hitl_mode}")
+    
+    # 벡터스토어 연결 시도 (선택사항)
+    vectorstore = None
+    try:
+        embedding_model = HuggingFaceEmbeddings(
+            model_name="jhgan/ko-sroberta-multitask",
+            model_kwargs={"device": "cpu"}
+        )
+
+        if "default" in connections.list_connections():
+            connections.disconnect("default")
+        connections.connect(alias="default", host="localhost", port="19530")
+
+        vectorstore = Milvus(
+            embedding_function=embedding_model,
+            collection_name="problems",
+            connection_args={"host": "localhost", "port":"19530"}
+        )
+        print("✅ Milvus 벡터스토어 연결 성공")
+    except Exception as e:
+        print(f"⚠️ Milvus 연결 실패: {e}")
+        print("   - 벡터스토어 없이 테스트를 진행합니다.")
+        vectorstore = None
     
     agent = SolutionAgent(max_interactions=5, hitl_mode=hitl_mode)
 
-    user_input_txt = input("\n❓ 사용자 질문: ").strip()
-    user_problem = input("\n❓ 사용자 문제: ").strip()
-    user_problem_options_raw = input("\n❓ 사용자 보기 (쉼표로 구분): ").strip()
+    # 테스트용 기본값 제공
+    print(f"\n📝 테스트 문제를 입력하거나 기본값을 사용하세요:")
+    
+    user_input_txt = input("❓ 사용자 질문 (기본값: 프로세스와 스레드의 차이점을 이해하고 싶습니다): ").strip()
+    if not user_input_txt:
+        user_input_txt = "프로세스와 스레드의 차이점을 이해하고 싶습니다"
+    
+    user_problem = input("❓ 사용자 문제 (기본값: 프로세스와 스레드의 차이점으로 올바른 것은?): ").strip()
+    if not user_problem:
+        user_problem = "프로세스와 스레드의 차이점으로 올바른 것은?"
+    
+    user_problem_options_raw = input("❓ 사용자 보기 (쉼표로 구분, 기본값: 프로세스는 독립적인 메모리 공간을 가지며 스레드는 프로세스 내에서 메모리를 공유한다,프로세스와 스레드는 모두 독립적인 메모리 공간을 가진다,프로세스는 메모리를 공유하고 스레드는 독립적인 메모리 공간을 가진다,프로세스와 스레드는 모두 메모리를 공유한다): ").strip()
+    if not user_problem_options_raw:
+        user_problem_options_raw = "프로세스는 독립적인 메모리 공간을 가지며 스레드는 프로세스 내에서 메모리를 공유한다,프로세스와 스레드는 모두 독립적인 메모리 공간을 가진다,프로세스는 메모리를 공유하고 스레드는 독립적인 메모리 공간을 가진다,프로세스와 스레드는 모두 메모리를 공유한다"
+    
     user_problem_options = [opt.strip() for opt in user_problem_options_raw.split(",") if opt.strip()]
 
-    final_state = agent.invoke(
-        user_input_txt=user_input_txt,
-        user_problem=user_problem,
-        user_problem_options=user_problem_options,
-        vectorstore=vectorstore,
-    )
+    print(f"\n🚀 에이전트 실행 중...")
+    print(f"모드: {hitl_mode}")
+    print(f"문제: {user_problem}")
+    print(f"보기 수: {len(user_problem_options)}개")
+    
+    try:
+        final_state = agent.invoke(
+            user_input_txt=user_input_txt,
+            user_problem=user_problem,
+            user_problem_options=user_problem_options,
+            vectorstore=vectorstore,
+        )
 
-    print(f"\n🎯 최종 결과:")
-    print(f"문제: {final_state.get('user_problem', '')}")
-    print(f"정답: {final_state.get('generated_answer', '')}")
-    print(f"풀이: {final_state.get('generated_explanation', '')}")
-    print(f"과목: {final_state.get('generated_subject', '')}")
-    print(f"상호작용 횟수: {final_state.get('interaction_count', 0)}")
-    print(f"사용자 피드백: {final_state.get('user_feedback', '')}")
+        print(f"\n" + "=" * 50)
+        print(f"🎯 최종 결과:")
+        print(f"문제: {final_state.get('user_problem', '')}")
+        print(f"정답: {final_state.get('generated_answer', '')}")
+        print(f"풀이: {final_state.get('generated_explanation', '')}")
+        print(f"과목: {final_state.get('generated_subject', '')}")
+        print(f"상호작용 횟수: {final_state.get('interaction_count', 0)}")
+        print(f"사용자 피드백: {final_state.get('user_feedback', '')}")
+        print(f"피드백 유형: {final_state.get('feedback_type', '')}")
+        
+        # 품질 점수 출력
+        quality_scores = final_state.get('quality_scores', {})
+        if quality_scores:
+            print(f"\n📊 품질 점수:")
+            for key, score in quality_scores.items():
+                print(f"  {key}: {score:.1f}/100")
+            print(f"  총점: {final_state.get('total_quality_score', 0):.1f}/100")
+        
+        # 채팅 히스토리 출력
+        chat_history = final_state.get('chat_history', [])
+        if chat_history:
+            print(f"\n💬 상호작용 히스토리:")
+            for i, chat in enumerate(chat_history, 1):
+                print(f"  {i}. {chat[:100]}...")
+                
+    except Exception as e:
+        print(f"❌ 에이전트 실행 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # 배치 처리 예시 (주석 처리)
-    """
-    # 여러 문제를 배치로 처리하는 예시
-    print("\n🚀 배치 처리 예시:")
-    
-    batch_problems = [
-        {
-            "problem": "프로세스와 스레드의 차이점은?",
-            "options": ["프로세스는 독립적, 스레드는 공유", "프로세스는 공유, 스레드는 독립적", "둘 다 독립적", "둘 다 공유"],
-            "input_txt": "프로세스와 스레드 개념을 이해하고 싶습니다."
-        },
-        {
-            "problem": "데이터베이스 정규화의 목적은?",
-            "options": ["데이터 중복 제거", "데이터 크기 증가", "쿼리 속도 저하", "복잡성 증가"],
-            "input_txt": "정규화의 장단점을 알고 싶습니다."
-        }
-    ]
-    
-    batch_result = agent.invoke_batch(
-        problems=batch_problems,
-        vectorstore=vectorstore,
-        batch_feedback=True
-    )
-    
-    print(f"\n📊 배치 처리 결과:")
-    print(f"모드: {batch_result['mode']}")
-    print(f"총 문제: {batch_result['total_problems']}")
-    print(f"자동 처리: {batch_result.get('auto_processed', 0)}")
-    print(f"피드백 개선: {batch_result.get('improved_with_feedback', 0)}")
-    """
+    print(f"\n✅ 테스트 완료!")
+    print(f"\n💡 추가 테스트를 원하시면 'python test_hitl_feedback.py'를 실행하세요.")

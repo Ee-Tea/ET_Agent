@@ -7,7 +7,7 @@ from datasets import Dataset
 from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
 
-from teacher.agents.solution.solution_agent2 import SolutionAgent
+from teacher.agents.solution.solution_agent import SolutionAgent
 import glob
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings

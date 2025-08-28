@@ -6,14 +6,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 # --- 패키지 임포트 안전화 ---
-try:
-    from teacher.agents.solution.solution_agent2 import SolutionAgent
-except Exception:
-    THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-    ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_DIR)))  # .../llm-T
-    if ROOT not in sys.path:
-        sys.path.insert(0, ROOT)
-    from teacher.agents.solution.solution_agent import SolutionAgent
+from teacher.agents.solution.solution_agent import SolutionAgent
 
 # --- asyncio 루프 보장 (Streamlit 스레드) ---
 import asyncio

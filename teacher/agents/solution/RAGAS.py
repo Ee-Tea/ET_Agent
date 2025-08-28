@@ -40,6 +40,7 @@ llm = ChatOpenAI(
     base_url=OPENAI_BASE_URL,
     model=OPENAI_LLM_MODEL,
     temperature=LLM_TEMPERATURE,
+    max_tokens=min(LLM_MAX_TOKENS, 2048),
 )
 
 emb = HuggingFaceEmbeddings(
@@ -100,6 +101,20 @@ def connect_vectorstore(
     return vs
 
 # ---------- 유틸 ----------
+def _ctx_text(d) -> str:
+    md = getattr(d, "metadata", {}) or {}
+    # concept_summary는 content에, problems는 page_content에 있을 수 있음
+    txt = (md.get("content") or getattr(d, "page_content", "") or "")
+    return str(txt).strip()
+
+def build_contexts(retrieved_problems, retrieved_concepts, *, min_len: int = 20, max_k: int = 10) -> List[str]:
+    raw = [ _ctx_text(d) for d in (retrieved_problems or []) + (retrieved_concepts or []) ]
+    # 공백 제거 → 중복 제거 → 너무 짧은 조각 제거 → 상한 clip
+    cleaned = [s for s in (t.strip() for t in raw) if s]
+    deduped = list(dict.fromkeys(cleaned))
+    filtered = [s for s in deduped if len(s) >= min_len]
+    return filtered[:max_k]
+
 def build_question_with_options(question_text: str, options: List[str]) -> str:
     lines = ["[문제]", question_text, "", "[보기]"]
     for i, opt in enumerate(options, start=1):
@@ -189,7 +204,7 @@ def run_eval(
         gt_exp     = (it.get("explanation") or "").strip()
         gt_sub     = (it.get("subject") or "").strip()
 
-        user_input_txt = "이 문제의 해답과 풀이, 이 문제의 과목 이름을 알려주세요."
+        user_input_txt = "이 문제의 정답이 되는 보기 번화와 문제 풀이, 그리고 이 문제의 과목 이름을 알려주세요."
         question_only = q_text
         options_list  = options
 
@@ -216,8 +231,8 @@ def run_eval(
 
         # ✅ 변경: 유사문제 + 개념요약 컨텍스트 모두 사용
         retrieved_problems = final_state.get("retrieved_docs", []) or []
-        retrieved_concepts  = final_state.get("concept_contexts", []) or []
-        ctx_texts = [doc_to_ctx_text(d) for d in (retrieved_problems + retrieved_concepts)]
+        retrieved_concepts = final_state.get("concept_contexts", []) or []
+        ctx_texts = build_contexts(retrieved_problems, retrieved_concepts)
         print(f" - Retrieval Contexts: {len(ctx_texts)}개 (유사문제+개념요약)")
 
         q_full = f"{user_input_txt}\n\n" + build_question_with_options(q_text, options)
@@ -287,17 +302,28 @@ def run_eval(
     # ---------- RAGAS 평가 ----------
     try:
         print(f"[RAGAS] using llm={type(llm).__name__}, embeddings={type(emb).__name__}")
-        ds = Dataset.from_pandas(df)
+        df_eval = df[
+            df["contexts"].apply(lambda x: isinstance(x, list) and len(x) > 0) &
+            df["ground_truths"].apply(lambda x: isinstance(x, list) and any(bool(t.strip()) for t in x))
+        ].copy()
+
+        if df_eval.empty:
+            print("[경고] 평가 가능한 행이 없습니다. (contexts 혹은 ground_truths 비어있음)")
+            # 저장만 하고 종료
+            df.to_parquet(df_path, index=False)
+            golden_df.to_csv(golden_csv, index=False, encoding="utf-8-sig")
+            return
+        ds = Dataset.from_pandas(df_eval)
         ragas_result = evaluate(
             ds,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
             llm=llm,
             embeddings=emb,
         )
+        ragas_scores = pd.DataFrame(ragas_result.scores)
         print("[RAGAS 평가 완료]")
         print("RAGAS mean:", ragas_result)
 
-        ragas_scores = pd.DataFrame(ragas_result.scores)
     except Exception as e:
         print("[오류] RAGAS 평가 실패:", repr(e))
         # 빈 DataFrame으로라도 파일 생성
@@ -314,7 +340,7 @@ def run_eval(
             if not isinstance(m, dict):
                 continue
             gt = m.get("gt_answer_idx")
-            pr = m.get("pred_answer_idx")
+            pr = m.get("pred_idx")   # ← 여기!
             if gt is None or pr is None:
                 continue
             tot += 1

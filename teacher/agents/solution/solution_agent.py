@@ -199,6 +199,7 @@ class SolutionAgent(BaseAgent):
             base_url=OPENAI_BASE_URL,
             model=OPENAI_LLM_MODEL,
             temperature=temperature,
+            max_tokens=min(LLM_MAX_TOKENS, 2048),
         )
     
     def _build_concept_query(self, problem: str, options: List[str]) -> str:

@@ -399,29 +399,116 @@ class SolutionAgent(BaseAgent):
     
     def _search_concepts_summary(self, state: SolutionState) -> SolutionState:
         print("\n📚 [1-확장] 개념 요약 컨텍스트 검색 시작")
-        
-        vectorstore_c = state.get("vectorstore_c")
 
+        vectorstore_c = state.get("vectorstore_c")
         if vectorstore_c is None:
             print("⚠️ vectorstore_c 없음 → 개념 검색 건너뜀")
             state["concept_contexts"], state["concept_contexts_text"] = [], ""
             return state
 
-        q = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
+        q = self._build_concept_query(
+            state.get("user_problem", ""),
+            state.get("user_problem_options", []),
+        )
 
-        # k=3만 사용
+        # ---------- (1) Dense 후보 넉넉히 수집 ----------
         try:
-            docs = vectorstore_c.similarity_search(q, k=3)
+            dense_scored = vectorstore_c.similarity_search_with_score(q, k=self.RETRIEVAL_FETCH_K)
+            dense_docs   = [d for d, _ in dense_scored]
+            dense_scores = {id(d): float(s) for d, s in dense_scored}
+            print(f"[Dense(concepts)] fetched: {len(dense_docs)}")
         except Exception as e:
-            print(f"[concept_summary] similarity_search 실패: {e}")
-            docs = []
+            print(f"[Dense(concepts)] similarity_search_with_score 실패 → {e} → score 없이 fallback")
+            dense_docs   = vectorstore_c.similarity_search(q, k=self.RETRIEVAL_FETCH_K)
+            dense_scores = {id(d): 1.0/(r+1) for r, d in enumerate(dense_docs)}
 
-        # subject, content만 사용해서 프롬프트용 텍스트 생성
-        chunks = []
-        cleaned_docs = []
-        for idx, d in enumerate(docs, start=1):
+        # ---------- (2) Sparse 후보 결합 (BM25-lite over dense pool) ----------
+        # 개념 코퍼스용 별도 BM25 인덱스가 없다면, dense 후보군 위에서만 BM25 점수 근사
+        sparse_scores = {}
+        try:
+            if dense_docs and HAS_RANK_BM25:
+                def tok(s: str) -> List[str]:
+                    return re.findall(r"[가-힣A-Za-z0-9_]+", (s or "").lower())
+                corpus_toks = [tok(d.page_content) for d in dense_docs]
+                bm25 = BM25Okapi(corpus_toks)
+                q_scores = bm25.get_scores(tok(q))
+                # 0~1 정규화
+                if q_scores is not None and len(q_scores) == len(dense_docs):
+                    min_s, max_s = float(min(q_scores)), float(max(q_scores))
+                    rng = (max_s - min_s) or 1.0
+                    for d, s in zip(dense_docs, q_scores):
+                        sparse_scores[id(d)] = (float(s) - min_s) / rng
+                print(f"[BM25-lite(concepts)] computed over dense pool: {len(dense_docs)}")
+            else:
+                print("[BM25-lite(concepts)] 건너뜀 (dense_docs 비었거나 rank_bm25 미설치)")
+        except Exception as e:
+            print(f"[BM25-lite(concepts)] 실패 → {e}")
+
+        # ---------- (3) Dense + Sparse 앙상블 ----------
+        def _safe_meta_str(md: Dict[str, Any]) -> str:
+            try:
+                norm = {
+                    str(k): (
+                        v.item() if hasattr(v, "item") else (
+                            str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                        )
+                    )
+                    for k, v in (md or {}).items()
+                }
+                return json.dumps(norm, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                try:
+                    return str({k: str(v) for k, v in (md or {}).items()})
+                except Exception:
+                    return ""
+
+        def key_of(doc: Document) -> Tuple[str, str]:
+            return ((doc.page_content or "")[:150], _safe_meta_str(doc.metadata)[:150])
+
+        pool: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for r, d in enumerate(dense_docs):
+            k = key_of(d)
+            pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
+            wd = max(1.0/(r+1), dense_scores.get(id(d), 0.0))
+            pool[k]["dense"] = max(pool[k]["dense"], wd)
+
+        # BM25-lite 점수만 존재 (별도 sparse_docs 없음)
+        for r, d in enumerate(dense_docs):
+            k = key_of(d)
+            if k not in pool:
+                pool[k] = {"doc": d, "dense": 0.0, "sparse": 0.0}
+            ws = max(1.0/(r+1), sparse_scores.get(id(d), 0.0))
+            pool[k]["sparse"] = max(pool[k]["sparse"], ws)
+
+        alpha = self.HYBRID_ALPHA
+        scored = []
+        for k, v in pool.items():
+            score = alpha * v["dense"] + (1.0 - alpha) * v["sparse"]
+            scored.append((v["doc"], score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        hybrid_top = [d for d, _ in scored[:self.HYBRID_TOPK]]
+        print(f"[Hybrid(concepts)] pool={len(pool)} → top{self.HYBRID_TOPK} 선정")
+
+        # ---------- (4) Cross-Encoder rerank ----------
+        try:
+            if self.reranker is not None and len(hybrid_top) > 0:
+                pairs  = [[q, d.page_content] for d in hybrid_top]
+                scores = self.reranker.predict(pairs)
+                order  = sorted(range(len(hybrid_top)), key=lambda i: float(scores[i]), reverse=True)
+                reranked = [hybrid_top[i] for i in order[:self.RERANK_TOPK]]
+                print(f"[Rerank(concepts)] 최종 top{self.RERANK_TOPK} (CrossEncoder)")
+            else:
+                reranked = hybrid_top[:self.RERANK_TOPK]
+                print("[Rerank(concepts)] 사용 안 함 → hybrid_top 그대로 사용")
+        except Exception as e:
+            print(f"[Rerank(concepts)] 실패 → hybrid_top 그대로 사용: {e}")
+            reranked = hybrid_top[:self.RERANK_TOPK]
+
+        # ---------- (5) LLM 프롬프트용 정리 ----------
+        chunks, cleaned_docs = [], []
+        for idx, d in enumerate(reranked, start=1):
             md = d.metadata or {}
-            # langchain-milvus의 Document는 일반적으로 page_content에 본문이 들어감
             content = (md.get("content") or d.page_content or "").strip()
             subject = (md.get("subject") or "").strip()
             if not content and d.page_content:
@@ -430,15 +517,14 @@ class SolutionAgent(BaseAgent):
             cleaned = Document(page_content=content, metadata={"subject": subject})
             cleaned_docs.append(cleaned)
 
-            chunks.append(
-                f"과목: {subject}\n내용: {content}"
-            )
+            chunks.append(f"과목: {subject}\n내용: {content}")
             print(f" - [{idx}] subject='{subject}' content={content[:30]}...")
 
         state["concept_contexts"] = cleaned_docs
         state["concept_contexts_text"] = "\n\n".join(chunks)
         print(f"📚 개념 컨텍스트 {len(cleaned_docs)}개 수집")
         return state
+
     
     def _retrieve_parallel(self, state: SolutionState) -> SolutionState:
         # state를 복사해서 각 작업이 독립적으로 수정하도록 함
@@ -470,9 +556,9 @@ class SolutionAgent(BaseAgent):
 
         llm_gen = self._llm(0.5)  
 
-        similar_problems = state.get("problems_contexts_text", "")
-        print("유사 문제들 길이:", len(similar_problems))
-        print("유사 문제들: ", similar_problems[:500])
+        problems_ctx = state.get("problems_contexts_text", "")
+        print("유사 문제들 길이:", len(problems_ctx))
+        print("유사 문제들: ", problems_ctx[:500])
         concept_ctx = state.get("concept_contexts_text", "")
         print("개념 컨텍스트 길이:", len(concept_ctx))
         print("개념 컨텍스트: ", concept_ctx[:500])
@@ -486,7 +572,7 @@ class SolutionAgent(BaseAgent):
             {state['user_problem_options']}
 
             아래는 이 문제와 유사한 문제들:
-            {similar_problems}
+            {problems_ctx}
 
             아래는 이 문제와 관련된 개념 요약:
             {concept_ctx}

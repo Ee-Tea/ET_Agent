@@ -16,7 +16,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # === RAGAS 평가에 사용할 LLM/임베딩 명시 (필수) ===
 llm = ChatOpenAI(
     model="gpt-4o-mini",
-    # model="gpt-4.1-mini",
     temperature=0,
     api_key=os.environ["OPENAI_API_KEY"],
 )

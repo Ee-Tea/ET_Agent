@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 
+# 리더보드 생성 후 score 재실행
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

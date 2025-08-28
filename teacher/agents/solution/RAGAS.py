@@ -234,12 +234,11 @@ def run_eval(
             answer=f"정답: {gen_ans}) {gen_text}\n풀이: {gen_exp}\n과목: {gen_sub}".strip(),
             ground_truth=gt_blob,
             metadata={
-                "gt_sub": gt_sub,
                 "options": options,
                 "gt_answer_idx": gt_idx,
-                "gt_answer_text": gt_text,
-                "pred_answer_idx": pred_idx,
-                "generated_subject": gen_sub,
+                "gt_sub": gt_sub,
+                "pred_idx": pred_idx,
+                "gen_sub": gen_sub,
                 "validated": final_state.get("validated", False),
             }
         ))
@@ -254,7 +253,9 @@ def run_eval(
             "gt_sub": gt_sub,
             "gen_subject": gen_sub,
             "gen_explanation": gen_exp,
-            "context": ctx_texts
+            "retrieved_problems": [doc.page_content[:500] for doc in retrieved_problems],
+            "retrieved_concepts": [doc.page_content[:500] for doc in retrieved_concepts],
+            "contexts": ctx_texts
         })
 
         print(f"[{i}/{len(items)}] 완료 — GT:{gt_idx} / Pred:{pred_idx}")

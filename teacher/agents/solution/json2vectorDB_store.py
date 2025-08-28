@@ -45,7 +45,7 @@ def main():
         print("🔌 기존 Milvus 연결 해제")
         connections.disconnect("default")
     print("🔗 Milvus 연결 시도")
-    connections.connect(alias="default", host="127.0.0.1", port="19530")
+    connections.connect(alias="default", host="localhost", port="19530")
 
     embedding = HuggingFaceEmbeddings(
         model_name="jhgan/ko-sroberta-multitask",
@@ -77,7 +77,7 @@ def main():
             vs = Milvus(
                 embedding_function=embedding,
                 collection_name=collection_name,
-                connection_args={"host": "127.0.0.1", "port": "19530"},
+                connection_args={"host": "localhost", "port": "19530"},
             )
             print(f"➕ 기존 콜렉션에 문서 추가 중... ({json_file.name})")
             vs.add_documents(docs)
@@ -88,7 +88,7 @@ def main():
                 documents=docs,
                 embedding=embedding,
                 collection_name=collection_name,
-                connection_args={"host": "127.0.0.1", "port": "19530"},
+                connection_args={"host": "localhost", "port": "19530"},
             )
 
         print(f"✅ {json_file.name} 벡터스토어 저장 완료")

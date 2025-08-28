@@ -38,12 +38,33 @@ try:
 except ImportError:
     from milvus_store import load_questions_from_json
 
+# 🔍 RAGAS 관련 임포트 추가
+try:
+    from ragas import evaluate
+    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+    from datasets import Dataset
+    from ragas.llms import llm_factory
+    RAGAS_AVAILABLE = True
+except ImportError:
+    RAGAS_AVAILABLE = False
+    print("⚠️ RAGAS가 설치되지 않았습니다. 품질 검증 기능이 비활성화됩니다.")
+
 # LLM 모델 설정을 환경변수에서 가져오기
 OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
+
+# 🔍 RAGAS 품질 검증 설정
+# 환경 변수 설정 예시:
+# RAGAS_ENABLED=true                    # RAGAS 활성화 (true/false)
+# RAGAS_QUALITY_THRESHOLD=0.7          # 품질 임계값 (0.0 ~ 1.0)
+# RAGAS_MAX_ATTEMPTS=3                 # 최대 재시도 횟수
+# OPENAI_API_KEY=your_api_key_here    # OpenAI API 키 (RAGAS 검증용)
+RAGAS_QUALITY_THRESHOLD = float(os.getenv("RAGAS_QUALITY_THRESHOLD", "0.7"))
+RAGAS_MAX_ATTEMPTS = int(os.getenv("RAGAS_MAX_ATTEMPTS", "3"))
+RAGAS_ENABLED = os.getenv("RAGAS_ENABLED", "true").lower() == "true"
 
 # .env 파일 로드
 load_dotenv()
@@ -61,6 +82,7 @@ class GraphState(TypedDict):
     target_quiz_count: int
     subject_area: str
     validated_questions: List[Dict[str, Any]]  # 문제에 답 해설까지 한 번에 나옴, 보기는 1. 2. 3. 4. 으로 번호가 붙음, 문제에는 번호 안 붙음
+    ragas_score: float  # 🔍 RAGAS 품질 점수 추가
 
 
 class InfoProcessingExamAgent(BaseAgent):
@@ -366,6 +388,81 @@ class InfoProcessingExamAgent(BaseAgent):
         print(f"[DEBUG] _prepare_context: subject_area='{subject_area}'")
         return {**state, "context": context, "subject_area": subject_area}
 
+    def _validate_with_ragas(self, questions: List[Dict[str, Any]], context: str) -> float:
+        """RAGAS를 사용한 문제 품질 검증"""
+        if not RAGAS_AVAILABLE or not RAGAS_ENABLED:
+            print("[DEBUG] RAGAS 비활성화됨 - 품질 검증 건너뜀")
+            return 1.0  # RAGAS가 없으면 기본적으로 통과
+        
+        try:
+            print(f"[DEBUG] RAGAS 품질 검증 시작: {len(questions)}개 문제")
+            
+            # RAGAS 평가 데이터 구성
+            eval_data = {
+                "question": [],
+                "contexts": [],
+                "answer": [],
+                "ground_truth": []
+            }
+            
+            for q in questions:
+                question_text = q.get("question", "")[:200]
+                answer_text = q.get("answer", "") + ": " + q.get("explanation", "")[:100]
+                
+                eval_data["question"].append(question_text)
+                eval_data["contexts"].append([context[:500]])
+                eval_data["answer"].append(answer_text)
+                eval_data["ground_truth"].append(answer_text)
+            
+            # RAGAS LLM 설정
+            try:
+                openai_api_key = os.getenv("OPENAI_API_KEY")
+                if not openai_api_key:
+                    print("[DEBUG] OPENAI_API_KEY가 설정되지 않음 - RAGAS 검증 건너뜀")
+                    return 1.0
+                
+                os.environ["OPENAI_API_KEY"] = openai_api_key
+                os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+                
+                llm = llm_factory(
+                    model="gpt-3.5-turbo",
+                    base_url="https://api.openai.com/v1"
+                )
+                print("[DEBUG] RAGAS LLM 설정 완료 (OpenAI GPT-3.5-turbo)")
+                    
+            except Exception as llm_error:
+                print(f"[DEBUG] RAGAS LLM 설정 실패: {llm_error}")
+                return 1.0
+            
+            # RAGAS 평가 실행
+            dataset = Dataset.from_dict(eval_data)
+            results = evaluate(
+                dataset,
+                metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+                llm=llm
+            )
+            
+            # 평균 점수 계산
+            scores = []
+            if hasattr(results, '_scores_dict'):
+                for metric_scores in results._scores_dict.values():
+                    if isinstance(metric_scores, list):
+                        valid_scores = [s for s in metric_scores if s is not None and not (isinstance(s, float) and str(s) == 'nan')]
+                        if valid_scores:
+                            scores.extend(valid_scores)
+            
+            if scores:
+                avg_score = sum(scores) / len(scores)
+                print(f"[DEBUG] RAGAS 품질 점수: {avg_score:.4f}")
+                return avg_score
+            else:
+                print("[DEBUG] RAGAS 점수 계산 실패 - 기본값 반환")
+                return 1.0
+                
+        except Exception as e:
+            print(f"[DEBUG] RAGAS 검증 중 오류: {e}")
+            return 1.0  # 오류 시 기본적으로 통과
+
     def _generate_quiz_incremental(self, state: GraphState) -> GraphState:
         try:
             context = state.get("context", "")
@@ -439,14 +536,53 @@ class InfoProcessingExamAgent(BaseAgent):
                     "error": "유효한 문제를 생성하지 못했습니다."
                 }
 
-            new_attempts = state.get("generation_attempts", 0) + 1
-            print(f"[DEBUG] _generate_quiz_incremental: generated {len(new_questions)} questions, attempts={new_attempts}")
-            return {
-                **state,
-                "quiz_questions": new_questions,
-                "validated_questions": validated_questions,
-                "generation_attempts": new_attempts
-            }
+            # 🔍 RAGAS 품질 검증 추가
+            if RAGAS_ENABLED and new_questions:
+                print(f"[DEBUG] _generate_quiz_incremental: RAGAS 품질 검증 시작")
+                quality_score = self._validate_with_ragas(new_questions, context)
+                
+                # 품질 임계값 체크
+                if quality_score >= RAGAS_QUALITY_THRESHOLD:
+                    print(f"[DEBUG] _generate_quiz_incremental: RAGAS 품질 기준 통과 ({quality_score:.4f} >= {RAGAS_QUALITY_THRESHOLD})")
+                    new_attempts = state.get("generation_attempts", 0) + 1
+                    return {
+                        **state,
+                        "quiz_questions": new_questions,
+                        "validated_questions": validated_questions,
+                        "generation_attempts": new_attempts,
+                        "ragas_score": quality_score
+                    }
+                else:
+                    print(f"[DEBUG] _generate_quiz_incremental: RAGAS 품질 기준 미달 ({quality_score:.4f} < {RAGAS_QUALITY_THRESHOLD})")
+                    # 품질이 낮으면 재생성 시도
+                    current_attempts = state.get("generation_attempts", 0) + 1
+                    if current_attempts < RAGAS_MAX_ATTEMPTS:
+                        print(f"[DEBUG] _generate_quiz_incremental: 재생성 시도 ({current_attempts}/{RAGAS_MAX_ATTEMPTS})")
+                        return {
+                            **state,
+                            "generation_attempts": current_attempts,
+                            "error": f"품질 기준 미달 ({quality_score:.4f}), 재생성 시도 중..."
+                        }
+                    else:
+                        print(f"[DEBUG] _generate_quiz_incremental: 최대 재시도 횟수 초과")
+                        return {
+                            **state,
+                            "quiz_questions": new_questions,
+                            "validated_questions": validated_questions,
+                            "generation_attempts": current_attempts,
+                            "error": f"최대 재시도 후에도 품질 기준 미달 (최종 점수: {quality_score:.4f})",
+                            "ragas_score": quality_score
+                        }
+            else:
+                # RAGAS 비활성화된 경우 기존 로직
+                new_attempts = state.get("generation_attempts", 0) + 1
+                print(f"[DEBUG] _generate_quiz_incremental: generated {len(new_questions)} questions, attempts={new_attempts}")
+                return {
+                    **state,
+                    "quiz_questions": new_questions,
+                    "validated_questions": validated_questions,
+                    "generation_attempts": new_attempts
+                }
         except Exception as e:
             new_attempts = state.get("generation_attempts", 0) + 1
             print(f"[DEBUG] _generate_quiz_incremental: exception {e}, attempts={new_attempts}")

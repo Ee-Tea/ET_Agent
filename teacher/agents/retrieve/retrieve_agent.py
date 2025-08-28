@@ -162,13 +162,13 @@ class retrieve_agent(BaseAgent):
         result = self.graph.invoke(initial_state)
         return result
 
-initial_state = {
-    "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"
-}
-print(initial_state["retrieval_question"])
-graph = build_retrieval_graph(
-            extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn
-        )
-result = graph.invoke(initial_state)
-print("답변 시작")
-print(result["answer"])  # 그래프 실행 후 답변 출력
+# initial_state = {
+#     "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"
+# }
+# print(initial_state["retrieval_question"])
+# graph = build_retrieval_graph(
+#             extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn
+#         )
+# result = graph.invoke(initial_state)
+# print("답변 시작")
+# print(result["answer"])  # 그래프 실행 후 답변 출력

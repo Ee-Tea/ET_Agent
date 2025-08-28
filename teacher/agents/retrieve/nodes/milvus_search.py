@@ -2,7 +2,7 @@ from langchain.tools import Tool
 from typing import List, Dict, Any
 import os
 from pymilvus import connections, Collection
-import openai
+from sentence_transformers import SentenceTransformer
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,14 +14,17 @@ class MilvusSearchTool:
         self.host = os.getenv("MILVUS_HOST", "localhost")
         self.port = os.getenv("MILVUS_PORT", "19530")
         self.collection_name = "concept_summary"
-        self.dimension = 1536
+        self.dimension = 768  # ko-sroberta-multitask 임베딩 차원
         self.collection = None
-        self.openai_client = None
+        self.embeddings_model = None
         
-        # OpenAI API 키 설정
-        if os.getenv("OPENAI_API_KEY"):
-            openai.api_key = os.getenv("OPENAI_API_KEY")
-            self.openai_client = openai.OpenAI(api_key=openai.api_key)
+        # HuggingFace 임베딩 모델 초기화
+        try:
+            self.embeddings_model = SentenceTransformer('jhgan/ko-sroberta-multitask')
+            logger.info("HuggingFace 임베딩 모델이 초기화되었습니다.")
+        except Exception as e:
+            logger.error(f"HuggingFace 임베딩 모델 초기화 실패: {e}")
+            self.embeddings_model = None
         
         # MilvusDB 연결
         self._connect_milvus()
@@ -38,30 +41,29 @@ class MilvusSearchTool:
             self.collection = None
     
     def generate_embedding(self, text: str) -> List[float]:
-        """텍스트를 OpenAI 임베딩 벡터로 변환"""
+        """텍스트를 HuggingFace 임베딩 벡터로 변환"""
         try:
-            if not self.openai_client:
-                raise ValueError("OpenAI 클라이언트가 초기화되지 않았습니다.")
+            if not self.embeddings_model:
+                logger.error("HuggingFace 임베딩 모델이 초기화되지 않았습니다.")
+                return []
             
             # 텍스트 전처리 (너무 긴 텍스트는 잘라내기)
             if len(text) > 8000:
                 text = text[:8000]
             
-            # OpenAI 임베딩 생성
-            response = self.openai_client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=text
-            )
+            # HuggingFace 임베딩 생성
+            embedding = self.embeddings_model.encode(text)
             
-            if response.data and len(response.data) > 0:
-                return response.data[0].embedding
+            if embedding is not None and len(embedding) > 0:
+                # numpy 배열을 리스트로 변환
+                return embedding.tolist()
             else:
-                logger.error("OpenAI 임베딩 응답이 비어있습니다.")
-                return [0.0] * self.dimension
+                logger.error("HuggingFace 임베딩 응답이 비어있습니다.")
+                return []
                 
         except Exception as e:
-            logger.error(f"OpenAI 임베딩 생성 실패: {e}")
-            return [0.0] * self.dimension
+            logger.error(f"HuggingFace 임베딩 생성 실패: {e}")
+            return []
     
     def search_similar(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """유사한 내용 검색"""
@@ -72,6 +74,11 @@ class MilvusSearchTool:
             
             # 쿼리 임베딩 생성
             query_embedding = self.generate_embedding(query)
+            
+            # 임베딩이 생성되지 않은 경우 빈 결과 반환
+            if not query_embedding:
+                logger.info("HuggingFace 임베딩 모델이 초기화되지 않았습니다. 검색을 스킵합니다.")
+                return []
             
             # 검색 파라미터
             search_params = {
@@ -113,7 +120,11 @@ class MilvusSearchTool:
             results = self.search_similar(query, top_k=5)
             
             if not results:
-                return "MilvusDB에서 관련 정보를 찾을 수 없습니다."
+                # HuggingFace 임베딩 모델이 초기화되지 않은 경우
+                if not self.embeddings_model:
+                    return "HuggingFace 임베딩 모델이 초기화되지 않았습니다. 검색을 스킵합니다."
+                else:
+                    return "MilvusDB에서 관련 정보를 찾을 수 없습니다."
             
             # 검색 결과를 구조화된 텍스트로 변환
             context_parts = []

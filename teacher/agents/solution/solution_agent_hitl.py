@@ -48,7 +48,7 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
-    
+
 # ✅ 상태 정의
 class SolutionState(TypedDict):
     # 사용자 입력
@@ -93,7 +93,7 @@ class SolutionState(TypedDict):
     test_mode: bool             # 테스트 모드 활성화 여부
     test_score: int             # 테스트용 강제 점수
     test_feedback_type: str     # 테스트용 강제 피드백 타입
-
+    
 class SolutionAgent(BaseAgent):
     """문제 해답/풀이 생성 에이전트"""
 
@@ -214,7 +214,7 @@ class SolutionAgent(BaseAgent):
                 vector_field=vec_c,
             )
             print(f"✅ Milvus '{coll_c}' 연결 OK (text_field={txt_c}, vector_field={vec_c})")
-
+        
         
     @property
     def name(self) -> str:
@@ -231,7 +231,7 @@ class SolutionAgent(BaseAgent):
             model=OPENAI_LLM_MODEL,
             temperature=temperature,
         )
-    
+        
     def _evaluate_solution(self, state: SolutionState) -> SolutionState:
         """LLM을 활용하여 풀이의 정확성과 설명의 충분함을 평가합니다."""
         print("\n📊 [평가] 풀이 품질 평가 시작")
@@ -390,7 +390,7 @@ class SolutionAgent(BaseAgent):
         graph.add_node("generate_solution", self._generate_solution)
         graph.add_node("validate", self._validate_solution)
         graph.add_node("store", self._store_to_vector_db)
-        
+
         # 새로운 노드들
         graph.add_node("evaluate_solution", self._evaluate_solution)
         graph.add_node("collect_feedback", self._collect_user_feedback)
@@ -407,7 +407,7 @@ class SolutionAgent(BaseAgent):
         # 기본 흐름
         graph.add_edge("retrieve_parallel", "generate_solution")
         graph.add_edge("generate_solution", "validate")
-        
+
         # 검증 후 분기
         graph.add_conditional_edges(
             "validate", 
@@ -458,7 +458,7 @@ class SolutionAgent(BaseAgent):
     def _search_similar_problems(self, state: SolutionState) -> SolutionState:
         print("\n🔍 [1단계] 유사 문제 검색 시작")
         print(state["user_problem"], state["user_problem_options"])
-            
+        
         # 벡터스토어는 상태에서 얻지 않고, 인스턴스 멤버를 사용
         vectorstore_p = getattr(self, "vectorstore_p", None)
 
@@ -467,7 +467,7 @@ class SolutionAgent(BaseAgent):
             state["retrieved_docs"] = []
             state["problems_contexts_text"] = ""
             return state
-
+        
         # q = state["user_problem"]
         q = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
 
@@ -607,7 +607,7 @@ class SolutionAgent(BaseAgent):
                 과목: {subject}
                 """
             similar_questions.append(formatted)
-
+        
         state["retrieved_docs"] = results
         state["problems_contexts_text"] = "\n\n".join(similar_questions)
 
@@ -989,10 +989,10 @@ class SolutionAgent(BaseAgent):
             if state["retry_count"] >= 5:
                 print("⚠️ 검증 5회 실패 → 그래도 결과를 저장 단계로 진행합니다.")
             else:
-                print(f"⚠️ 검증 실패 (재시도 {state['retry_count']}/5)")
+            print(f"⚠️ 검증 실패 (재시도 {state['retry_count']}/5)")
         else:
             print("✅ 검증 결과: 통과")
-
+            
         return state
 
 
@@ -1178,7 +1178,7 @@ class SolutionAgent(BaseAgent):
             recursion_limit: int = 1000,
             memory_key: Optional[str] = None,  # 숏텀 메모리 키 추가
             user_feedback: Optional[str] = None,  # 상위 그래프에서 전달된 사용자 피드백(재개 시)
-        ) -> Dict:  
+        ) -> Dict:
 
         # 1) 외부에서 하나라도 안 넘겼으면 내부 디폴트 준비 (미리 연결 시도)
         if vectorstore_p is None or vectorstore_c is None:

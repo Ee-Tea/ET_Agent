@@ -33,6 +33,7 @@ from agents.score.score_engine import ScoreEngine as score_agent
 from agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
+# from agents.TestGenerator.generator_backup import InfoProcessingExamAgent as generate_agent
 # from agents.solution.solution_agent import SolutionAgent as solution_agent
 from agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
 from teacher_nodes import (
@@ -79,6 +80,7 @@ class TeacherState(TypedDict):
     user_query: str
     intent: str
     shared: NotRequired[SharedState]
+    work: NotRequired[dict]
     retrieval: NotRequired[dict]
     generation: NotRequired[dict]
     solution: NotRequired[dict]
@@ -148,8 +150,106 @@ class Orchestrator:
 
     def persist_state(self, state: TeacherState) -> TeacherState:
         """그래프 리프 종료 후 단 1곳에서 메모리에 반영."""
+        # 저장 직전 shared를 정리(중복 제거 및 정렬)한 뒤 저장
+        try:
+            cleaned = self._dedupe_aligned_shared(state.get("shared", {}) or {})
+            state = {**state, "shared": cleaned}
+        except Exception as _:
+            pass
         self.memory.save(state, state)
         return state
+
+    # ── Helpers: selection & dedupe ─────────────────────────────────────────
+    def _normalize_text(self, text: Any) -> str:
+        try:
+            return " ".join(str(text or "").split()).strip().lower()
+        except Exception:
+            return str(text or "").strip().lower()
+
+    def _dedupe_aligned_shared(self, shared: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        question/options/answer/explanation/subject/user_answer 리스트를
+        question+options 조합 기준으로 중복 제거하여 정렬을 보존합니다.
+        """
+        if not isinstance(shared, dict):
+            return shared
+        questions = list(shared.get("question", []) or [])
+        options_l = list(shared.get("options", []) or [])
+        answers = list(shared.get("answer", []) or [])
+        expls = list(shared.get("explanation", []) or [])
+        subjects = list(shared.get("subject", []) or [])
+        user_ans = list(shared.get("user_answer", []) or [])
+
+        keep_q, keep_o, keep_a, keep_e, keep_s, keep_u = [], [], [], [], [], []
+        seen = set()
+        total = len(questions)
+        for i in range(total):
+            q = questions[i]
+            opts_raw = options_l[i] if i < len(options_l) else []
+            opts_list = []
+            if isinstance(opts_raw, list):
+                opts_list = [self._normalize_text(x) for x in opts_raw if str(x).strip()]
+            elif isinstance(opts_raw, str):
+                opts_list = [self._normalize_text(x) for x in opts_raw.splitlines() if x.strip()]
+            key = (self._normalize_text(q), tuple(opts_list))
+            if key in seen:
+                continue
+            seen.add(key)
+            keep_q.append(q)
+            keep_o.append(options_l[i] if i < len(options_l) else [])
+            keep_a.append(answers[i] if i < len(answers) else "")
+            keep_e.append(expls[i] if i < len(expls) else "")
+            keep_s.append(subjects[i] if i < len(subjects) else "")
+            keep_u.append(user_ans[i] if i < len(user_ans) else "")
+
+        cleaned = dict(shared)
+        cleaned["question"] = keep_q
+        cleaned["options"] = keep_o
+        cleaned["answer"] = keep_a
+        cleaned["explanation"] = keep_e
+        cleaned["subject"] = keep_s
+        if user_ans:
+            cleaned["user_answer"] = keep_u
+        return cleaned
+
+    def _ensure_work_selection(self, state: TeacherState) -> TeacherState:
+        """사용자 입력으로부터 선택 인덱스/개수를 추출하여 work에 반영."""
+        import re
+        work = dict((state.get("work") or {}))
+        if work.get("_sealed"):
+            return {**state, "work": work}
+
+        uq = state.get("user_query", "") or ""
+        selected_indices: List[int] = []
+        select_count: int = 0
+
+        # 패턴 1: "1-3번", "2~5문제" 등 범위
+        for m in re.finditer(r"(\d+)\s*[-~]\s*(\d+)", uq):
+            a, b = int(m.group(1)), int(m.group(2))
+            if a <= b:
+                selected_indices.extend(list(range(a - 1, b)))
+
+        # 패턴 2: "3번", "12번" 등 단일 번호들
+        for m in re.finditer(r"(\d+)\s*번", uq):
+            idx = int(m.group(1)) - 1
+            if idx >= 0:
+                selected_indices.append(idx)
+
+        # 패턴 3: "3개", "5 문제" 등 개수 지정
+        m = re.search(r"(\d+)\s*(개|문제)", uq)
+        if m:
+            try:
+                select_count = int(m.group(1))
+            except Exception:
+                select_count = 0
+
+        # 중복 정리 및 정렬
+        selected_indices = sorted(set([i for i in selected_indices if i >= 0]))
+        work["selected_indices"] = selected_indices
+        if select_count > 0:
+            work["select_count"] = select_count
+        work["_sealed"] = True  # 동일 턴 다중 호출 방지
+        return {**state, "work": work}
 
     def _create_graph(self) -> StateGraph:
         """LangGraph 기반의 워크플로우 그래프를 생성합니다."""
@@ -262,14 +362,7 @@ class Orchestrator:
                 "generate_answer_pdf": "generate_answer_pdf",
             },
         )
-        builder.add_conditional_edges(
-            "score",
-            post_score_route,
-            {
-                "analysis": "analysis",
-                "generate_answer_pdf": "generate_answer_pdf",  # 채점 후 답안집 PDF 생성
-            },
-        )
+        builder.add_edge("score","analysis")
 
         # retrieve → persist, analysis → generate_analysis_pdf → persist → END
         builder.add_edge("retrieve", "persist_state")
@@ -624,6 +717,7 @@ class Orchestrator:
         """
         print("🔧 문제 풀이 노드 실행")
         new_state: TeacherState = ensure_shared({**state})
+        new_state = self._ensure_work_selection(new_state)
         new_state.setdefault("solution", {})
 
         artifacts = new_state.get("artifacts", {}) or {}
@@ -636,11 +730,13 @@ class Orchestrator:
         extracted_start_index = artifacts.get("extracted_problem_start_index", None)
         extracted_end_index = artifacts.get("extracted_problem_end_index", None)
 
-        # PDF 문제나 추출된 문제가 있는지 확인
+        # PDF/추출 문제 또는 work 기반 선택 여부 확인
         total_problems = pdf_added_count + extracted_problem_count
-        
-        if total_problems <= 0:
-            print("⚠️ 처리할 문제가 없습니다.")
+        work_sel = (new_state.get("work") or {})
+        sel_indices: List[int] = list(work_sel.get("selected_indices", []) or [])
+        sel_count: int = int(work_sel.get("select_count", 0) or 0)
+        if total_problems <= 0 and not sel_indices and sel_count <= 0:
+            print("⚠️ 처리할 문제가 없습니다.(선택 없음)")
             return new_state
 
         # PDF 문제 처리
@@ -788,6 +884,72 @@ class Orchestrator:
             shared.setdefault("explanation", [])
             shared["answer"].extend(generated_answers)
             shared["explanation"].extend(generated_explanations)
+
+        # work.selected_indices 기반 처리 (pdf/추출 범위가 없을 때)
+        if total_problems <= 0 and (sel_indices or sel_count > 0):
+            all_questions = shared.get("question", [])
+            all_options = shared.get("options", [])
+
+            # 인덱스 보정 및 개수 적용
+            if not sel_indices and sel_count > 0:
+                sel_indices = list(range(0, min(sel_count, len(all_questions))))
+            sel_indices = [i for i in sel_indices if 0 <= i < len(all_questions)]
+            if not sel_indices:
+                print("⚠️ 선택된 인덱스가 유효하지 않습니다.")
+                return new_state
+
+            sel_questions = [all_questions[i] for i in sel_indices]
+            sel_options = [all_options[i] if i < len(all_options) else [] for i in sel_indices]
+
+            print(f"🎯 [Solution] 선택 문제 처리: 인덱스 {sel_indices} ({len(sel_questions)}개)")
+
+            agent = self.solution_runner
+            if agent is None:
+                raise RuntimeError("solution_runner is not initialized (init_agents=False).")
+
+            generated_answers: List[str] = []
+            generated_explanations: List[str] = []
+
+            for i, (q, opts) in enumerate(zip(sel_questions, sel_options), start=1):
+                if isinstance(opts, str):
+                    opts = [x.strip() for x in opts.splitlines() if x.strip()]
+                opts = [str(x).strip() for x in (opts or []) if str(x).strip()]
+                if not q or not opts:
+                    generated_answers.append("")
+                    generated_explanations.append("")
+                    continue
+                try:
+                    agent_result = agent.invoke(
+                        user_problem=q,
+                        user_problem_options=opts,
+                        user_input_txt=state.get("user_query", "")
+                    )
+                except Exception as e:
+                    print(f"❌ SolutionAgent invoke 실행 실패(선택 {i}/{len(sel_questions)}): {e}")
+                    agent_result = None
+
+                ans, exp = "", ""
+                if agent_result:
+                    if isinstance(agent_result, dict) and agent_result.get("results"):
+                        r0 = agent_result["results"][0]
+                        ans = r0.get("generated_answer", "")
+                        exp = r0.get("generated_explanation", "")
+                    else:
+                        ans = agent_result.get("generated_answer", "")
+                        exp = agent_result.get("generated_explanation", "")
+                generated_answers.append(ans or "")
+                generated_explanations.append(exp or "")
+
+            shared.setdefault("answer", [])
+            shared.setdefault("explanation", [])
+            # 선택 인덱스에 맞춰 반영(길이 보정)
+            while len(shared["answer"]) < len(shared.get("question", [])):
+                shared["answer"].append("")
+            while len(shared["explanation"]) < len(shared.get("question", [])):
+                shared["explanation"].append("")
+            for idx, (ans, exp) in zip(sel_indices, zip(generated_answers, generated_explanations)):
+                shared["answer"][idx] = ans
+                shared["explanation"][idx] = exp
 
         # subject 패딩
         need = len(shared["question"]) - len(shared.get("subject", []))
@@ -982,6 +1144,7 @@ class Orchestrator:
         print("📊 채점 노드 실행")
         new_state: TeacherState = {**state}
         new_state = ensure_shared(new_state)
+        new_state = self._ensure_work_selection(new_state)
         new_state.setdefault("score", {})
         
         # 사용자 답안 입력 받기
@@ -1004,8 +1167,17 @@ class Orchestrator:
             print("⚠️ 채점할 문제가 없습니다.")
             return new_state
         
-        # 사용자 답안 입력 받기
+        # 사용자 답안 입력: work.selected_indices 있으면 선택된 문제 수만큼 입력 유도
+        work_sel = (new_state.get("work") or {})
+        sel_indices: List[int] = list(work_sel.get("selected_indices", []) or [])
+        sel_count: int = int(work_sel.get("select_count", 0) or 0)
+        # 우선 사용자 입력 전체에서 파싱
         user_answer = get_user_answer(user_query)
+        # 선택 인덱스가 있고, 파싱된 답 수가 선택 수와 불일치하면 앞에서 필요한 개수만 사용
+        if sel_indices or sel_count > 0:
+            need_n = len(sel_indices) if sel_indices else sel_count
+            if isinstance(user_answer, list) and need_n > 0:
+                user_answer = user_answer[:need_n]
         if not user_answer:
             print("⚠️ 사용자 답안을 입력받지 못했습니다.")
             return new_state
@@ -1021,6 +1193,13 @@ class Orchestrator:
         
         # solution_agent에서 생성된 정답과 해설
         solution_answers = shared.get("answer", [])
+        # 선택 인덱스 기반 채점: 선택된 문제에 대한 정답만 비교
+        if (sel_indices or sel_count > 0) and isinstance(solution_answers, list):
+            if not sel_indices and sel_count > 0:
+                sel_indices = list(range(min(sel_count, len(questions))))
+            sel_indices = [i for i in sel_indices if 0 <= i < len(solution_answers)]
+            if sel_indices:
+                solution_answers = [solution_answers[i] for i in sel_indices]
         if not solution_answers:
             print("⚠️ 정답이 없어서 채점할 수 없습니다.")
             return new_state
@@ -1900,7 +2079,8 @@ if __name__ == "__main__":
             }
 
             try:
-                result: Dict[str, Any] = app.invoke(init_state)
+                # 체크포인터 필수 키(thread_id)를 기본으로 설정하여 모든 에이전트가 정상 실행되도록 함
+                result: Dict[str, Any] = orch.invoke(init_state)
             except Exception:
                 print("[ERROR] 그래프 실행 중 예외가 발생했습니다:")
                 traceback.print_exc()

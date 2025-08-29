@@ -94,6 +94,7 @@ class RedisLangGraphMemory:
         return shared
 
     def _save_shared(self, shared: Dict[str, Any]) -> None:
+        shared = self._dedupe_aligned_shared(shared)
         shared = self._enforce_limits(shared)
         payload = json.dumps(shared, ensure_ascii=False)
         with self.redis.pipeline() as pipe:
@@ -101,6 +102,56 @@ class RedisLangGraphMemory:
             if self.ttl_seconds:
                 pipe.expire(self.k_shared, self.ttl_seconds)
             pipe.execute()
+
+    def _normalize_text(self, text: Any) -> str:
+        try:
+            return " ".join(str(text or "").split()).strip().lower()
+        except Exception:
+            return str(text or "").strip().lower()
+
+    def _dedupe_aligned_shared(self, shared: Dict[str, Any]) -> Dict[str, Any]:
+        """question+options 조합 기준으로 정렬 보존 중복 제거."""
+        if not isinstance(shared, dict):
+            return shared
+        questions = list(shared.get("question", []) or [])
+        options_l = list(shared.get("options", []) or [])
+        answers = list(shared.get("answer", []) or [])
+        expls = list(shared.get("explanation", []) or [])
+        subjects = list(shared.get("subject", []) or [])
+        user_ans = list(shared.get("user_answer", []) or [])
+
+        keep_q, keep_o, keep_a, keep_e, keep_s, keep_u = [], [], [], [], [], []
+        seen = set()
+        total = len(questions)
+        for i in range(total):
+            q = questions[i]
+            opts_raw = options_l[i] if i < len(options_l) else []
+            if isinstance(opts_raw, list):
+                opts_list = [self._normalize_text(x) for x in opts_raw if str(x).strip()]
+            elif isinstance(opts_raw, str):
+                opts_list = [self._normalize_text(x) for x in opts_raw.splitlines() if x.strip()]
+            else:
+                opts_list = []
+            key = (self._normalize_text(q), tuple(opts_list))
+            if key in seen:
+                continue
+            seen.add(key)
+            keep_q.append(q)
+            keep_o.append(options_l[i] if i < len(options_l) else [])
+            keep_a.append(answers[i] if i < len(answers) else "")
+            keep_e.append(expls[i] if i < len(expls) else "")
+            keep_s.append(subjects[i] if i < len(subjects) else "")
+            keep_u.append(user_ans[i] if i < len(user_ans) else "")
+
+        cleaned = dict(shared)
+        cleaned["question"] = keep_q
+        cleaned["options"] = keep_o
+        cleaned["answer"] = keep_a
+        cleaned["explanation"] = keep_e
+        cleaned["subject"] = keep_s
+        if user_ans:
+            cleaned["user_answer"] = keep_u
+        return cleaned
 
     def _append_history_entries(self, entries: List[Dict[str, Any]]) -> None:
         if not entries:
@@ -180,6 +231,7 @@ class RedisLangGraphMemory:
         # 기존 shared 불러와서 append-only 병합 후 저장
         existing_shared = self._load_shared()
         merged_shared = self._merge_shared_append_only(existing_shared, incoming_shared)
+        merged_shared = self._dedupe_aligned_shared(merged_shared)
         self._save_shared(merged_shared)
 
         # history append

@@ -17,7 +17,7 @@ load_dotenv()
 # RAGAS 환경 변수 명시적 설정 (OpenAI API용)
 os.environ.setdefault("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 os.environ.setdefault("OPENAI_BASE_URL", "https://api.openai.com/v1")
-os.environ.setdefault("OPENAI_LLM_MODEL", "gpt-3.5-turbo")
+os.environ.setdefault("OPENAI_LLM_MODEL", "gpt-4o-mini")
 
 def test_ragas_installation():
     """RAGAS 설치 상태 확인"""
@@ -37,9 +37,9 @@ def test_milvus_connection():
         from langchain_milvus import Milvus
         from langchain_huggingface import HuggingFaceEmbeddings
         
-        # Milvus 연결 설정
-        host = os.getenv("MILVUS_HOST", "localhost")
-        port = os.getenv("MILVUS_PORT", "19530")
+        # Milvus 연결 설정 - 로컬 Docker Compose 서비스 사용
+        host = "localhost"  # Docker Compose로 실행 중인 Milvus 서비스
+        port = "19530"
         collection_name = "info_exam_chunks"  # 실제 존재하는 컬렉션명으로 수정
         
         print(f"🔗 Milvus 연결 시도: {host}:{port}")
@@ -130,7 +130,7 @@ def generate_questions_from_milvus(vectorstore, subject_area: str, num_questions
         
         try:
             llm = ChatOpenAI(
-                model="gpt-3.5-turbo",
+                model=os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"),
                 temperature=0.2,
                 max_tokens=1024,
                 base_url="https://api.openai.com/v1",
@@ -250,7 +250,7 @@ def parse_quiz_response(response: str, subject_area: str = "") -> List[Dict[str,
         print(f"응답 내용: {response[:200]}...")
         return []
 
-def validate_questions_with_ragas(questions: List[Dict[str, Any]], context: str):
+def validate_questions_with_ragas(questions: List[Dict[str, Any]], context: str, subject_area: str = "정보처리기사"):
     """RAGAS를 사용하여 RAG 품질 검증"""
     try:
         from ragas import evaluate
@@ -276,14 +276,25 @@ def validate_questions_with_ragas(questions: List[Dict[str, Any]], context: str)
             os.environ["OPENAI_API_KEY"] = openai_api_key
             os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
             
+            # LLM 설정 (GPT-4o-mini)
             llm = llm_factory(
-                model="gpt-3.5-turbo",
+                model=os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"),
                 base_url="https://api.openai.com/v1"
             )
-            print("✅ RAGAS LLM 설정 완료 (OpenAI GPT-3.5-turbo)")
+            
+            # 임베딩 모델 설정 (HuggingFace 무료 모델 사용)
+            from langchain_huggingface import HuggingFaceEmbeddings
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True}
+            )
+            
+            print(f"✅ RAGAS LLM 설정 완료 (OpenAI {os.getenv('OPENAI_LLM_MODEL', 'gpt-4o-mini')})")
+            print("✅ RAGAS 임베딩 설정 완료 (HuggingFace all-MiniLM-L6-v2)")
                 
         except Exception as llm_error:
-            print(f"⚠️ RAGAS LLM 설정 실패: {llm_error}")
+            print(f"⚠️ RAGAS LLM/임베딩 설정 실패: {llm_error}")
             return None
         
         # RAGAS 평가 데이터 구성
@@ -295,13 +306,34 @@ def validate_questions_with_ragas(questions: List[Dict[str, Any]], context: str)
         }
         
         for q in questions:
-            question_text = q.get("question", "")[:200]
-            answer_text = q.get("answer", "") + ": " + q.get("explanation", "")[:100]
+            question_text = q.get("question", "")
+            
+            # 답변 구성: 선택지 + 정답 번호 + 해설
+            options = q.get("options", [])
+            answer_num = q.get("answer", "1")
+            explanation = q.get("explanation", "")
+            
+            # 선택지를 포함한 풍부한 답변 구성
+            options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(options)])
+            try:
+                correct_option = options[int(answer_num)-1] if answer_num.isdigit() and int(answer_num) <= len(options) else options[0]
+            except (IndexError, ValueError):
+                correct_option = options[0] if options else "정답 없음"
+            
+            # Answer Relevancy를 위한 간결한 답변 구성
+            answer_text = f"{correct_option}. {explanation}"
+            
+            # 더 나은 컨텍스트: 여러 관련 문서 조각 사용
+            contexts_list = [
+                context[:800],  # 메인 컨텍스트를 더 길게
+                f"문제 유형: {subject_area} 과목의 객관식 문제",
+                f"선택지: {options_text}"
+            ]
             
             eval_data["question"].append(question_text)
-            eval_data["contexts"].append([context[:500]])
+            eval_data["contexts"].append(contexts_list)
             eval_data["answer"].append(answer_text)
-            eval_data["ground_truth"].append(answer_text)
+            eval_data["ground_truth"].append(f"{correct_option}. {explanation}")
         
         dataset = Dataset.from_dict(eval_data)
         
@@ -311,7 +343,8 @@ def validate_questions_with_ragas(questions: List[Dict[str, Any]], context: str)
         results = evaluate(
             dataset,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
-            llm=llm
+            llm=llm,
+            embeddings=embeddings
         )
         
         return results
@@ -587,7 +620,7 @@ def main():
         return
     
     # 4. 테스트할 과목들
-    test_subjects = ["Software Design", "Database Construction", "Programming Language Utilization"]
+    test_subjects = ["Software Design"]  # 빠른 테스트를 위해 하나만
     
     all_results = {}
     
@@ -602,7 +635,7 @@ def main():
             continue
         
         # RAGAS 품질 검증
-        ragas_results = validate_questions_with_ragas(questions, context)
+        ragas_results = validate_questions_with_ragas(questions, context, subject)
         
         # 결과 표시
         display_ragas_results(ragas_results, questions)

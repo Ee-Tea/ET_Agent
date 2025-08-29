@@ -1,53 +1,53 @@
 {
   "test_info": {
     "subject_area": "Software Design",
-    "timestamp": "20250828_140436",
+    "timestamp": "20250829_102735",
     "total_questions": 3
   },
   "context": "문서 1: 기술, 마이크로 기구 설계, 사용성 평가 기술 및 가상현실 기술 \n11. 소프트웨어 설계 모델링 \n소프트웨어의 설계(Design) \n소프트웨어 설계 모델링 \n \n정의 : 요구사항(기능, 성능)을 만족하는 소프트웨어의 내부 구조 및 동적 행위들을 \n모델링하여 표현하고, 분석 검증하는 과정이며 이 과정에서 만들어지는 산출물을 의미한다. \n목적 : \"무엇을(What)\" 으로부터 \"어떻게(How)\"로 관점을 전환하면서 최종 제작할 \n소프트웨어의 청사진을 만드는 것을 의미한다. \n소프트웨어 설계 \n \n본격적인 프로그램의 구현에 들어가기 전에 소프트웨어를 구성하는 뼈대를 정의해 구현의 \n기반을 만드는 것을 의미하며 상위 설계(High-Level Design)와 하위 설계로 구분된다.\n\n문서 2: Software Engineering)것은?구조적 기법① 프로토타이핑 기술② 정보 저장소 기술③ 일괄처리 기술④ 다음 중 상태 다이어그램에서 객체 전이의 요인이 되는 요소는20. ?event ① state② message ③ transition④ 제 과목 소프트웨어 개발2의 구축 유형으로 옳지 않은 21. EAI(Enterprise Application Integration)것은?Point-to-Point① Hub & Spoke② Message Bus③ Tree④ 검증 검사 기법 중 개발자의 장소에서 사용자가 개발자 앞에서 22. 행하는 기법이며 일반적으로 통제된 환경에서 사용자와 개발자가 , 함께 확인하면서 수행되는 검사는?동치 분할 검사① 형상 검사② 알파 검사③ 베타 검사④\n\n문서 3: 필기과목명 문제수 주요항목 세부항목 세세항목\n소프트웨어설계 20 2. 화면 설계 2. UI 설계 1. 감성공학\n2. UI 설계 도구\n3. 애플리케이션 설계 1. 공통 모듈 설계 1. 설계 모델링\n2. 소프트웨어 아키텍처\n3. 재사용\n4. 모듈화\n5. 결합도\n6. 응집도\n2. 객체지향 설계 1. 객체지향(OOP)\n2. 디자인패턴\n4. 인터페이스 설계 1. 인터페이스 요구사항\n확인\n1. 내외부 인터페이스 요구사\n항\n2. 요구공학\n2. 인터페이스 대상 식별 1. 시스템 아키텍처\n2. 인터페이스 시스템\n3. 인터페이스 상세 설계 1. 내외부 송수신\n2. 데이터 명세화\n3. 오류 처리방안 명세화\n4. 인터페이스 설계\n5. 미들웨어 솔루션\n소프트웨어개발 20 1. 데이터 입출력 구현 1. 자료구조 1. 스택\n2. 큐\n\n문서 4: 소프트웨어 아키텍처를 설계하는데 발생하는 문제점을 해결하기 위한 재사용 가능한 \n솔루션으로 디자인 패턴과 유사하나 더 큰 범위에 속한다. \n종류 \n \nLayered, Client-Server, Mater-Slave, Pipe-Filter, Broker, Peer to Peer, \nEvent-Bus, MVC(Model View Controller), Blackboard, Interpreter \n장점 \n \n개발 시간 단축, 고품질 소프트웨어, 안정적 개발 가능, 개발 단계 관계자 간 의사소통이 \n간편함. 시스템 구조 이해도가 높아 유지보수에 유리하다. \n아키텍처 패턴 = 아키텍처 스타일 = 표준 아키텍처 \n계층(Layered) 패턴 \n \n소프트웨어를 계층 단위(Unit)로 분할하며, N-tier 아키텍쳐 패턴이라고도 한다. \n계층적으로 조직화할 수 있는 서비스로 구성된 애플리케이션에 적합하다. \n전통적인 방법으로 층 내부의 응집도를 높이는 것이 중요하다. \n모듈들의 응집된 딥합 계층 간의 관계는 사용 가능의 관계로 표현한다. \n장점 : 정보은닉의 원칙 적용, 높은 이식성을 가진다. \n단점 : 추가적인 실행 시 오버헤드(너무 많은 계층으로 성능 감소 발생)가 발생한다. \n활용 : 일반적인 데스크톱 소프트웨어나 E-Commerce 웹 어플리케이션 \n4계층 \nPresentation Layer = UI 계층(UI Layer) \nApplication Layer = 서비스 계층(Service Layer) \nBusiness Logic Layer = 도메인 계층(Domain Layer) \nData access Layer = 영속 계층(Persistence Layer) \nMVC(Model View Controller) 패턴 \n \n대화형 애플리케이션을 아래와 같이 3부분으로 분류한다. \nModel View Controller \n핵심 기능 + 데이터 사용자에게 정보를 표시한다.(다수 뷰가 정의될 수 있다.)\n 사용자로부터 입력을 처리한다.\n\n문서 5: Unity④ 소프트웨어 공학에서 모델링 과 관련한 설명으로 틀린 13. (Modeling)것은?개발팀이 응용문제를 이해하는 데 도움을 줄 수 있다.① 유지보수 단계에서만 모델링 기법을 활용한다.② 개발될 시스템에 대하여 여러 분야의 엔지니어들이 공통된 개③ 념을 공유하는 데 도움을 준다.절차적인 프로그램을 위한 자료 흐름도는 프로세스 위주의 모④ 델링 방법이다.디자인 패턴 중 생성 패턴으로 옳은 것은14. GoF(Gangs of Four) ?Singleton Pattern① Adapter Pattern② Decorator Pattern③ State Pattern④",
   "questions": [
     {
-      "question": "소프트웨어 설계 모델링의 목적은 무엇입니까?",
+      "question": "소프트웨어 설계 모델링의 정의는 무엇인가?",
       "options": [
-        "무엇을(What)부터 어떻게(How)로 관점을 전환하는 것",
-        "소프트웨어의 내부 구조를 정의하는 것",
-        "소프트웨어의 기능을 정의하는 것",
-        "소프트웨어의 성능을 정의하는 것"
+        "소프트웨어의 내부 구조 및 동적 행위를 모델링하여 표현하고 분석 검증하는 과정",
+        "프로그램의 구현을 위한 뼈대를 정의하는 과정",
+        "소프트웨어의 기능과 성능을 평가하는 과정",
+        "소프트웨어 아키텍처를 설계하는 과정"
       ],
       "answer": "1",
-      "explanation": "소프트웨어 설계 모델링의 목적은 무엇을(What)부터 어떻게(How)로 관점을 전환하는 것이다.",
+      "explanation": "소프트웨어 설계 모델링은 요구사항을 만족하는 소프트웨어의 내부 구조 및 동적 행위를 모델링하여 표현하고 분석 검증하는 과정을 의미한다.",
       "subject": "Software Design"
     },
     {
-      "question": "Layered 아키텍처 패턴의 장점은 무엇입니까?",
+      "question": "계층(Layered) 아키텍처 패턴의 장점은 무엇인가?",
       "options": [
-        "개발 시간을 단축하는 것",
-        "소프트웨어의 안정성을 높이는 것",
-        "개발 단계 간의 의사소통을 간편하게 하는 것",
-        "소프트웨어의 유지보수를 용이하게 하는 것"
+        "추가적인 실행 시 오버헤드가 발생한다",
+        "정보은닉의 원칙을 적용할 수 있다",
+        "모든 계층이 동일한 기능을 수행한다",
+        "유지보수에 불리하다"
       ],
-      "answer": "3",
-      "explanation": "Layered 아키텍처 패턴의 장점은 개발 단계 간의 의사소통을 간편하게 하는 것이다.",
+      "answer": "2",
+      "explanation": "계층 아키텍처 패턴은 정보은닉의 원칙을 적용하여 높은 이식성을 제공하는 장점이 있다.",
       "subject": "Software Design"
     },
     {
-      "question": "GoF(Gangs of Four) 디자인 패턴 중 생성 패턴으로 옳은 것은 무엇입니까?",
+      "question": "MVC(Model View Controller) 패턴에서 'View'의 역할은 무엇인가?",
       "options": [
-        "Singleton Pattern",
-        "Adapter Pattern",
-        "Decorator Pattern",
-        "State Pattern"
+        "사용자에게 정보를 표시하는 역할",
+        "사용자로부터 입력을 처리하는 역할",
+        "데이터를 관리하는 역할",
+        "비즈니스 로직을 처리하는 역할"
       ],
       "answer": "1",
-      "explanation": "GoF(Gangs of Four) 디자인 패턴 중 생성 패턴으로 옳은 것은 Singleton Pattern이다.",
+      "explanation": "MVC 패턴에서 'View'는 사용자에게 정보를 표시하는 역할을 담당한다.",
       "subject": "Software Design"
     }
   ],
   "ragas_results": {
     "faithfulness": [
-      NaN,
-      NaN,
-      NaN
+      0.8,
+      0.5,
+      0.0
     ],
     "answer_relevancy": [
       NaN,
@@ -55,14 +55,14 @@
       NaN
     ],
     "context_precision": [
-      NaN,
-      NaN,
-      NaN
+      0.8333333332916666,
+      0.3333333333,
+      0.3333333333
     ],
     "context_recall": [
-      NaN,
-      NaN,
-      NaN
+      1.0,
+      0.5,
+      1.0
     ]
   }
 }

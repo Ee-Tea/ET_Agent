@@ -9,6 +9,12 @@ from interactive_interface import interactive_menu_llm, test_weakness_analysis
 
 def main():
     """메인 실행 함수"""
+    # Milvus 환경변수 설정 (localhost로 강제 설정)
+    os.environ.setdefault("MILVUS_HOST", "localhost")
+    os.environ.setdefault("MILVUS_PORT", "19530")
+    os.environ.setdefault("MILVUS_COLLECTION", "info_exam_chunks")
+    os.environ.setdefault("MILVUS_TOPK", "15")
+    
     # Groq API 키 확인
     if not os.getenv("GROQ_API_KEY"):
         print("GROQ_API_KEY 환경변수가 설정되지 않았습니다.")

@@ -307,11 +307,6 @@ class Orchestrator:
         """Command(resume)을 사용하여 중단된 워크플로우를 재개합니다."""
         if config is None:
             config = {"configurable": {"thread_id": "default"}}
-        # 상위 그래프 재개 시, solution 노드에서 서브그래프를 재개할 수 있도록 임시로 보관
-        try:
-            self._pending_user_feedback = resume_data
-        except Exception:
-            pass
         
         # LangGraph 버전에 따른 Command import 시도
         try:
@@ -486,30 +481,16 @@ class Orchestrator:
                             new_state = ensure_shared({**state})
                             shared = new_state["shared"]
                             
-                            # 중복 여부 확인 (동일 문제/보기 존재 시 재추가 방지)
+                            # 기존 문제 리스트에 추가
                             shared.setdefault("question", [])
                             shared.setdefault("options", [])
-                            existing_index = None
-                            try:
-                                for idx, (q0, o0) in enumerate(zip(shared["question"], shared["options"])):
-                                    if str(q0).strip() == str(problem).strip() and [str(x).strip() for x in (o0 or [])] == [str(x).strip() for x in (options or [])]:
-                                        existing_index = idx
-                                        break
-                            except Exception:
-                                existing_index = None
-
-                            if existing_index is not None:
-                                print(f"⚠️ 중복 문제 감지 → 기존 인덱스: {existing_index}; 재처리 생략")
-                                # 이미 존재하므로 이번 턴에는 solution 재호출이 일어나지 않게 count=0 처리
-                                current_artifacts["extracted_problem_count"] = 0
-                                # 인덱스는 변경하지 않음
-                            else:
-                                shared["question"].append(problem)
-                                shared["options"].append(options)
-                                print("✅ 문제/보기 추가 완료 (중복 아님)")
-                                current_artifacts["extracted_problem_count"] = 1
-                                current_artifacts["extracted_problem_start_index"] = len(shared["question"]) - 1
-                                current_artifacts["extracted_problem_end_index"] = len(shared["question"]) - 1
+                            shared["question"].append(problem)
+                            shared["options"].append(options)
+                            
+                            # artifacts에 추가된 문제 정보 기록
+                            current_artifacts["extracted_problem_count"] = 1
+                            current_artifacts["extracted_problem_start_index"] = len(shared["question"]) - 1
+                            current_artifacts["extracted_problem_end_index"] = len(shared["question"]) - 1
                             
                             print(f"📝 추출된 문제를 shared state에 추가: 1개")
                             print(f"📂 shared state 총 문제 수: {len(shared['question'])}개")
@@ -742,16 +723,11 @@ class Orchestrator:
                         self._last_solution_thread_id = memory_key
                     except Exception:
                         pass
-                    # 상위 그래프 재개로 전달된 사용자 피드백이 있다면 서브그래프 최초 상태에 주입
-                    pending_feedback = getattr(self, "_pending_user_feedback", None)
-                    if pending_feedback:
-                        print("🧩 상위 피드백 주입 → 서브그래프 최초 상태 전달")
                     agent_result = agent.invoke(
                         user_problem=q, 
                         user_problem_options=opts, 
                         user_input_txt=state.get("user_query", ""),
-                        memory_key=memory_key,  # 숏텀 메모리 키 전달
-                        user_feedback=pending_feedback if pending_feedback else None
+                        memory_key=memory_key  # 숏텀 메모리 키 전달
                     )
                     print(f"✅ 추출된 문제 풀이 완료")
                     
@@ -773,12 +749,6 @@ class Orchestrator:
                     if "extracted_problem_results" not in new_state["solution"]:
                         new_state["solution"]["extracted_problem_results"] = []
                     new_state["solution"]["extracted_problem_results"].append(agent_result)
-                    # 사용한 pending 피드백은 소비
-                    if pending_feedback:
-                        try:
-                            delattr(self, "_pending_user_feedback")
-                        except Exception:
-                            pass
                     
                 except Exception as e:
                     print(f"❌ 추출된 문제 풀이 중 오류 발생: {e}")
@@ -1793,11 +1763,17 @@ class Orchestrator:
         if config is None:
             config = {"configurable": {"thread_id": "default"}}
         
-        # 상위 그래프에서 재개: 사용자 피드백을 임시 저장하여 solution 노드가 서브그래프 초기 상태로 전달
+        # 먼저 SolutionAgent 레벨에서의 인터럽트였는지 확인하고 직접 재개 시도
         try:
-            self._pending_user_feedback = resume_data
-        except Exception:
-            pass
+            last_tid = getattr(self, "_last_solution_thread_id", None)
+            if self.solution_runner is not None and last_tid:
+                print(f"🧭 SolutionAgent 레벨 재개 시도: thread_id={last_tid}")
+                sa_final = self.solution_runner.resume_workflow(thread_id=last_tid, user_feedback=resume_data)
+                print("✅ SolutionAgent 재개 완료")
+                # 테스트 용이성을 위해 그대로 반환
+                return {"resumed": True, "solution_agent_state": sa_final}
+        except Exception as sa_err:
+            print(f"⚠️ SolutionAgent 재개 실패: {sa_err}")
 
         # LangGraph 버전에 따른 Command import 시도
         try:
@@ -1818,8 +1794,8 @@ class Orchestrator:
             
             # 숏텀 메모리에서 solution_agent 상태 복구 시도
             try:
-                from common.short_term.redis_memory import RedisLangGraphMemory
-                redis_memory = RedisLangGraphMemory()
+                from common.short_term.redis_memory import RedisMemory
+                redis_memory = RedisMemory()
                 
                 # solution_agent의 메모리 키들을 찾아서 상태 복구
                 memory_keys = redis_memory.keys("solution_*")

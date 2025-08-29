@@ -159,6 +159,32 @@ class InfoProcessingExamAgent(BaseAgent):
         self._initialize_models()
         self._build_graph()  # 2) 과목별 2노드(생성/검증) 구축
 
+    # --- Subject helpers: spacing-insensitive matching ---
+    def _normalize_subject(self, s: str) -> str:
+        try:
+            return re.sub(r"\s+", "", (s or "")).strip()
+        except Exception:
+            return (s or "").strip()
+
+    def _subject_aliases(self, subject: str) -> List[str]:
+        base = self._normalize_subject(subject)
+        alias_map = {
+            "소프트웨어설계": ["소프트웨어설계", "소프트웨어 설계"],
+            "소프트웨어개발": ["소프트웨어개발", "소프트웨어 개발"],
+            "데이터베이스구축": ["데이터베이스구축", "데이터베이스 구축"],
+            "프로그래밍언어활용": ["프로그래밍언어활용", "프로그래밍언어 활용", "프로그래밍 언어 활용"],
+            "정보시스템구축관리": ["정보시스템구축관리", "정보시스템 구축관리", "정보시스템 구축 관리"],
+        }
+        for key, aliases in alias_map.items():
+            if base == self._normalize_subject(key):
+                return aliases
+        # 기본: 입력 그대로와 공백 제거형 둘 다 시도
+        uniq = []
+        for cand in [subject, base]:
+            if cand and cand not in uniq:
+                uniq.append(cand)
+        return uniq
+
     @property
     def name(self) -> str:
         return "InfoProcessingExamAgent"
@@ -394,8 +420,17 @@ class InfoProcessingExamAgent(BaseAgent):
             print(f"[DEBUG] _retrieve_documents: query='{query}', subject_area='{subject_area}', enhanced_query='{enhanced_query}'")
             topk = self.milvus_conf["topk"]
             documents: List[Document] = []
-            expr = f"subject == '{subject_area}'" if subject_area else None
+            # 과목명이 DB에 공백 포함/미포함으로 섞여있는 경우를 모두 커버
+            subject_aliases = self._subject_aliases(subject_area) if subject_area else []
+            expr = None
+            if subject_aliases:
+                if len(subject_aliases) == 1:
+                    expr = f"subject == '{subject_aliases[0]}'"
+                else:
+                    or_clauses = [f"subject == '{a}'" for a in subject_aliases]
+                    expr = " or ".join(or_clauses)
             try:
+                # 1) expr 포함 검색
                 if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
                     if expr:
                         documents = self.vectorstore.similarity_search(enhanced_query, k=topk, expr=expr)
@@ -407,14 +442,42 @@ class InfoProcessingExamAgent(BaseAgent):
                     documents = self.retriever.invoke(enhanced_query)
             except Exception as e:
                 print(f"[DEBUG] _retrieve_documents: primary search failed ({e}), fallback without expr")
+                documents = []
+
+            # 2) 결과가 비어 있으면 expr 제거 후 재검색
+            if not documents:
                 try:
-                    documents = self.retriever.invoke(enhanced_query) if self.retriever else []
+                    if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
+                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk)
+                    elif self.retriever:
+                        if hasattr(self.retriever, "search_kwargs") and "expr" in self.retriever.search_kwargs:
+                            self.retriever.search_kwargs.pop("expr", None)
+                        documents = self.retriever.invoke(enhanced_query)
+                    print(f"[DEBUG] _retrieve_documents: fallback without expr → {len(documents)} docs")
                 except Exception as e2:
-                    print(f"[DEBUG] _retrieve_documents: fallback search failed ({e2})")
+                    print(f"[DEBUG] _retrieve_documents: fallback without expr failed ({e2})")
+                    documents = []
+
+            # 3) 여전히 비어 있으면 주제 접두사 없이 순수 쿼리로 재검색
+            if not documents and query and query != enhanced_query:
+                try:
+                    if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
+                        documents = self.vectorstore.similarity_search(query, k=topk)
+                    elif self.retriever:
+                        documents = self.retriever.invoke(query)
+                    print(f"[DEBUG] _retrieve_documents: fallback plain query → {len(documents)} docs")
+                except Exception as e3:
+                    print(f"[DEBUG] _retrieve_documents: plain query search failed ({e3})")
                     documents = []
 
             if subject_area and documents:
-                filtered = [d for d in documents if (d.metadata.get('subject') or '').strip() == subject_area]
+                # 메타데이터 subject도 공백 무시하고 별칭으로 정규화 매칭
+                aliases_norm = {self._normalize_subject(a) for a in subject_aliases}
+                filtered = []
+                for d in documents:
+                    meta_subj_norm = self._normalize_subject(d.metadata.get('subject') or '')
+                    if meta_subj_norm in aliases_norm:
+                        filtered.append(d)
                 if filtered:
                     documents = filtered
 
@@ -460,14 +523,14 @@ class InfoProcessingExamAgent(BaseAgent):
                     print("[DEBUG] OPENAI_API_KEY가 설정되지 않음 - RAGAS 검증 건너뜀")
                     return 1.0
                 
-                # RAGAS에서 OpenAI API 사용을 위한 환경 변수 설정
+                # RAGAS에서 사용할 LLM 설정: 환경의 BASE_URL을 그대로 사용(강제 덮어쓰기 금지)
                 os.environ["OPENAI_API_KEY"] = openai_api_key
-                os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+                base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
                 
-                # LLM 설정 (GPT-4o-mini)
+                ragas_model = os.getenv("RAGAS_LLM_MODEL") or os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
                 llm = llm_factory(
-                    model=os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"),
-                    base_url="https://api.openai.com/v1"
+                    model=ragas_model,
+                    base_url=base_url
                 )
                 
                 # 임베딩 모델 설정 (HuggingFace 무료 모델 사용)

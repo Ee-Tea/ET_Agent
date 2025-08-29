@@ -137,6 +137,31 @@ class InfoProcessingExamAgent(BaseAgent):
         self._initialize_models()
         self._build_graph()  # 2) 과목별 2노드(생성/검증) 구축
 
+    # --- Subject helpers: spacing-insensitive matching ---
+    def _normalize_subject(self, s: str) -> str:
+        try:
+            return re.sub(r"\s+", "", (s or "")).strip()
+        except Exception:
+            return (s or "").strip()
+
+    def _subject_aliases(self, subject: str) -> List[str]:
+        base = self._normalize_subject(subject)
+        alias_map = {
+            "소프트웨어설계": ["소프트웨어설계", "소프트웨어 설계"],
+            "소프트웨어개발": ["소프트웨어개발", "소프트웨어 개발"],
+            "데이터베이스구축": ["데이터베이스구축", "데이터베이스 구축"],
+            "프로그래밍언어활용": ["프로그래밍언어활용", "프로그래밍언어 활용", "프로그래밍 언어 활용"],
+            "정보시스템구축관리": ["정보시스템구축관리", "정보시스템 구축관리", "정보시스템 구축 관리"],
+        }
+        for key, aliases in alias_map.items():
+            if base == self._normalize_subject(key):
+                return aliases
+        uniq = []
+        for cand in [subject, base]:
+            if cand and cand not in uniq:
+                uniq.append(cand)
+        return uniq
+
     @property
     def name(self) -> str:
         return "InfoProcessingExamAgent"
@@ -339,7 +364,59 @@ class InfoProcessingExamAgent(BaseAgent):
             subject_area = state.get("subject_area", "")
             enhanced_query = f"{subject_area} {query}".strip()
             print(f"[DEBUG] _retrieve_documents: query='{query}', subject_area='{subject_area}', enhanced_query='{enhanced_query}'")
-            documents = self.retriever.invoke(enhanced_query)
+            topk = self.milvus_conf["topk"]
+            documents: List[Document] = []
+            expr = f"subject == '{subject_area}'" if subject_area else None
+            try:
+                if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
+                    if expr:
+                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk, expr=expr)
+                    else:
+                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk)
+                elif self.retriever:
+                    if expr and hasattr(self.retriever, "search_kwargs"):
+                        self.retriever.search_kwargs.update({"expr": expr})
+                    documents = self.retriever.invoke(enhanced_query)
+            except Exception as e:
+                print(f"[DEBUG] _retrieve_documents: primary search failed ({e}), fallback without expr")
+                documents = []
+
+            if not documents:
+                try:
+                    if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
+                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk)
+                    elif self.retriever:
+                        if hasattr(self.retriever, "search_kwargs") and "expr" in self.retriever.search_kwargs:
+                            self.retriever.search_kwargs.pop("expr", None)
+                        documents = self.retriever.invoke(enhanced_query)
+                    print(f"[DEBUG] _retrieve_documents: fallback without expr → {len(documents)} docs")
+                except Exception as e2:
+                    print(f"[DEBUG] _retrieve_documents: fallback without expr failed ({e2})")
+                    documents = []
+
+            if not documents and query and query != enhanced_query:
+                try:
+                    if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
+                        documents = self.vectorstore.similarity_search(query, k=topk)
+                    elif self.retriever:
+                        documents = self.retriever.invoke(query)
+                    print(f"[DEBUG] _retrieve_documents: fallback plain query → {len(documents)} docs")
+                except Exception as e3:
+                    print(f"[DEBUG] _retrieve_documents: plain query search failed ({e3})")
+                    documents = []
+
+            # subject 메타가 공백 포함으로 저장된 DB 케이스 대응
+            if subject_area and documents:
+                aliases = self._subject_aliases(subject_area)
+                aliases_norm = {self._normalize_subject(a) for a in aliases}
+                filtered = []
+                for d in documents:
+                    meta_subj_norm = self._normalize_subject(d.metadata.get('subject') or '')
+                    if meta_subj_norm in aliases_norm:
+                        filtered.append(d)
+                if filtered:
+                    documents = filtered
+
             print(f"[DEBUG] _retrieve_documents: found {len(documents)} documents")
             # Milvus 문서에는 source_file이 없을 수 있으므로 보완
             source_files = []

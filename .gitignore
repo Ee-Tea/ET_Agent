@@ -247,3 +247,5 @@ data/**
 *.aof
 keys/
 *.pem
+data\redis\
+data/redis/

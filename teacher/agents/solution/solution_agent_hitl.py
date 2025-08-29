@@ -57,8 +57,8 @@ class SolutionState(TypedDict):
     user_problem: str
     user_problem_options: List[str]
     
-    vectorstore_p: Milvus
-    vectorstore_c: Milvus
+    # vectorstore_p: Milvus
+    # vectorstore_c: Milvus
 
     retrieved_docs: List[Document]
     problems_contexts_text : str
@@ -297,8 +297,8 @@ class SolutionAgent(BaseAgent):
                 }
             
             state["solution_score"] = evaluation_result.get("score", 70.0)
-            # state["needs_improvement"] = evaluation_result.get("needs_improvement", True)
-            state["needs_improvement"] = True
+            state["needs_improvement"] = evaluation_result.get("needs_improvement", True)
+            # state["needs_improvement"] = True
             
             print(f"📊 풀이 평가 점수: {state['solution_score']}/100")
             print(f"📊 개선 필요: {state['needs_improvement']}")
@@ -458,7 +458,8 @@ class SolutionAgent(BaseAgent):
         print("\n🔍 [1단계] 유사 문제 검색 시작")
         print(state["user_problem"], state["user_problem_options"])
             
-        vectorstore_p = state.get("vectorstore_p")
+        # 벡터스토어는 상태에서 얻지 않고, 인스턴스 멤버를 사용
+        vectorstore_p = getattr(self, "vectorstore_p", None)
 
         if vectorstore_p is None:
             print("⚠️ vectorstore_p없음 → 유사 문제 검색 건너뜀")
@@ -616,7 +617,7 @@ class SolutionAgent(BaseAgent):
     def _search_concepts_summary(self, state: SolutionState) -> SolutionState:
         print("\n📚 [1-확장] 개념 요약 컨텍스트 검색 시작")
 
-        vectorstore_c = state.get("vectorstore_c")
+        vectorstore_c = getattr(self, "vectorstore_c", None)
         if vectorstore_c is None:
             print("⚠️ vectorstore_c 없음 → 개념 검색 건너뜀")
             state["concept_contexts"], state["concept_contexts_text"] = [], ""
@@ -1201,8 +1202,7 @@ class SolutionAgent(BaseAgent):
             "user_problem": user_problem,
             "user_problem_options": user_problem_options,
 
-            "vectorstore_p": vs_p,
-            "vectorstore_c": vs_c,
+            # 벡터스토어 핸들은 상태에 넣지 않는다(비직렬화 객체)
 
             "retrieved_docs": [],
             "problems_contexts_text": "",

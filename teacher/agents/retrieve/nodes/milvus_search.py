@@ -144,10 +144,11 @@ class MilvusSearchTool:
             # 검색 결과를 구조화된 텍스트로 변환
             context_parts = []
             for i, result in enumerate(results, 1):
-                context_part = f"[{i}] 과목: {result['subject']}\n"
-                context_part += f"제목: {result['item_title']}\n"
-                context_part += f"내용: {result['content']}\n"
-                context_part += f"유사도 점수: {result['score']:.4f}\n"
+                subject = result.get('subject') or ''
+                content = result.get('content') or ''
+                context_part = f"[{i}] 과목: {subject}\n"
+                context_part += f"내용: {content}\n"
+                context_part += f"유사도 점수: {result.get('score', 0.0):.4f}\n"
                 context_part += "-" * 50 + "\n"
                 context_parts.append(context_part)
             

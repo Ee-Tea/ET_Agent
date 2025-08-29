@@ -1,6 +1,6 @@
 from .nodes.extractor import extract_query_elements, query_rewrite, query_reinforce
 from .nodes.merge_responder import merge_context, generate_answer
-from .nodes.search import wiki_tool, ddg_tool
+from .nodes.search import wiki_tool, ddg_tool, milvus_tool
 from langgraph.graph import END, StateGraph
 from langchain_core.runnables import RunnableLambda
 from typing_extensions import TypedDict
@@ -14,6 +14,7 @@ class RetrievalState(TypedDict):
     rewritten_question: str
     wiki: str
     ddg: str
+    milvus: str
     merged_context: str
     answer: str
     fact_check_result: dict
@@ -46,11 +47,20 @@ def search_ddg_fn(state):
     ddg_result = ddg_tool.run(question)
     return {"ddg": ddg_result}
 
+def search_milvus_fn(state):
+    """MilvusDB 벡터 유사도 검색 노드"""
+    question = state["rewritten_question"]
+    milvus_result = milvus_tool.run(question)
+    return {"milvus": milvus_result}
+
 def merge_fn(state):
     """검색 결과 병합 노드"""
     wiki_result = state["wiki"]
     ddg_result = state["ddg"]
-    merged_context = merge_context(wiki_result, ddg_result)
+    milvus_result = state.get("milvus", "")
+    
+    # merge_context 함수를 사용하여 검색 결과 병합
+    merged_context = merge_context(wiki_result, ddg_result, milvus_result)
     print(f"병합된 컨텍스트: {merged_context}")
     return {"merged_context": merged_context}
 
@@ -63,10 +73,7 @@ def answer_fn(state):
 
 def verify_fn(state):
     """답변 검증 노드"""
-    question = state["retrieval_question"]
-    context = state["merged_context"]
-    answer = state["answer"]
-    fact_check_result = fact_check(question, context, answer)
+    fact_check_result = fact_check(state)
     print(f"검증 결과: {fact_check_result}")
     return {"fact_check_result": fact_check_result}
 
@@ -78,12 +85,12 @@ def reinforce_fn(state):
 def check_verdict(state):
     """검증 결과에 따라 분기"""
     verdict = state.get("fact_check_result", {}).get("verdict", "NOT ENOUGH INFO")
-    if verdict == "SUPPORTED":
+    if verdict == "SUPPORTS":
         return "pass"
     else:
         return "fail"
 
-def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, merge_fn, answer_fn):
+def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn):
     """검색 그래프 빌드"""
 
     builder = StateGraph(RetrievalState)
@@ -93,6 +100,7 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
     builder.add_node("rewrite", RunnableLambda(rewrite_fn))
     builder.add_node("search_wiki", RunnableLambda(search_wiki_fn))
     builder.add_node("search_ddg", RunnableLambda(search_ddg_fn))
+    builder.add_node("search_milvus", RunnableLambda(search_milvus_fn))
     builder.add_node("merge", RunnableLambda(merge_fn))
     builder.add_node("answer", RunnableLambda(answer_fn))
     builder.add_node("reinforce", RunnableLambda(reinforce_fn))
@@ -104,13 +112,16 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
     builder.add_edge("extract", "rewrite")
     builder.add_edge("rewrite", "search_wiki")
     builder.add_edge("rewrite", "search_ddg")
+    builder.add_edge("rewrite", "search_milvus")
     builder.add_edge("search_wiki", "merge")
     builder.add_edge("search_ddg", "merge")
+    builder.add_edge("search_milvus", "merge")
     builder.add_edge("merge", "answer")
     builder.add_edge("answer", "verify")
     builder.add_conditional_edges("verify",check_verdict, {"pass": END, "fail" : "reinforce"})
     builder.add_edge("reinforce", "search_wiki")  # 보강된 질문으로 다시 검색 시작
     builder.add_edge("reinforce", "search_ddg")  # 보강된 질문으로 다시 검색 시작
+    builder.add_edge("reinforce", "search_milvus")  # 보강된 질문으로 다시 검색 시작
 
     # 3️⃣ 최종 컴파일된 graph 얻기
     graph = builder.compile()
@@ -124,7 +135,7 @@ class retrieve_agent(BaseAgent):
     """
     def __init__(self):
         self.graph = build_retrieval_graph(
-            extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, merge_fn, answer_fn
+            extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn
         )
 
     @property
@@ -155,6 +166,9 @@ class retrieve_agent(BaseAgent):
 #     "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"
 # }
 # print(initial_state["retrieval_question"])
+# graph = build_retrieval_graph(
+#             extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn
+#         )
 # result = graph.invoke(initial_state)
 # print("답변 시작")
 # print(result["answer"])  # 그래프 실행 후 답변 출력

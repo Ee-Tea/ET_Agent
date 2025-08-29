@@ -20,7 +20,7 @@ class FilePathMapper:
         """
         self.base_dirs = base_dirs or {
             "pdf": "agents/solution/pdf_outputs",  # 실제 PDF가 있는 위치
-            "image": "../temp_images",
+            "image": "agents/solution",  # solution 디렉토리에서 이미지 파일 찾기
             "document": "../data"
         }
         
@@ -76,6 +76,15 @@ class FilePathMapper:
                 "agents/solution/pdf_outputs",  # solution 출력
                 "agents/TestGenerator/data",    # TestGenerator 데이터
                 "../temp_images",              # 임시 이미지들
+            ]
+        elif file_type == "image":
+            # 이미지 타입인 경우 여러 디렉토리에서 검색
+            search_dirs = [
+                self.base_dirs.get("image"),  # 기본 디렉토리
+                "agents/solution",            # solution 디렉토리
+                "teacher/agents/solution",    # teacher/solution 디렉토리
+                "temp_images",                # 임시 이미지들
+                "../temp_images",             # 상위 임시 이미지들
             ]
         else:
             search_dirs = [self.base_dirs.get(file_type)]

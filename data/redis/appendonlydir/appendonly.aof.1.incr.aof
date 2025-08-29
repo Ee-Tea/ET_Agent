@@ -1,0 +1,25 @@
+*1
+$5
+MULTI
+*2
+$6
+SELECT
+$1
+0
+*3
+$3
+SET
+$39
+test_user:test_service:test_chat:shared
+$716
+{"question": ["소프트웨어 설계에서 사용되는 대표적인 추상화 기법이 아닌 것은?"], "options": [["자료 추상화", "제어 추상화", "과정 추상화", "강도 추상화"]], "answer": ["4"], "explanation": ["소프트웨어 설계에서 사용되는 대표적인 추상화 기법에는 자료 추상화, 제어 추상화, 과정 추상화가 있습니다. \n강도 추상화는 소프트웨어 설계에서 사용되는 대표적인 추상화 기법이 아닙니다. \n따라서, 보기 중에서 강도 추상화가 정답입니다.\n\n과목: 소프트웨어 설계"], "subject": ["일반"], "wrong_question": [], "weak_type": [], "notes": [], "user_answer": [], "retrieve_answer": ""}
+*3
+$9
+PEXPIREAT
+$39
+test_user:test_service:test_chat:shared
+$13
+1756693253946
+*1
+$4
+EXEC

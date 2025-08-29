@@ -9,12 +9,21 @@ import json, re
 from langchain_openai import ChatOpenAI
 from ..base_agent import BaseAgent
 from langchain_community.retrievers import BM25Retriever
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 import numpy as np
 import asyncio, sys
 from concurrent.futures import ThreadPoolExecutor
 import copy
-
+from datasets import Dataset, Features, Value, Sequence
+from ragas import evaluate
+from ragas.metrics import faithfulness, answer_relevancy
+import json
+import os, json, glob
+from datetime import datetime
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_milvus import Milvus
+from pymilvus import connections, Collection
+import numpy as _np
+import pandas as _pd
 
 try:
     from rank_bm25 import BM25Okapi  # optional fallback(bm25 인덱스 없이 후보군 위에서 sparse 스코어링)
@@ -38,7 +47,19 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
-    
+ragas_llm = ChatOpenAI(
+    api_key=GROQAI_API_KEY,
+    base_url=OPENAI_BASE_URL,
+    model=OPENAI_LLM_MODEL,
+    temperature=LLM_TEMPERATURE,
+    max_tokens=min(LLM_MAX_TOKENS, 2048),
+)
+
+ragas_emb = HuggingFaceEmbeddings(
+    model_name="jhgan/ko-sroberta-multitask",
+    model_kwargs={"device": "cpu"}
+)
+
 # ✅ 상태 정의
 class SolutionState(TypedDict):
     # 사용자 입력
@@ -206,6 +227,38 @@ class SolutionAgent(BaseAgent):
         opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
         return f"{(problem or '').strip()}\n{opts}"
     
+    @staticmethod
+    def _safe_eval_metric(ds, metric, llm_obj, emb_obj, name: str) -> float:
+        from ragas import evaluate
+        try:
+            res = evaluate(ds, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
+            score = 0.0
+            if hasattr(res, "scores"):
+                sc = res.scores.get(name, 0.0)
+                if isinstance(sc, (list, tuple)):
+                    score = float(sc[0]) if len(sc) else 0.0
+                else:
+                    try:
+                        import numpy as _np, pandas as _pd
+                        if isinstance(sc, _np.ndarray):
+                            score = float(sc.item() if sc.size == 1 else sc[0])
+                        elif isinstance(sc, _pd.Series):
+                            score = float(sc.iloc[0])
+                        else:
+                            score = float(sc)
+                    except Exception:
+                        score = float(sc) if sc is not None else 0.0
+            elif hasattr(res, "to_pandas"):
+                df_res = res.to_pandas()
+                if name in df_res.columns and len(df_res) > 0:
+                    score = float(df_res[name].iloc[0])
+            print(f"[RAGAS:{name}] {score:.3f}")
+            return score
+        except Exception as e:
+            print(f"[RAGAS:{name}] 실패 → 0.0 처리 ({repr(e)})")
+            return 0.0
+
+    
     #----------------------------------------create graph------------------------------------------------------
 
     def _create_graph(self) -> StateGraph:
@@ -217,7 +270,7 @@ class SolutionAgent(BaseAgent):
         graph = StateGraph(SolutionState)
 
         # 공통 처리
-        graph.add_node("search_similarity", self._search_similar_problems)
+        graph.add_node("search_problems", self._search_similar_problems)
         graph.add_node("search_concepts", self._search_concepts_summary)
         graph.add_node("retrieve_parallel", self._retrieve_parallel)
         graph.add_node("generate_solution", self._generate_solution)
@@ -257,39 +310,35 @@ class SolutionAgent(BaseAgent):
 
         # ---------- (1) Dense 후보 넉넉히 수집 ----------
         try:
-            # 점수 포함 버전이 가능하면 사용(없으면 아래 except에서 대체)
             dense_scored = vectorstore_p.similarity_search_with_score(q, k=self.RETRIEVAL_FETCH_K)
             dense_docs = [d for d, _ in dense_scored]
             dense_scores = {id(d): float(s) for d, s in dense_scored}
-            # 주의: 어떤 백엔드는 "코사인거리/거리" 등 낮을수록 유사함. 랭크 기반으로 치환해 안정화.
             print(f"[Dense] fetched: {len(dense_docs)}")
         except Exception as e:
             print(f"[Dense] similarity_search_with_score 실패 → {e} → score 없이 fallback")
             dense_docs = vectorstore_p.similarity_search(q, k=self.RETRIEVAL_FETCH_K)
-            dense_scores = {id(d): 1.0/(r+1) for r, d in enumerate(dense_docs)}  # 랭크 기반 가중치
+            dense_scores = {id(d): 1.0/(r+1) for r, d in enumerate(dense_docs)}
 
         # ---------- (2) Sparse 후보(BM25) 결합 ----------
         sparse_docs = []
-        sparse_scores = {}  # id(doc) → score (rank 기반 또는 점수 정규화)
+        sparse_scores = {}
 
         if self.bm25_retriever is not None:
             try:
                 sparse_docs = self.bm25_retriever.get_relevant_documents(q)[:self.RETRIEVAL_FETCH_K]
                 for r, d in enumerate(sparse_docs):
-                    sparse_scores[id(d)] = 1.0/(r+1)  # 랭크 기반
+                    sparse_scores[id(d)] = 1.0/(r+1)
                 print(f"[BM25] fetched: {len(sparse_docs)}")
             except Exception as e:
                 print(f"[BM25] 실패 → {e}")
 
         elif HAS_RANK_BM25 and dense_docs:
-            # 별도 인덱스가 없다면, dense 후보군 위에서만 BM25 근사 스코어 계산
             try:
                 def tok(s: str) -> List[str]:
                     return re.findall(r"[가-힣A-Za-z0-9_]+", (s or "").lower())
                 corpus_toks = [tok(d.page_content) for d in dense_docs]
                 bm25 = BM25Okapi(corpus_toks)
                 q_scores = bm25.get_scores(tok(q))
-                # 점수 정규화 (0~1)
                 if q_scores is not None and len(q_scores) == len(dense_docs):
                     min_s, max_s = float(min(q_scores)), float(max(q_scores))
                     rng = (max_s - min_s) or 1.0
@@ -300,12 +349,16 @@ class SolutionAgent(BaseAgent):
                 print(f"[BM25-lite] 실패 → {e}")
 
         # ---------- (3) Dense + Sparse 앙상블 ----------
-        # 동일 문서가 양쪽에 섞여 들어올 수 있으므로 content+metadata 일부로 키를 만든다
         def _safe_meta_str(md: Dict[str, Any]) -> str:
             try:
-                # numpy 타입 등은 str로 변환
-                norm = {str(k): (v.item() if isinstance(v, (np.generic,)) else (str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v))
-                        for k, v in (md or {}).items()}
+                norm = {
+                    str(k): (
+                        v.item() if hasattr(v, "item") else (
+                            str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                        )
+                    )
+                    for k, v in (md or {}).items()
+                }
                 return json.dumps(norm, ensure_ascii=False, sort_keys=True)
             except Exception:
                 try:
@@ -314,20 +367,16 @@ class SolutionAgent(BaseAgent):
                     return ""
 
         def key_of(doc: Document) -> Tuple[str, str]:
-            return ( (doc.page_content or "")[:150], _safe_meta_str(doc.metadata)[:150] )
+            return ((doc.page_content or "")[:150], _safe_meta_str(doc.metadata)[:150])
 
         pool: Dict[Tuple[str,str], Dict[str, Any]] = {}
-        # dense 쪽부터 적재
         for r, d in enumerate(dense_docs):
             k = key_of(d)
             pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
-            # 랭크 기반 가중치(안전)
             wd = 1.0/(r+1)
-            # 점수 있으면 둘 중 큰 것을 사용
             wd = max(wd, dense_scores.get(id(d), 0.0))
             pool[k]["dense"] = max(pool[k]["dense"], wd)
 
-        # sparse 쪽 반영
         for r, d in enumerate(sparse_docs):
             k = key_of(d)
             pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
@@ -335,14 +384,12 @@ class SolutionAgent(BaseAgent):
             ws = max(ws, sparse_scores.get(id(d), 0.0))
             pool[k]["sparse"] = max(pool[k]["sparse"], ws)
 
-        # 가중합
-        alpha = self.HYBRID_ALPHA  # 0~1, 1이면 dense만
+        alpha = self.HYBRID_ALPHA
         scored = []
         for k, v in pool.items():
             score = alpha * v["dense"] + (1.0 - alpha) * v["sparse"]
             scored.append((v["doc"], score))
 
-        # 상위 K 추림
         scored.sort(key=lambda x: x[1], reverse=True)
         hybrid_top = [d for d, _ in scored[:self.HYBRID_TOPK]]
         print(f"[Hybrid] pool={len(pool)} → top{self.HYBRID_TOPK} 선정")
@@ -351,7 +398,7 @@ class SolutionAgent(BaseAgent):
         try:
             if self.reranker is not None and len(hybrid_top) > 0:
                 pairs = [[q, d.page_content] for d in hybrid_top]
-                scores = self.reranker.predict(pairs)  # shape: (len(hybrid_top),)
+                scores = self.reranker.predict(pairs)
                 order = sorted(range(len(hybrid_top)), key=lambda i: float(scores[i]), reverse=True)
                 reranked = [hybrid_top[i] for i in order[:self.RERANK_TOPK]]
                 print(f"[Rerank] 최종 top{self.RERANK_TOPK} (CrossEncoder)")
@@ -362,13 +409,62 @@ class SolutionAgent(BaseAgent):
             print(f"[Rerank] 실패 → hybrid_top 그대로 사용: {e}")
             reranked = hybrid_top[:self.RERANK_TOPK]
 
+        # ---------- (4.5) Near-duplicate 제거 & 상한 3개 ----------
+        MAX_KEEP = getattr(self, "PROBLEM_MAXK", 3)              # 최종 유지 개수 (기본 3)
+        SIM_THRESHOLD = getattr(self, "PROBLEM_SIM_THRESHOLD", 0.82)  # 유사도 임계값
+
+        def _norm_text(s: str) -> str:
+            s = (s or "").lower().strip()
+            s = re.sub(r"\s+", " ", s)
+            return s
+
+        def _tokens(s: str) -> set:
+            return set(re.findall(r"[가-힣a-z0-9]{2,}", _norm_text(s)))
+
+        def _char_ngrams(s: str, n: int = 5) -> set:
+            t = _norm_text(s)
+            return set(t[i:i+n] for i in range(max(0, len(t) - n + 1)))
+
+        def _jaccard(a: set, b: set) -> float:
+            if not a or not b:
+                return 0.0
+            inter = len(a & b)
+            if inter == 0:
+                return 0.0
+            return inter / float(len(a | b))
+
+        def _similar(a_txt: str, b_txt: str) -> float:
+            A_tok, B_tok = _tokens(a_txt), _tokens(b_txt)
+            A_ng,  B_ng  = _char_ngrams(a_txt, 5), _char_ngrams(b_txt, 5)
+            j_tok = _jaccard(A_tok, B_tok)
+            j_ng  = _jaccard(A_ng,  B_ng)
+            return 0.5 * (j_tok + j_ng)
+
+        # 문제 본문(content) 기준으로 중복 제거(보기/메타는 보조)
+        deduped = []
+        for d in reranked:
+            txt = (d.page_content or "").strip()
+            if not txt:
+                continue
+            is_dup = False
+            for kept in deduped:
+                kept_txt = (kept.page_content or "").strip()
+                if _similar(txt, kept_txt) >= SIM_THRESHOLD:
+                    is_dup = True
+                    break
+            if not is_dup:
+                deduped.append(d)
+            if len(deduped) >= MAX_KEEP:
+                break
+
+        print(f"[Dedup(problems)] reranked={len(reranked)} → deduped={len(deduped)} (max={MAX_KEEP}, thr={SIM_THRESHOLD})")
+        results = deduped  # 최종 문서들 (최대 3개)
 
         # ---------- (5) 기존 포맷/저장 ----------
-        results = reranked  # 최종 문서들
         similar_questions = []
         for i, doc in enumerate(results, start=1):
             metadata = doc.metadata or {}
-            options = json.loads(metadata.get("options", "[]")) if isinstance(metadata.get("options"), str) else metadata.get("options", []) or []
+            options = json.loads(metadata.get("options", "[]" )) if isinstance(metadata.get("options"), str) else (metadata.get("options", []) or [])
             answer = metadata.get("answer", "")
             explanation = metadata.get("explanation", "")
             subject = metadata.get("subject", "기타")
@@ -398,6 +494,7 @@ class SolutionAgent(BaseAgent):
         print(f"유사 문제 {len(results)}개 (dense fetch={len(dense_docs)}, hybrid_pool={len(pool)})")
         print("🔍 [1단계] 유사 문제 검색 함수 종료")
         return state
+
     
     def _search_concepts_summary(self, state: SolutionState) -> SolutionState:
         print("\n📚 [1-확장] 개념 요약 컨텍스트 검색 시작")
@@ -507,9 +604,62 @@ class SolutionAgent(BaseAgent):
             print(f"[Rerank(concepts)] 실패 → hybrid_top 그대로 사용: {e}")
             reranked = hybrid_top[:self.RERANK_TOPK]
 
+        # ---------- (4.5) Near-duplicate 제거 & 상한 3개 ----------
+        #   - 거의 같은 문단이 중복되는 현상 방지
+        #   - 토큰 Jaccard 와 5-gram Jaccard 의 평균 유사도가 threshold 이상이면 중복으로 간주
+        MAX_KEEP = getattr(self, "CONCEPT_MAXK", 3)  # 기본 3개로 제한
+        SIM_THRESHOLD = getattr(self, "CONCEPT_SIM_THRESHOLD", 0.82)
+
+        def _norm_text(s: str) -> str:
+            s = (s or "").lower().strip()
+            s = re.sub(r"\s+", " ", s)
+            return s
+
+        def _tokens(s: str) -> set:
+            return set(re.findall(r"[가-힣a-z0-9]{2,}", _norm_text(s)))
+
+        def _char_ngrams(s: str, n: int = 5) -> set:
+            t = _norm_text(s)
+            return set(t[i:i+n] for i in range(max(0, len(t) - n + 1)))
+
+        def _jaccard(a: set, b: set) -> float:
+            if not a or not b:
+                return 0.0
+            inter = len(a & b)
+            if inter == 0:
+                return 0.0
+            return inter / float(len(a | b))
+
+        def _similar(a_txt: str, b_txt: str) -> float:
+            A_tok, B_tok = _tokens(a_txt), _tokens(b_txt)
+            A_ng,  B_ng  = _char_ngrams(a_txt, 5), _char_ngrams(b_txt, 5)
+            j_tok = _jaccard(A_tok, B_tok)
+            j_ng  = _jaccard(A_ng,  B_ng)
+            return 0.5 * (j_tok + j_ng)
+
+        deduped = []
+        for d in reranked:
+            txt = (d.metadata.get("content") if d.metadata else None) or d.page_content or ""
+            if not txt.strip():
+                continue
+            is_dup = False
+            for kept in deduped:
+                kept_txt = (kept.metadata.get("content") if kept.metadata else None) or kept.page_content or ""
+                if _similar(txt, kept_txt) >= SIM_THRESHOLD:
+                    is_dup = True
+                    break
+            if not is_dup:
+                deduped.append(d)
+            if len(deduped) >= MAX_KEEP:
+                break
+
+        print(f"[Dedup(concepts)] reranked={len(reranked)} → deduped={len(deduped)} (max={MAX_KEEP}, thr={SIM_THRESHOLD})")
+
+        final_docs = deduped  # 최종 사용 문서(최대 3개)
+
         # ---------- (5) LLM 프롬프트용 정리 ----------
         chunks, cleaned_docs = [], []
-        for idx, d in enumerate(reranked, start=1):
+        for idx, d in enumerate(final_docs, start=1):
             md = d.metadata or {}
             content = (md.get("content") or d.page_content or "").strip()
             subject = (md.get("subject") or "").strip()
@@ -546,8 +696,8 @@ class SolutionAgent(BaseAgent):
         state["concept_contexts_text"] = r_con.get("concept_contexts_text", "")
 
         # 디버그 로그
-        print(f"[Parallel] similar={len(state['retrieved_docs'])}, "
-            f"concepts={len(state['concept_contexts'])}")
+        print(f"[Parallel] similar_problems={len(state['retrieved_docs'])}, "
+            f"similar_concepts={len(state['concept_contexts'])}")
         return state
 
 
@@ -559,11 +709,24 @@ class SolutionAgent(BaseAgent):
         llm_gen = self._llm(0.5)  
 
         problems_ctx = state.get("problems_contexts_text", "")
-        print("유사 문제들 길이:", len(problems_ctx))
-        print("유사 문제들: ", problems_ctx[:500])
-        concept_ctx = state.get("concept_contexts_text", "")
-        print("개념 컨텍스트 길이:", len(concept_ctx))
-        print("개념 컨텍스트: ", concept_ctx[:500])
+        concept_ctx  = state.get("concept_contexts_text", "")
+
+        def preview_context(ctx_text: str, label: str):
+            print(f"{label} 전체 길이: {len(ctx_text)}")
+            if not ctx_text.strip():
+                print(f"{label}: (비어 있음)")
+                return
+            # 블록 단위로 분리 (두 줄 개행 기준)
+            blocks = [b.strip() for b in ctx_text.split("\n\n") if b.strip()]
+            for i, b in enumerate(blocks[:3], 1):   # 최대 3개까지만
+                first_line = b.splitlines()[0]
+                print(f" - {label} {i}: {first_line[:120]}...")  # 앞 120자만
+            if len(blocks) > 3:
+                print(f" ... (총 {len(blocks)}개 중 상위 3개만 표시)")
+
+        # 출력
+        preview_context(problems_ctx, "유사문제")
+        preview_context(concept_ctx, "개념컨텍스트")
 
         prompt = f"""
             사용자가 입력한 질문:
@@ -607,44 +770,113 @@ class SolutionAgent(BaseAgent):
 
         return state
 
-    # ✅ 정합성 검증 (간단히 길이 기준 사용)
 
     def _validate_solution(self, state: SolutionState) -> SolutionState:
-        print("\n🧐 [3단계] 정합성 검증 시작")
-        
-        llm = self._llm(0)
-
-        validation_prompt = f"""
-        사용자 요구사항: {state['user_input_txt']}
-
-        문제 질문: {state['user_problem']}
-        문제 보기: {state['user_problem_options']}
-
-        생성된 정답: {state['generated_answer']}
-        생성된 풀이: {state['generated_explanation']}
-        생성된 과목: {state['generated_subject']}
-
-        생성된 해답과 풀이, 과목이 문제와 사용자 요구사항에 맞고, 논리적 오류나 잘못된 정보가 없습니까?
-        적절하다면 '네', 그렇지 않다면 '아니오'로만 답변하세요.
         """
+        RAGAS 검증 (컨텍스트 무가공):
+        - faithfulness / answer_relevancy
+        - 검증용 LLM은 넉넉한 max_tokens/timeout
+        - 스키마 명시 + 지표 분리 평가
+        """
+        print("\n🧐 [3단계] RAGAS 기반 정합성 검증 시작 (컨텍스트 무가공)")
 
-        validation_response = llm.invoke(validation_prompt)
-        result_text = validation_response.content.strip().lower()
+        # --- 필요한 import (파일 상단에 이미 있다면 중복 제거) ---
+        import os
+        from datasets import Dataset, Features, Value, Sequence
+        from ragas import evaluate
+        from ragas.metrics import faithfulness, answer_relevancy
+        from langchain_openai import ChatOpenAI
+        from langchain_huggingface import HuggingFaceEmbeddings
 
-        # ✅ '네'가 포함된 응답일 경우에만 유효한 풀이로 판단
-        print("📌 검증 응답:", result_text)
-        state["validated"] = "네" in result_text
-        
+        # 임계값
+        f_min = float(os.getenv("VALIDATE_FAITHFULNESS_MIN", "0.65"))
+        a_min = float(os.getenv("VALIDATE_ANS_REL_MIN", "0.55"))
+
+        # 질의/답변 텍스트
+        question = (state.get("user_input_txt") or "").strip()
+        prob = (state.get("user_problem") or "").strip()
+        opts = state.get("user_problem_options") or []
+        if opts:
+            opts_blob = "\n".join(f"{i+1}) {o}" for i, o in enumerate(opts))
+            question = f"{question}\n\n[문제]\n{prob}\n\n[보기]\n{opts_blob}"
+
+        answer = (
+            f"정답: {state.get('generated_answer','')}\n"
+            f"풀이: {state.get('generated_explanation','')}\n"
+            f"과목: {state.get('generated_subject','')}"
+        )
+
+        # 컨텍스트(무가공)
+        raw_context_candidates = [
+            state.get("generation_context_text"),
+            state.get("problems_contexts_text"),
+            state.get("concept_contexts_text"),
+            state.get("extra_context_text"),
+        ]
+        ctxs = [c for c in raw_context_candidates if isinstance(c, str) and len(c) > 0]
+
+        if not ctxs:
+            print("⚠️ RAGAS 검증 스킵: 생성 시 전달된 컨텍스트 텍스트가 비었습니다.")
+            state["validated"] = False
+            state["retry_count"] = state.get("retry_count", 0) + 1
+            return state
+
+        print(f"[Validate] using {len(ctxs)} raw context block(s) exactly as used for generation")
+
+        # ---------- 평가 입력 (스키마 명시) ----------
+        features = Features({
+            "question": Value("string"),
+            "answer":   Value("string"),
+            "contexts": Sequence(Value("string")),
+        })
+        # 문자열 강제
+        ctxs = [str(c) for c in ctxs]
+        if any(len(c.strip()) == 0 for c in ctxs):
+            print("[Validate] 빈 컨텍스트 블록이 포함되어 있어 RAGAS가 실패할 수 있습니다.")
+        data = {"question":[question], "answer":[answer], "contexts":[ctxs]}
+        ds = Dataset.from_dict(data, features=features)
+
+        # ---------- 검증용 LLM/임베딩 ----------
+        VALIDATION_LLM_MODEL = os.getenv("VALIDATION_LLM_MODEL", os.getenv("OPENAI_LLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"))
+        VALIDATION_BASE_URL  = os.getenv("VALIDATION_BASE_URL",  os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"))
+        VALIDATION_API_KEY   = os.getenv("VALIDATION_API_KEY",   os.getenv("GROQAI_API_KEY", ""))
+
+        VALIDATION_MAX_TOKENS = int(os.getenv("VALIDATION_LLM_MAX_TOKENS", "4096"))
+        VALIDATION_TIMEOUT    = int(os.getenv("VALIDATION_LLM_TIMEOUT", "120"))
+
+        validation_llm = ChatOpenAI(
+            api_key=VALIDATION_API_KEY,
+            base_url=VALIDATION_BASE_URL,
+            model=VALIDATION_LLM_MODEL,
+            temperature=0.0,
+            max_tokens=VALIDATION_MAX_TOKENS,
+            timeout=VALIDATION_TIMEOUT,
+        )
+        validation_emb = HuggingFaceEmbeddings(
+            model_name=os.getenv("VALIDATION_EMB_MODEL", "jhgan/ko-sroberta-multitask"),
+            model_kwargs={"device": "cpu"}
+        )
+
+        # ---------- ✅ 지표 분리 평가만 실행 (배치 평가 제거) ----------
+        print(f"[RAGAS] evaluating 1 sample with thresholds f>={f_min}, a>={a_min} (tokens={VALIDATION_MAX_TOKENS}, timeout={VALIDATION_TIMEOUT}s)")
+        f = self._safe_eval_metric(ds, faithfulness,     validation_llm, validation_emb, "faithfulness")
+        a = self._safe_eval_metric(ds, answer_relevancy, validation_llm, validation_emb, "answer_relevancy")
+
+        print(f"[RAGAS] faithfulness={f:.3f}, answer_relevancy={a:.3f}")
+        state["validated"] = bool((f >= f_min) and (a >= a_min))
+
+        # 재시도 정책
         if not state["validated"]:
             state["retry_count"] = state.get("retry_count", 0) + 1
             if state["retry_count"] >= 5:
-                print("⚠️ 검증 5회 실패 → 그래도 결과를 저장 단계로 진행합니다.")
+                print("⚠️ RAGAS 임계 미달 5회 → 결과를 저장 단계로 강제 진행")
             else:
-                print(f"⚠️ 검증 실패 (재시도 {state['retry_count']}/5)")
+                print(f"⚠️ RAGAS 임계 미달 → 재생성 시도 ({state['retry_count']}/5)")
         else:
-            print("✅ 검증 결과: 통과")
+            print("✅ RAGAS 검증 통과")
 
         return state
+
 
 
     # ✅ 임베딩 후 벡터 DB 저장
@@ -894,64 +1126,134 @@ class SolutionAgent(BaseAgent):
         return final_state
 
 
+# ====== replace the entire __main__ block in solution_agent.py ======
 if __name__ == "__main__":
+    
 
-    # ✅ Milvus 연결 및 벡터스토어 생성
-    embedding_model = HuggingFaceEmbeddings(
-        model_name="jhgan/ko-sroberta-multitask",
-        model_kwargs={"device": "cpu"}
-    )
+    # ----------------------------
+    # 고정 실행 파라미터 (원하면 여기만 수정)
+    # ----------------------------
+    JSON_DIR        = os.getenv("PROBLEMS_JSON_DIR", "./teacher/exam/test_parsed_exam_json")  # 폴더 경로
+    MILVUS_HOST     = os.getenv("MILVUS_HOST", "localhost")
+    MILVUS_PORT     = os.getenv("MILVUS_PORT", "19530")
+    PROBLEMS_COLL   = os.getenv("PROBLEMS_COLL", "problems")
+    CONCEPT_COLL    = os.getenv("CONCEPT_COLL", "concept_summary")
+    INSTRUCTION     = os.getenv("AGENT_INSTRUCTION", "정답 번호와 풀이, 과목을 알려줘.")  # ← input() 제거
+    RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "200"))
+    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "0"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
 
-    if "default" in connections.list_connections():
-        connections.disconnect("default")
-    connections.connect(alias="default", host="localhost", port="19530")
+    # --- app.py 참고한 벡터 연결 함수 ---
+    def init_vectorstore(host: str, port: str, coll: str,
+                         *, text_field: str | None = None,
+                         vector_field: str | None = None,
+                         metric_type: str | None = None) -> Milvus:
+        emb = HuggingFaceEmbeddings(
+            model_name="jhgan/ko-sroberta-multitask",
+            model_kwargs={"device": "cpu"},
+        )
+        if "default" not in connections.list_connections():
+            connections.connect(alias="default", host=host, port=port)
 
-    vectorstore_p = Milvus(
-        embedding_function=embedding_model,
-        collection_name="problems",
-        connection_args={"host": "localhost", "port":"19530"}
-    )
+        actual_metric = metric_type
+        try:
+            col = Collection(coll)
+            if col.indexes:
+                params = col.indexes[0].params or {}
+                actual_metric = params.get("metric_type") or params.get("METRIC_TYPE") or actual_metric
+        except Exception:
+            pass
+        if not actual_metric:
+            actual_metric = "L2"
 
-    vectorstore_c = Milvus(
-        embedding_function=embedding_model,
-        collection_name="concept_summary",
-        connection_args={"host": "localhost", "port":"19530"}
+        kwargs = {
+            "embedding_function": emb,
+            "collection_name": coll,
+            "connection_args": {"host": host, "port": port},
+            "search_params": {"metric_type": actual_metric, "params": {"nprobe": 10}},
+        }
+        if text_field is not None:
+            kwargs["text_field"] = text_field
+        if vector_field is not None:
+            kwargs["vector_field"] = vector_field
+        return Milvus(**kwargs)
+
+    # --- JSON 폴더 내 파일 목록 ---
+    if not os.path.isdir(JSON_DIR):
+        raise FileNotFoundError(f"문제 JSON 폴더를 찾을 수 없습니다: {JSON_DIR}")
+    json_files = sorted(glob.glob(os.path.join(JSON_DIR, "*.json")))
+    if not json_files:
+        raise ValueError(f"{JSON_DIR} 안에 .json 파일이 없습니다.")
+
+    # --- Milvus 벡터스토어 초기화 ---
+    vectorstore_p = init_vectorstore(MILVUS_HOST, MILVUS_PORT, PROBLEMS_COLL)
+    vectorstore_c = init_vectorstore(
+        MILVUS_HOST, MILVUS_PORT, CONCEPT_COLL,
+        text_field="content",
+        vector_field="embedding",
     )
 
     agent = SolutionAgent()
 
-    # 그래프 시각화 (선택)
-    # try:
-    #     graph_image_path = "solution_agent_workflow.png"
-    #     with open(graph_image_path, "wb") as f:
-    #         f.write(agent.graph.get_graph().draw_mermaid_png())
-    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    # except Exception as e:
-    #     print(f"그래프 시각화 중 오류 발생: {e}")
-    #     print("워크플로우는 정상적으로 작동합니다.")
+    def run_one(p: dict) -> dict:
+        return agent.invoke(
+            user_input_txt=INSTRUCTION,
+            user_problem=p.get("question", "") or "",
+            user_problem_options=p.get("options", []) or [],
+            vectorstore_p=vectorstore_p,
+            vectorstore_c=vectorstore_c,
+            recursion_limit=RECURSION_LIMIT,
+        )
 
-    user_input_txt = input("\n❓ 사용자 질문: ").strip()
-    user_problem = input("\n❓ 사용자 문제: ").strip()
-    user_problem_options_raw = input("\n❓ 사용자 보기 (쉼표로 구분): ").strip()
-    user_problem_options = [opt.strip() for opt in user_problem_options_raw.split(",") if opt.strip()]
+    # --- 각 파일 순회 실행 ---
+    for jf in json_files:
+        print(f"\n=== JSON 파일 처리 시작: {jf} ===")
+        with open(jf, "r", encoding="utf-8") as f:
+            raw = json.load(f)
 
-    final_state = agent.invoke(
-        user_input_txt=user_input_txt,
-        user_problem=user_problem,
-        user_problem_options=user_problem_options,
-    )
+        # 1) 파일 구조: dict에 "questions"가 있으면 그걸 사용, 아니면 list 그대로 사용
+        if isinstance(raw, dict) and isinstance(raw.get("questions"), list):
+            items = raw["questions"]
+        elif isinstance(raw, list):
+            items = raw
+        else:
+            raise ValueError(f"{jf}: 지원하지 않는 JSON 구조 (list 또는 {{'questions':[...]}} )")
 
-    # # 결과를 JSON 파일로 저장
-    # results = final_state.get("results", [])
-    # results_data = {
-    #     "timestamp": datetime.now().isoformat(),
-    #     "user_input_txt": final_state.get("user_input_txt",""),
-    #     "total_results": len(results),
-    #     "results": results,
-    # }
+        # 2) ✅ 인덱싱만: question / options 두 필드만 뽑아서 전달
+        #    - options가 list가 아니거나 없는 항목은 건너뜀 (불필요한 정규화는 하지 않음)
+        problems = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            q = it.get("question")
+            opts = it.get("options")
+            if isinstance(q, str) and isinstance(opts, list):
+                problems.append({"question": q, "options": opts})
 
-    # results_filename = os.path.join(f"solution_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    # os.makedirs(os.path.dirname(results_filename), exist_ok=True)
-    # with open(results_filename, "w", encoding="utf-8") as f:
-    #     json.dump(results_data, f, ensure_ascii=False, indent=2)
-    # print(f"✅ 해답 결과가 JSON 파일로 저장되었습니다: {results_filename}")
+        if not problems:
+            print(f"[WARN] {jf}: question/options 형식의 문제를 찾지 못했습니다. 건너뜀.")
+            continue
+
+        print(f"[LOAD] {jf}: {len(problems)}문항 (question/options만 사용)")
+
+        outputs = []
+        if ONLY_INDEX and ONLY_INDEX > 0:
+            idx = ONLY_INDEX
+            if not (1 <= idx <= len(problems)):
+                raise IndexError(f"--index={idx} 범위 벗어남 (1..{len(problems)}) in {jf}")
+            res_state = run_one(problems[idx - 1])
+            outputs.append((idx, (res_state.get("results") or [{}])[-1]))
+        else:
+            for i, p in enumerate(problems, 1):
+                res_state = run_one(p)
+                outputs.append((i, (res_state.get("results") or [{}])[-1]))
+
+        # --- 콘솔 출력 ---
+        print("\n================= 결과 =================")
+        print(f"- 실행시각: {datetime.now().isoformat(timespec='seconds')}")
+        print(f"- 입력파일: {jf}")
+        for i, r in outputs:
+            print(f"\n# 결과 {i}")
+            print(f"- 정답(번호): {r.get('generated_answer','-')}")
+            print(f"- 과목: {r.get('generated_subject','-')}")
+            print(f"- 풀이:\n{r.get('generated_explanation','-')}")
+        print("========================================\n")

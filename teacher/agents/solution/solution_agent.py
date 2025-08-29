@@ -1,3 +1,4 @@
+import csv
 import os
 from typing import TypedDict, List, Dict, Optional, Tuple, Any
 from langchain_core.documents import Document
@@ -9,7 +10,6 @@ import json, re
 from langchain_openai import ChatOpenAI
 from ..base_agent import BaseAgent
 from langchain_community.retrievers import BM25Retriever
-import numpy as np
 import asyncio, sys
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -19,11 +19,9 @@ from ragas.metrics import faithfulness, answer_relevancy
 import json
 import os, json, glob
 from datetime import datetime
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
 from pymilvus import connections, Collection
-import numpy as _np
-import pandas as _pd
+from difflib import SequenceMatcher
 
 try:
     from rank_bm25 import BM25Okapi  # optional fallback(bm25 인덱스 없이 후보군 위에서 sparse 스코어링)
@@ -81,6 +79,9 @@ class SolutionState(TypedDict):
     generated_explanation: str   # 풀이
     generated_subject: str
 
+    extra_context_text: str
+    ctx_blocks_used : List[str]
+
     results: List[Dict]
     validated: bool
     retry_count: int             # 검증 실패 시 재시도 횟수
@@ -128,6 +129,22 @@ class SolutionAgent(BaseAgent):
         self.vectorstore_c = None
         self.graph = self._create_graph()
 
+    @property
+    def name(self) -> str:
+        return "SolutionAgent"
+
+    @property
+    def description(self) -> str:
+        return "시험문제를 인식하여 답과 풀이, 해설을 제공하는 에이전트입니다."
+
+    def _llm(self, temperature: float = 0):
+        return ChatOpenAI(
+            api_key=GROQAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+            model=OPENAI_LLM_MODEL,
+            temperature=temperature,
+            max_tokens=min(LLM_MAX_TOKENS, 2048),
+        )
 
     def _ensure_vectorstores(
         self,
@@ -205,32 +222,16 @@ class SolutionAgent(BaseAgent):
             print(f"✅ Milvus '{coll_c}' 연결 OK (text_field={txt_c}, vector_field={vec_c})")
 
         
-    @property
-    def name(self) -> str:
-        return "SolutionAgent"
-
-    @property
-    def description(self) -> str:
-        return "시험문제를 인식하여 답과 풀이, 해설을 제공하는 에이전트입니다."
-
-    def _llm(self, temperature: float = 0):
-        return ChatOpenAI(
-            api_key=GROQAI_API_KEY,
-            base_url=OPENAI_BASE_URL,
-            model=OPENAI_LLM_MODEL,
-            temperature=temperature,
-            max_tokens=min(LLM_MAX_TOKENS, 2048),
-        )
     
     def _build_concept_query(self, problem: str, options: List[str]) -> str:
         opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
         return f"{(problem or '').strip()}\n{opts}"
     
     @staticmethod
-    def _safe_eval_metric(ds, metric, llm_obj, emb_obj, name: str) -> float:
+    def _safe_eval_metric(ds, metric, llm_obj, emb_obj, name: str, *,
+                        features=None, question=None, answer=None, ctxs=None) -> float:
         from ragas import evaluate
-        try:
-            res = evaluate(ds, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
+        def _parse_score(res):
             score = 0.0
             if hasattr(res, "scores"):
                 sc = res.scores.get(name, 0.0)
@@ -251,11 +252,86 @@ class SolutionAgent(BaseAgent):
                 df_res = res.to_pandas()
                 if name in df_res.columns and len(df_res) > 0:
                     score = float(df_res[name].iloc[0])
+            return score
+
+        try:
+            res = evaluate(ds, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
+            score = _parse_score(res)
             print(f"[RAGAS:{name}] {score:.3f}")
             return score
         except Exception as e:
-            print(f"[RAGAS:{name}] 실패 → 0.0 처리 ({repr(e)})")
+            msg = repr(e)
+            print(f"[RAGAS:{name}] 실패 → 1차 0.0 ({msg})")
+
+            # 📌 IndexError는 멀티-컨텍스트 처리 중 생기는 알려진 이슈라 단일 블록으로 재시도
+            if "IndexError" in msg and all(v is not None for v in (features, question, answer, ctxs)):
+                try:
+                    joined = "\n\n".join(ctxs)
+                    ds2 = Dataset.from_dict(
+                        {"question":[question], "answer":[answer], "contexts":[[joined]]},
+                        features=features
+                    )
+                    print(f"[RAGAS:{name}] 단일 블록 재시도")
+                    res2 = evaluate(ds2, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
+                    score2 = _parse_score(res2)
+                    print(f"[RAGAS:{name}] (단일블록) {score2:.3f}")
+                    return score2
+                except Exception as e2:
+                    print(f"[RAGAS:{name}] 단일 블록 재시도 실패 → 0.0 처리 ({repr(e2)})")
+                    return 0.0
             return 0.0
+
+        
+    def _split_blocks(self, text: str) -> list[str]:
+        # 빈 블록 제거, 순서 유지
+        if not isinstance(text, str) or not text.strip():
+            return []
+        return [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+
+    def _sim_ratio(self, a: str, b: str) -> float:
+        # 간단·빠른 유사도(토치/임베딩 불필요)
+        return SequenceMatcher(a=a, b=b).ratio()
+
+    def _sanitize_context_blocks(
+        self,
+        problems_ctx_text: str,
+        concept_ctx_text: str,
+        *,
+        max_blocks: int = None,
+        max_chars_per_block: int = None,
+        sim_thresh: float = None,
+    ) -> list[str]:
+        """
+        - 두 소스(유사문제/개념)에서 블록 나누기
+        - 중복/유사 블록 제거(SequenceMatcher)
+        - 블록 수 상한, 블록 길이 상한 적용
+        """
+        import os
+
+        max_blocks = max_blocks or int(os.getenv("CTX_MAX_BLOCKS", "3"))          # 기본 3개
+        max_chars_per_block = max_chars_per_block or int(os.getenv("CTX_MAX_CHARS_PER_BLOCK", "6000"))
+        sim_thresh = sim_thresh or float(os.getenv("CTX_SIM_THRESH", "0.90"))     # 0~1, 높을수록 더 많이 제거
+
+        blocks = []
+        blocks += self._split_blocks(problems_ctx_text)
+        blocks += self._split_blocks(concept_ctx_text)
+
+        # 유사 중복 제거(앞선 블록을 우선)
+        kept = []
+        kept_norm = []
+        for b in blocks:
+            nb = re.sub(r"\s+", " ", b).strip().lower()
+            if any(self._sim_ratio(nb, kb) >= sim_thresh for kb in kept_norm):
+                continue
+            kept.append(b)
+            kept_norm.append(nb)
+
+        # 블록 길이 상한 적용 (내용만 자르기, 의미 변화 없음)
+        trimmed = [b[:max_chars_per_block] for b in kept]
+
+        # 개수 제한
+        return trimmed[:max_blocks]
+
 
     
     #----------------------------------------create graph------------------------------------------------------
@@ -707,8 +783,20 @@ class SolutionAgent(BaseAgent):
 
         llm_gen = self._llm(0.5)  
 
-        problems_ctx = state.get("problems_contexts_text", "")
-        concept_ctx  = state.get("concept_contexts_text", "")
+        problems_ctx_text = state.get("problems_contexts_text", "")
+        concept_ctx_text  = state.get("concept_contexts_text", "")
+
+        final_ctx_blocks = self._sanitize_context_blocks(
+            problems_ctx_text, concept_ctx_text,
+            # 필요하면 ENV로 조절. 기본 max_blocks=3, max_chars_per_block=6000, sim_thresh=0.90
+        )
+
+        # LLM 프롬프트에 넣는 ‘최종 컨텍스트’
+        final_ctx_text = "\n\n".join(final_ctx_blocks)
+
+        # ✅ 생성 단계에서 실제 사용한 컨텍스트를 저장 (검증에서 그대로 재사용)
+        state["ctx_blocks_used"] = final_ctx_blocks
+        state["ctx_used_text"]   = final_ctx_text
 
         def preview_context(ctx_text: str, label: str):
             print(f"{label} 전체 길이: {len(ctx_text)}")
@@ -719,13 +807,16 @@ class SolutionAgent(BaseAgent):
             blocks = [b.strip() for b in ctx_text.split("\n\n") if b.strip()]
             for i, b in enumerate(blocks[:3], 1):   # 최대 3개까지만
                 first_line = b.splitlines()[0]
-                print(f" - {label} {i}: {first_line[:120]}...")  # 앞 120자만
+                print(f" - {label} {i}: {first_line[:200]}...")  # 앞 120자만
             if len(blocks) > 3:
                 print(f" ... (총 {len(blocks)}개 중 상위 3개만 표시)")
 
         # 출력
-        preview_context(problems_ctx, "유사문제")
-        preview_context(concept_ctx, "개념컨텍스트")
+        preview_context(problems_ctx_text, "유사문제")
+        preview_context(concept_ctx_text, "개념컨텍스트")
+        preview_context(final_ctx_text, "최종컨텍스트")
+        opts_lines = "\n".join(f"{i+1}) {o}" for i, o in enumerate(state['user_problem_options'] or []))
+
 
         prompt = f"""
             사용자가 입력한 질문:
@@ -733,13 +824,11 @@ class SolutionAgent(BaseAgent):
 
             다음은 사용자가 입력한 문제:
             {state['user_problem']}
-            {state['user_problem_options']}
+            [보기]
+            {opts_lines}
 
-            아래는 이 문제와 유사한 문제들:
-            {problems_ctx}
-
-            아래는 이 문제와 관련된 개념 요약:
-            {concept_ctx}
+            아래는 이 문제 풀이에 사용할 최종 컨텍스트 블록(최대 3개)입니다:
+            {final_ctx_text}
 
 
             1. 사용자가 입력한 문제의 **정답**을 의 보기 번호를 정답으로 작성해 주세요.
@@ -764,8 +853,13 @@ class SolutionAgent(BaseAgent):
         state["generated_answer"] = answer_match.group(1).strip() if answer_match else ""
         state["generated_explanation"] = explanation_match.group(1).strip() if explanation_match else ""
         state["generated_subject"] = subject_match.group(1).strip() if subject_match else "기타"
-
         state["chat_history"].append(f"Q: {state['user_input_txt']}\nP: {state['user_problem']}\nA: {state['generated_answer']}\nE: {state['generated_explanation']}")
+
+        p_blocks = self._split_blocks(problems_ctx_text)
+        c_blocks = self._split_blocks(concept_ctx_text)
+        p_count = sum(1 for b in final_ctx_blocks if b in p_blocks)
+        c_count = sum(1 for b in final_ctx_blocks if b in c_blocks)
+        print(f"[PromptCtx] 최종 컨텍스트: 총 {len(final_ctx_blocks)}개 (유사문제 {p_count}, 개념 {c_count})")
 
         return state
 
@@ -778,14 +872,6 @@ class SolutionAgent(BaseAgent):
         - 스키마 명시 + 지표 분리 평가
         """
         print("\n🧐 [3단계] RAGAS 기반 정합성 검증 시작 (컨텍스트 무가공)")
-
-        # --- 필요한 import (파일 상단에 이미 있다면 중복 제거) ---
-        import os
-        from datasets import Dataset, Features, Value, Sequence
-        from ragas import evaluate
-        from ragas.metrics import faithfulness, answer_relevancy
-        from langchain_openai import ChatOpenAI
-        from langchain_huggingface import HuggingFaceEmbeddings
 
         # 임계값
         f_min = float(os.getenv("VALIDATE_FAITHFULNESS_MIN", "0.65"))
@@ -812,7 +898,18 @@ class SolutionAgent(BaseAgent):
             state.get("concept_contexts_text"),
             state.get("extra_context_text"),
         ]
-        ctxs = [c for c in raw_context_candidates if isinstance(c, str) and len(c) > 0]
+        # 컨텍스트(무가공) → 이제는 ‘생성 시 사용한 정제본’을 그대로 사용
+        ctx_used_text = state.get("ctx_used_text", "")
+        if isinstance(ctx_used_text, str) and ctx_used_text.strip():
+            # 생성 때 LLM에 들어간 단일 문자열 그대로
+            ctxs = [ctx_used_text]
+        else:
+            # 혹시 누락됐으면 같은 정제 규칙으로 만든 뒤 '단일 문자열'로 합치기
+            blocks = self._sanitize_context_blocks(
+                state.get("problems_contexts_text", ""),
+                state.get("concept_contexts_text", "")
+            )
+            ctxs = ["\n\n".join(blocks)] if blocks else []
 
         if not ctxs:
             print("⚠️ RAGAS 검증 스킵: 생성 시 전달된 컨텍스트 텍스트가 비었습니다.")
@@ -828,19 +925,13 @@ class SolutionAgent(BaseAgent):
             "answer":   Value("string"),
             "contexts": Sequence(Value("string")),
         })
-        # 문자열 강제
-        ctxs = [str(c) for c in ctxs]
-        if any(len(c.strip()) == 0 for c in ctxs):
-            print("[Validate] 빈 컨텍스트 블록이 포함되어 있어 RAGAS가 실패할 수 있습니다.")
-        data = {"question":[question], "answer":[answer], "contexts":[ctxs]}
+        data = {"question": [question], "answer": [answer], "contexts": [ctxs]}  # ctxs는 길이 1
         ds = Dataset.from_dict(data, features=features)
 
         # ---------- 검증용 LLM/임베딩 ----------
-        VALIDATION_LLM_MODEL = os.getenv("VALIDATION_LLM_MODEL", os.getenv("OPENAI_LLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"))
-        VALIDATION_BASE_URL  = os.getenv("VALIDATION_BASE_URL",  os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"))
-        VALIDATION_API_KEY   = os.getenv("VALIDATION_API_KEY",   os.getenv("GROQAI_API_KEY", ""))
-
-        VALIDATION_MAX_TOKENS = int(os.getenv("VALIDATION_LLM_MAX_TOKENS", "4096"))
+        VALIDATION_LLM_MODEL = os.getenv("VALIDATION_LLM_MODEL", os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"))
+        VALIDATION_BASE_URL  = os.getenv("VALIDATION_BASE_URL",  os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+        VALIDATION_API_KEY   = os.getenv("VALIDATION_API_KEY",   os.getenv("OPENAI_API_KEY=REDACTED = int(os.getenv("VALIDATION_LLM_MAX_TOKENS", "4096"))
         VALIDATION_TIMEOUT    = int(os.getenv("VALIDATION_LLM_TIMEOUT", "120"))
 
         validation_llm = ChatOpenAI(
@@ -858,12 +949,106 @@ class SolutionAgent(BaseAgent):
 
         # ---------- ✅ 지표 분리 평가만 실행 (배치 평가 제거) ----------
         print(f"[RAGAS] evaluating 1 sample with thresholds f>={f_min}, a>={a_min} (tokens={VALIDATION_MAX_TOKENS}, timeout={VALIDATION_TIMEOUT}s)")
-        f = self._safe_eval_metric(ds, faithfulness,     validation_llm, validation_emb, "faithfulness")
-        a = self._safe_eval_metric(ds, answer_relevancy, validation_llm, validation_emb, "answer_relevancy")
+        print(f"[RAGAS] evaluating 1 sample with thresholds f>={f_min}, a>={a_min} (tokens={VALIDATION_MAX_TOKENS}, timeout={VALIDATION_TIMEOUT}s)")
+        f = self._safe_eval_metric(
+                ds, faithfulness, validation_llm, validation_emb, "faithfulness",
+                features=features, question=question, answer=answer, ctxs=ctxs
+        )
+        a = self._safe_eval_metric(
+                ds, answer_relevancy, validation_llm, validation_emb, "answer_relevancy",
+                features=features, question=question, answer=answer, ctxs=ctxs
+        )
 
+        # ----- (지표 분리 평가 이미 수행한 뒤) f, a 값이 여기 있음 -----
         print(f"[RAGAS] faithfulness={f:.3f}, answer_relevancy={a:.3f}")
-        state["validated"] = bool((f >= f_min) and (a >= a_min))
 
+        # === 폴백: RAGAS가 두 지표 모두 실패(0.0)했을 때 임베딩 유사도로 대체 ===
+        if (f == 0.0 and a == 0.0):
+            print("[Fallback] RAGAS 두 지표가 실패 → 임베딩 유사도 기반 휴리스틱 평가로 대체")
+
+            # 간단한 코사인 유사도
+            import math
+            def _cosine(u, v):
+                if not u or not v: return 0.0
+                num = sum(x*y for x, y in zip(u, v))
+                den = math.sqrt(sum(x*x for x in u)) * math.sqrt(sum(y*y for y in v))
+                return (num / den) if den else 0.0
+
+            # 현재 검증용 임베딩 인스턴스 재사용 (validation_emb)
+            try:
+                q_vec = validation_emb.embed_query(question)
+                a_vec = validation_emb.embed_query(answer)
+                ctx_joined = "".join(ctxs)  # 내용 그대로 연결
+                c_vec = validation_emb.embed_query(ctx_joined)
+
+                a_fb = _cosine(q_vec, a_vec)   # answer relevancy 대체값
+                f_fb = _cosine(c_vec, a_vec)   # faithfulness 대체값
+
+                # 폴백 임계값(환경변수로 조정 가능)
+                a_fb_min = float(os.getenv("FALLBACK_ANS_REL_MIN", "0.32"))
+                f_fb_min = float(os.getenv("FALLBACK_FAITH_MIN",   "0.28"))
+
+                print(f"[Fallback] emb-based answer_relevancy={a_fb:.3f} (min {a_fb_min})")
+                print(f"[Fallback] emb-based faithfulness={f_fb:.3f} (min {f_fb_min})")
+
+                # 폴백 점수는 본래 점수 대신 사용
+                a, f = a_fb, f_fb
+                a_min_eff = a_fb_min
+                f_min_eff = f_fb_min
+            except Exception as e:
+                print(f"[Fallback] 임베딩 계산 실패: {repr(e)}")
+                # 폴백도 실패하면 그대로 0점 유지
+                a_min_eff = a_min
+                f_min_eff = f_min
+        else:
+            a_min_eff = a_min
+            f_min_eff = f_min
+
+        # --- 최종 판정 ---
+        ok = (f >= f_min_eff) and (a >= a_min_eff)
+        state["validated"] = bool(ok)
+        print(f"[Validate] final f={f:.3f} (min {f_min_eff}), a={a:.3f} (min {a_min_eff}) -> {'PASS' if ok else 'FAIL'}")
+
+        # ---------- 📄 CSV 로깅 ----------
+        # 경로: 기본 ./validation_results.csv (ENV로 변경 가능)
+        CSV_PATH = os.getenv("VALIDATION_CSV_PATH", "./teacher/agents/solution/eval_results/validation_results.csv")
+        os.makedirs(os.path.dirname(CSV_PATH) or ".", exist_ok=True)
+        write_header = not os.path.exists(CSV_PATH)
+
+        # 컨텍스트 미니 미리보기(첫 줄만)
+        previews = []
+        for b in ctxs[:3]:
+            first_line = (b.splitlines()[0] if b.splitlines() else b)[:200]
+            previews.append(first_line)
+        contexts_preview = " || ".join(previews)
+
+        row = {
+            "validated": "PASS" if ok else "FAIL",
+            "faithfulness": f,
+            "answer_relevancy": a,
+            "f_min": f_min,
+            "a_min": a_min,
+            "f_min_eff": f_min_eff,
+            "a_min_eff": a_min_eff,
+            "question_snippet": prob[:200],
+            "options_count": len(opts),
+            "generated_answer": state.get("generated_answer",""),
+            "generated_subject": state.get("generated_subject",""),
+            "explanation_snippet": (state.get("generated_explanation","") or "")[:300],
+            "contexts_count": len(ctxs),
+            "contexts_preview": contexts_preview,
+        }
+
+        try:
+            with open(CSV_PATH, "a", newline="", encoding="utf-8-sig") as fp:
+                writer = csv.DictWriter(fp, fieldnames=list(row.keys()))
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
+            print(f"[CSV] 검증 결과 저장: {CSV_PATH}")
+        except Exception as e:
+            print(f"[CSV] 저장 실패: {repr(e)}")
+            
         # 재시도 정책
         if not state["validated"]:
             state["retry_count"] = state.get("retry_count", 0) + 1

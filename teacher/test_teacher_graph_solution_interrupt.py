@@ -8,6 +8,8 @@ Teacher Graph LangGraph Interrupt 테스트
 solution_agent의 interrupt 발생 후 Command(resume)으로 재개하는 것을 확인합니다.
 """
 
+from pprint import pprint
+
 def main():
     """teacher_graph의 LangGraph 기반 워크플로우를 테스트합니다."""
     print("🧪 === Teacher Graph LangGraph Interrupt 테스트 ===")
@@ -82,12 +84,12 @@ def main():
                 
                 # resume_workflow 메서드를 통해 워크플로우 재개
                 resumed_result = orchestrator.resume_workflow(
-                    "테스트용 사용자 피드백: 더 쉬운 설명이 필요합니다.", 
+                    "테스트용 사용자 피드백: 추상화 기법이 정확히 뭔가요? 그리고 더 쉬운 해설이 필요해요.", 
                     config
                 )
                 
                 print("🎉 워크플로우 재개 성공!")
-                print(f"   재개 결과: {resumed_result}")
+                pprint(f"   재개 결과: {resumed_result["shared"]}")
                 
             except Exception as resume_error:
                 print("⚠️ 워크플로우 재개 중 오류 발생:")

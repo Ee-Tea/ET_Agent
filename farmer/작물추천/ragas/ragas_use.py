@@ -13,6 +13,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import time
+from numpy.linalg import norm  # ✅ 벡터 코사인 유사도용
 
 # --- 환경 변수 로드 ---
 load_dotenv(find_dotenv())
@@ -33,7 +34,6 @@ RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "5"))
 # 🔧 Milvus score → similarity 변환 관련 환경변수
 MILVUS_METRIC = os.getenv("MILVUS_METRIC", "cosine").lower()  # cosine | l2 | ip
 MILVUS_SCORE_IS_DISTANCE = os.getenv("MILVUS_SCORE_IS_DISTANCE", "true").lower() == "true"
-# IP 점수 범위를 0~1로 보정할지 여부(선택): inner product가 [-1,1]라고 가정하고 (x+1)/2 로 스케일링
 MILVUS_IP_RESCALE_01 = os.getenv("MILVUS_IP_RESCALE_01", "true").lower() == "true"
 
 # --- 필수 API 키 확인 ---
@@ -82,7 +82,6 @@ WEB_PROMPT_TMPL = """당신은 대한민국 농업 작물 재배 방법 전문�
 - 확실하지 않으면 "주어진 정보로는 답변할 수 없습니다."라고 작성하세요.
 - 항상 답변 마지막에 "참고 링크:" 섹션을 만들고, 적절한 상위 1~3개 URL을 bullet로 첨부하세요.
 
-
 질문: {question}
 답변:"""
 web_prompt = ChatPromptTemplate.from_template(WEB_PROMPT_TMPL)
@@ -90,7 +89,9 @@ web_prompt = ChatPromptTemplate.from_template(WEB_PROMPT_TMPL)
 # --- 상태 정의 ---
 class GraphState(TypedDict, total=False):
     question: Optional[str]
-    context: Optional[str]
+    # 분리된 컨텍스트
+    context_internal: Optional[str]       # 내부 DB 컨텍스트
+    context_web: Optional[str]            # 웹 검색 컨텍스트(정리된 결과)
     answer: Optional[str]
     web_search_results: Optional[str]
     answer_source: Optional[str]
@@ -105,7 +106,7 @@ embedding_model = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME, model_kwarg
 llm = ChatGroq(model_name=GROQ_MODEL, temperature=TEMPERATURE, api_key=GROQ_API_KEY)
 web_search_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
-# --- 코사인 유사도 ---
+# --- 텍스트 코사인 유사도(임베딩 포함) ---
 def cosine_sim(txt1: str, txt2: str) -> float:
     if not txt1 or not txt2:
         return 0.0
@@ -114,42 +115,29 @@ def cosine_sim(txt1: str, txt2: str) -> float:
     n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
     return float(np.dot(v1, v2) / (n1 * n2)) if n1 > 0 and n2 > 0 else 0.0
 
+# 오타 방지용 별칭
+def consine(txt1: str, txt2: str) -> float:
+    return cosine_sim(txt1, txt2)
+
 # --- Milvus score → similarity 변환 ---
 def convert_score_to_similarity(raw: float) -> float:
-    """
-    raw: Milvus로부터 받은 score (distance or similarity)
-    반환: 0~1 범위의 유사도(높을수록 유사)
-    """
     if MILVUS_METRIC == "cosine":
-        # 보통 Milvus는 cosine에서 distance = 1 - cosine_similarity
-        if MILVUS_SCORE_IS_DISTANCE:
-            sim = 1.0 - float(raw)            # distance → similarity
-        else:
-            sim = float(raw)                  # 이미 similarity 라고 가정
-        # cosine sim은 [-1,1] 범위일 수 있으나 대부분 정규화 후 [0,1]에 가깝게 사용됨.
-        # 안전하게 0~1 clip
+        sim = 1.0 - float(raw) if MILVUS_SCORE_IS_DISTANCE else float(raw)
         return max(0.0, min(1.0, sim))
-
     elif MILVUS_METRIC == "l2":
-        # L2는 distance: 작을수록 유사. 간단 정규화로 1/(1+d) 사용
         d = float(raw) if MILVUS_SCORE_IS_DISTANCE else max(0.0, 1.0 - float(raw))
         sim = 1.0 / (1.0 + max(0.0, d))
         return max(0.0, min(1.0, sim))
-
     elif MILVUS_METRIC == "ip":
-        # IP는 보통 similarity. 어떤 설정에선 distance = -IP 로 반환될 수 있음
         val = -float(raw) if MILVUS_SCORE_IS_DISTANCE else float(raw)
         if MILVUS_IP_RESCALE_01:
-            # [-1,1] 가정 → [0,1]로 스케일
             sim = (val + 1.0) / 2.0
             return max(0.0, min(1.0, sim))
-        # 스케일링 안 할 경우 그대로 반환(단, 이때 값 범위는 모델/정규화에 따라 다름)
         return val
     else:
-        # 알 수 없는 metric이면 raw를 0~1 clip만
         return max(0.0, min(1.0, float(raw)))
 
-# --- 로그 유틸: context만 저장 ---
+# --- 로그 유틸: 내부/웹 컨텍스트 분리 저장 ---
 def append_log(state: GraphState):
     log_file = state.get("log_file")
     if not log_file:
@@ -159,7 +147,8 @@ def append_log(state: GraphState):
         "question": state.get("question"),
         "answer": state.get("answer"),
         "source": state.get("answer_source"),
-        "context": state.get("context", "")
+        "context_internal": state.get("context_internal", ""),
+        "context_web": state.get("context_web", ""),
     }
     history = []
     if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
@@ -195,18 +184,19 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
             retrieved_docs_dump.append({
                 "rank": idx,
                 "raw_score": float(score),
-                "similarity": float(sim),             # 🔥 변환된 유사도 저장
+                "similarity": float(sim),
                 "metadata": getattr(doc, "metadata", {}),
                 "text": full_text[:2000]
             })
 
-        context = "\n\n".join([d.page_content for d, _ in docs_with_scores])
+        # 내부 DB 컨텍스트는 상위 k개 합침
+        context_internal = "\n\n".join([d.page_content for d, _ in docs_with_scores])
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         print(f"  -> {len(docs_with_scores)}개 문서 검색 완료. ({elapsed_ms:.1f} ms)")
 
         return {
             **state,
-            "context": context,
+            "context_internal": context_internal,
             "retrieved_docs": retrieved_docs_dump,
             "retrieval_time_ms": elapsed_ms
         }
@@ -217,7 +207,7 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
 def generate_rag_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 [2/4] 내부 DB 정보로 1차 답변 생성 중...")
     chain = rag_prompt | llm | StrOutputParser()
-    answer = chain.invoke({"context": state.get("context", ""), "question": state["question"]})
+    answer = chain.invoke({"context": state.get("context_internal", ""), "question": state["question"]})
     no_info = NO_INFO_PHRASE in normalize(answer)
     print("  -> 1차 답변 생성 완료.")
     return {**state, "answer": answer, "answer_source": "내부 DB", "no_info": no_info}
@@ -226,7 +216,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 [3/4] Tavily 웹 검색 중...")
     if not web_search_tool:
         print("  -> Tavily API 키가 없어 웹 검색을 건너뜁니다.")
-        return {**state, "web_search_results": "Tavily API 키 없음"}
+        return {**state, "web_search_results": "Tavily API 키 없음", "context_web": ""}
 
     try:
         results = web_search_tool.invoke({"query": state["question"]}) or []
@@ -249,7 +239,8 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         search_results = "\n".join(lines)
         print(f"  -> {len(results)}개 웹 검색 결과 확인.")
 
-    return {**state, "web_search_results": search_results}
+    # 웹 컨텍스트는 사람이 읽을 수 있는 요약 문자열(동일)
+    return {**state, "web_search_results": search_results, "context_web": search_results}
 
 def generate_web_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 [4/4] 웹 검색 정보로 2차 답변 생성 중...")
@@ -266,7 +257,7 @@ def should_web_search(state: GraphState) -> str:
     print("🧭 웹 검색 필요 여부 판단 중...")
     answer = state.get("answer", "")
     question = state.get("question", "")
-    context = state.get("context", "") or ""
+    context_internal = state.get("context_internal", "") or ""
     no_info = state.get("no_info", False)
 
     if not TAVILY_API_KEY:
@@ -286,7 +277,7 @@ def should_web_search(state: GraphState) -> str:
         print("  -> 결정: 웹 검색 수행 (시간 민감 질문)")
         return "continue"
 
-    if len(normalize(context)) < 30:
+    if len(normalize(context_internal)) < 30:
         print("  -> 결정: 웹 검색 수행 (문맥 빈약)")
         return "continue"
 
@@ -336,14 +327,12 @@ def chat(app, log_file: str):
 # 모드 2: 골든셋 평가
 # =======================
 def _calc_search_similarity_max_from_milvus(retrieved_docs: Optional[List[Dict[str, Any]]]) -> float:
-    """Milvus 변환 유사도(similarity)들 중 최대값"""
     if not retrieved_docs:
         return 0.0
     sims = [float(x.get("similarity", 0.0)) for x in retrieved_docs]
     return max(sims) if sims else 0.0
 
 def _calc_search_similarity_max_fallback(question: str, retrieved_docs: Optional[List[Dict[str, Any]]]) -> float:
-    """Fallback: 질문↔상위문서 텍스트 코사인 유사도 최대값"""
     if not retrieved_docs:
         return 0.0
     sims = []
@@ -353,6 +342,23 @@ def _calc_search_similarity_max_fallback(question: str, retrieved_docs: Optional
     return max(sims) if sims else 0.0
 
 def evaluate_goldenset(app, csv_path: str, log_file: str):
+    """
+    골든셋 평가:
+    - answer_similarity: golden_answer ↔ generated_answer 코사인 유사도 (벡터 기반)
+    - search_similarity_max: Milvus 검색 유사도(변환값) 최댓값(없으면 질문↔문서 코사인 최대값)
+    - sim / similarity: 최종 사용 컨텍스트 ↔ generated_answer 코사인 유사도 (벡터 기반)
+      * 최종 출처가 '내부 DB'면 context_internal, '웹 검색'이면 context_web 사용
+    - source: 최종 답변 출처 ('내부 DB' | '웹 검색')
+    """
+    # 이 함수 안에서만 쓰는 벡터 코사인 유사도
+    def cosine_similarity(vec1, vec2):
+        v1 = np.asarray(vec1, dtype=np.float32)
+        v2 = np.asarray(vec2, dtype=np.float32)
+        denom = (norm(v1) * norm(v2))
+        if denom == 0.0:
+            return 0.0
+        return float(np.dot(v1, v2) / denom)
+
     try:
         df = pd.read_csv(csv_path, encoding="utf-8-sig")
     except Exception:
@@ -382,7 +388,11 @@ def evaluate_goldenset(app, csv_path: str, log_file: str):
             print(f"  -> ❌ 그래프 실행 오류(1차): {e}")
             state1, a1 = {}, ""
 
-        sim1 = cosine_sim(g, a1)
+        # 벡터 임베딩 후 코사인 (golden ↔ generated)
+        golden_vec_1 = embedding_model.embed_query(g) if g else []
+        gen_vec_1 = embedding_model.embed_query(a1) if a1 else []
+        sim1 = cosine_similarity(golden_vec_1, gen_vec_1)
+
         src1 = state1.get("answer_source", "N/A")
         no_info1 = state1.get("no_info", False)
 
@@ -391,9 +401,8 @@ def evaluate_goldenset(app, csv_path: str, log_file: str):
         chosen_src = src1
         chosen_state = state1
 
+        # 2차(웹 강제)
         need_second_try = (src1 == "내부 DB") and (no_info1 or (sim1 < SIM_THRESHOLD))
-
-        # 2차 시도
         if need_second_try and TAVILY_API_KEY:
             print("  -> 2차 시도: 웹검색 강제 실행(force_web=True)")
             try:
@@ -401,7 +410,10 @@ def evaluate_goldenset(app, csv_path: str, log_file: str):
                 a2 = state2.get("answer", "")
                 append_log(state2)
 
-                sim2 = cosine_sim(g, a2)
+                golden_vec_2 = golden_vec_1 or (embedding_model.embed_query(g) if g else [])
+                gen_vec_2 = embedding_model.embed_query(a2) if a2 else []
+                sim2 = cosine_similarity(golden_vec_2, gen_vec_2)
+
                 if sim2 >= chosen_sim:
                     chosen_answer = a2
                     chosen_sim = sim2
@@ -411,45 +423,141 @@ def evaluate_goldenset(app, csv_path: str, log_file: str):
             except Exception as e:
                 print(f"  -> ❌ 그래프 실행 오류(2차): {e}")
 
-        # 검색 유사도 최대값(Milvus 변환값 우선, 없으면 fallback)
+        # 검색 유사도 최대값
         search_similarity_max = _calc_search_similarity_max_from_milvus(chosen_state.get("retrieved_docs"))
         if search_similarity_max == 0.0:
             search_similarity_max = _calc_search_similarity_max_fallback(q, chosen_state.get("retrieved_docs"))
+
+        # sim: (최종 컨텍스트 ↔ 최종 답변)
+        ctx_int = chosen_state.get("context_internal", "") or ""
+        ctx_web = chosen_state.get("context_web", "") or ""
+        if chosen_src == "내부 DB":
+            chosen_context = ctx_int
+        elif chosen_src == "웹 검색":
+            chosen_context = ctx_web
+        else:
+            chosen_context = ctx_int or ctx_web
+
+        ctx_vec = embedding_model.embed_query(chosen_context) if chosen_context else []
+        ans_vec = embedding_model.embed_query(chosen_answer) if chosen_answer else []
+        sim_ctx_ans = cosine_similarity(ctx_vec, ans_vec)
 
         ok = chosen_sim >= SIM_THRESHOLD
         if ok:
             correct += 1
 
-        print(f"  -> 정답 (Golden)  : {g[:80]}...")
-        print(f"  -> 모델 답변 (Best): {chosen_answer[:80]}...")
         print(f"  -> answer_similarity: {chosen_sim:.4f} | search_similarity_max: {search_similarity_max:.4f}")
+        print(f"  -> sim(context↔answer): {sim_ctx_ans:.4f}")
         print(f"  -> 평가: {'✅ OK' if ok else '❌ FAIL'} | 출처: {chosen_src}{' (2차)' if used_second else ''}")
 
+        # JSON record (✅ similarity & source 포함)
         results.append({
             "index": i,
             "question": q,
             "golden_answer": g,
             "generated_answer": chosen_answer,
-            "answer_similarity": chosen_sim,
-            "search_similarity_max": search_similarity_max,
-            "is_correct": ok
+            "answer_similarity": float(chosen_sim),           # golden ↔ generated
+            "search_similarity_max": float(search_similarity_max),
+            "sim": float(sim_ctx_ans),                        # 유지
+            "similarity": float(sim_ctx_ans),                 # 요청: 동일값으로 표기
+            "source": chosen_src,                             # 요청: '내부 DB' | '웹 검색'
+            "is_correct": bool(ok)
         })
 
     acc = (correct / total) * 100 if total else 0.0
     print(f"\n=== 평가 완료 ===\n정확도: {acc:.2f}% ({correct}/{total})")
 
-    report_path = "evaluation_report.json"
-    report = {
-        "summary": {
-            "total": total,
-            "correct": correct,
-            "accuracy": acc
-        },
-        "details": results
-    }
+    report_path = "goldenset_evaluation_report.json"
+    report = {"summary": {"total": total, "correct": correct, "accuracy": acc},
+              "details": results}
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(f"결과 리포트 저장: {os.path.abspath(report_path)}")
+
+# =======================
+# (옵션) 별도 간단 평가 유틸들
+# =======================
+def load_golden_dataset(file_path: str):
+    """골든 데이터셋을 CSV 파일에서 로드하여 리스트로 반환합니다."""
+    df = pd.read_csv(file_path, encoding='utf-8')
+    return df.to_dict('records')
+
+def evaluate_chatbot(app, golden_dataset: List[Dict[str, str]]):
+    """골든 데이터셋을 사용하여 간단 챗봇 성능 평가(JSON에는 similarity & source 포함)."""
+    print("\n--- 챗봇 성능 평가 시작 (유사도 기반) ---")
+    evaluation_results = []
+    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
+    SIMILARITY_THRESHOLD = 0.8
+
+    for i, data in enumerate(golden_dataset):
+        question = data['question']
+        golden_answer = data['answer']
+
+        print(f"\n[평가 {i+1}] 질문: {question}")
+        print(f"  - 정답: {golden_answer}")
+
+        try:
+            final_state = app.invoke({"question": question})
+            generated_answer = final_state.get('answer', '')
+            src = final_state.get('answer_source', '')
+            ctx_int = final_state.get('context_internal', '') or ''
+            ctx_web = final_state.get('context_web', '') or ''
+            chosen_context = ctx_int if src == "내부 DB" else (ctx_web if src == "웹 검색" else (ctx_int or ctx_web))
+
+            # answer_similarity (golden ↔ generated) : 텍스트 임베딩 코사인
+            g_vec = embeddings.embed_query(golden_answer) if golden_answer else []
+            a_vec = embeddings.embed_query(generated_answer) if generated_answer else []
+            denom = (norm(np.asarray(g_vec)) * norm(np.asarray(a_vec)))
+            answer_similarity = float(np.dot(g_vec, a_vec) / denom) if denom else 0.0
+
+            # similarity(sim): 최종 컨텍스트 ↔ 답변
+            c_vec = embeddings.embed_query(chosen_context) if chosen_context else []
+            denom2 = (norm(np.asarray(c_vec)) * norm(np.asarray(a_vec)))
+            sim_ctx_ans = float(np.dot(c_vec, a_vec) / denom2) if denom2 else 0.0
+
+            is_correct = bool(answer_similarity >= SIMILARITY_THRESHOLD)
+
+            print(f"  - answer_similarity: {answer_similarity:.4f} (기준: {SIMILARITY_THRESHOLD})")
+            print(f"  - similarity(context↔answer): {sim_ctx_ans:.4f}")
+            print(f"  - 출처: {src}")
+            print(f"  - 정답 여부: {'✅ 정답' if is_correct else '❌ 오답'}")
+
+            evaluation_results.append({
+                'question': question,
+                'golden_answer': golden_answer,
+                'generated_answer': generated_answer,
+                'answer_similarity': float(answer_similarity),
+                'similarity': float(sim_ctx_ans),   # JSON에 표기
+                'source': src,                      # JSON에 표기
+                'is_correct': is_correct
+            })
+
+        except Exception as e:
+            print(f"  - 오류 발생: {e}")
+            evaluation_results.append({
+                'question': question,
+                'golden_answer': golden_answer,
+                'generated_answer': '오류 발생',
+                'answer_similarity': 0.0,
+                'similarity': 0.0,
+                'source': '',
+                'is_correct': False
+            })
+
+    print("\n--- 챗봇 성능 평가 완료 ---")
+    total_questions = len(evaluation_results)
+    correct_answers = sum(1 for res in evaluation_results if res['is_correct'])
+    accuracy = (correct_answers / total_questions) * 100 if total_questions > 0 else 0
+    print(f"\n총 질문 수: {total_questions}")
+    print(f"정답 수: {correct_answers}")
+    print(f"정확도: {accuracy:.2f}%")
+
+    with open('evaluation_report.json', 'w', encoding='utf-8') as f:
+        json.dump({
+            "summary": {"total": total_questions, "correct": correct_answers, "accuracy": accuracy},
+            "details": evaluation_results
+        }, f, ensure_ascii=False, indent=4)
+    print("상세 평가 결과가 'evaluation_report.json' 파일에 저장되었습니다.")
 
 # =======================
 # 모드 3: Ragas 평가

@@ -11,7 +11,7 @@ class MilvusSearchTool:
     """MilvusDB 벡터 유사도 검색을 위한 도구"""
     
     def __init__(self):
-        self.host = os.getenv("MILVUS_HOST", "localhost")
+        self.host = os.getenv("MILVUS_HOST", "127.0.0.1")
         self.port = os.getenv("MILVUS_PORT", "19530")
         self.collection_name = "concept_summary"
         self.dimension = 768  # ko-sroberta-multitask 임베딩 차원
@@ -32,7 +32,9 @@ class MilvusSearchTool:
     def _connect_milvus(self):
         """MilvusDB에 연결"""
         try:
-            connections.connect("default", host=self.host, port=self.port)
+            # 이미 연결되어 있으면 재사용
+            if "default" not in connections.list_connections():
+                connections.connect(alias="default", host=self.host, port=self.port)
             self.collection = Collection(self.collection_name)
             self.collection.load()
             logger.info(f"MilvusDB에 연결되었습니다: {self.host}:{self.port}")
@@ -70,7 +72,9 @@ class MilvusSearchTool:
         try:
             if not self.collection:
                 logger.error("MilvusDB 컬렉션이 연결되지 않았습니다.")
-                return []
+                self._connect_milvus()
+                if not self.collection:
+                    return []
             
             # 쿼리 임베딩 생성
             query_embedding = self.generate_embedding(query)
@@ -81,30 +85,41 @@ class MilvusSearchTool:
                 return []
             
             # 검색 파라미터
-            search_params = {
-                "metric_type": "COSINE",
-                "params": {"nprobe": 10}
-            }
+            search_params_primary = {"metric_type": "COSINE", "params": {"nprobe": 10}}
+            search_params_fallback = {"metric_type": "COSINE", "params": {"ef": 64}}
             
             # 검색 실행
-            results = self.collection.search(
-                data=[query_embedding],
-                anns_field="embedding",
-                param=search_params,
-                limit=top_k,
-                output_fields=["subject", "item_title", "content", "chunk_size"]
-            )
+            try:
+                results = self.collection.search(
+                    data=[query_embedding],
+                    anns_field="embedding",
+                    param=search_params_primary,
+                    limit=top_k,
+                    output_fields=["subject", "content"]
+                )
+            except Exception:
+                # 인덱스 파라미터 불일치 시 폴백
+                results = self.collection.search(
+                    data=[query_embedding],
+                    anns_field="embedding",
+                    param=search_params_fallback,
+                    limit=top_k,
+                    output_fields=["subject", "content"]
+                )
             
             # 결과 정리
             search_results = []
             for hits in results:
                 for hit in hits:
+                    # entity 필드 접근은 컬렉션 스키마에 따라 다르므로 안전하게 처리
+                    entity = getattr(hit, 'entity', None)
+                    getter = getattr(entity, 'get', None)
+                    subject = getter('subject') if callable(getter) else None
+                    content = getter('content') if callable(getter) else None
                     search_results.append({
                         'score': hit.score,
-                        'subject': hit.entity.get('subject'),
-                        'item_title': hit.entity.get('item_title'),
-                        'content': hit.entity.get('content'),
-                        'chunk_size': hit.entity.get('chunk_size')
+                        'subject': subject,
+                        'content': content,
                     })
             
             return search_results

@@ -160,7 +160,8 @@ class SolutionAgent(BaseAgent):
 
         # 2) 동기 http 스킴으로 연결
         if "default" not in connections.list_connections():
-            connections.connect(alias="default", uri=f"http://{host}:{port}")
+            # gRPC 기본(19530). REST는 19531. 여기서는 gRPC 방식으로 연결합니다.
+            connections.connect(alias="default", host=host, port=port)
 
         def infer_fields(coll_name: str):
             c = Collection(coll_name)
@@ -197,9 +198,9 @@ class SolutionAgent(BaseAgent):
             self.vectorstore_p = Milvus(
                 embedding_function=emb,
                 collection_name=coll_p,
-                connection_args={"uri": f"http://{host}:{port}"},
+                connection_args={"host": host, "port": port},
                 text_field=txt_p,
-                vector_field=vec_p,   # ← 자동 감지된 이름 사용 (대개 'vector')
+                vector_field=vec_p,
             )
             print(f"✅ Milvus '{coll_p}' 연결 OK (text_field={txt_p}, vector_field={vec_p})")
 
@@ -208,9 +209,9 @@ class SolutionAgent(BaseAgent):
             self.vectorstore_c = Milvus(
                 embedding_function=emb,
                 collection_name=coll_c,
-                connection_args={"uri": f"http://{host}:{port}"},
-                text_field=txt_c,     # concept_summary라면 보통 'content'
-                vector_field=vec_c,   # ← 여기서 반드시 'embedding'으로 잡힐 것
+                connection_args={"host": host, "port": port},
+                text_field=txt_c,
+                vector_field=vec_c,
             )
             print(f"✅ Milvus '{coll_c}' 연결 OK (text_field={txt_c}, vector_field={vec_c})")
 
@@ -1178,19 +1179,22 @@ class SolutionAgent(BaseAgent):
             user_feedback: Optional[str] = None,  # 상위 그래프에서 전달된 사용자 피드백(재개 시)
         ) -> Dict:  
 
-        # # 1) 외부에서 하나라도 안 넘겼으면 내부 디폴트 준비
-        # if vectorstore_p is None or vectorstore_c is None:
-        #     self._ensure_vectorstores()
+        # 1) 외부에서 하나라도 안 넘겼으면 내부 디폴트 준비 (미리 연결 시도)
+        if vectorstore_p is None or vectorstore_c is None:
+            try:
+                self._ensure_vectorstores()
+            except Exception as e:
+                print(f"⚠️ 벡터스토어 초기화 실패 → 검색 비활성화: {e}")
 
-        # # 2) 최종으로 쓸 벡터스토어 결정 (외부 > 내부)
-        # vs_p = vectorstore_p or self.vectorstore_p
-        # vs_c = vectorstore_c or self.vectorstore_c
+        # 2) 최종으로 쓸 벡터스토어 결정 (외부 > 내부)
+        vs_p = vectorstore_p or self.vectorstore_p
+        vs_c = vectorstore_c or self.vectorstore_c
 
-        # # (선택) 안전장치: 그래도 None이면 경고만 찍고 계속
-        # if vs_p is None:
-        #     print("⚠️ vectorstore_p가 없습니다. 유사 문제 검색이 비활성화됩니다.")
-        # if vs_c is None:
-        #     print("⚠️ vectorstore_c가 없습니다. 개념 검색이 비활성화됩니다.")
+        # (선택) 안전장치: 그래도 None이면 경고만 찍고 계속
+        if vs_p is None:
+            print("⚠️ vectorstore_p가 없습니다. 유사 문제 검색이 비활성화됩니다.")
+        if vs_c is None:
+            print("⚠️ vectorstore_c가 없습니다. 개념 검색이 비활성화됩니다.")
         
         initial_state: SolutionState = {
             "user_input_txt": user_input_txt,
@@ -1198,8 +1202,8 @@ class SolutionAgent(BaseAgent):
             "user_problem": user_problem,
             "user_problem_options": user_problem_options,
 
-            "vectorstore_p": vectorstore_p,
-            "vectorstore_c": vectorstore_c,
+            "vectorstore_p": vs_p,
+            "vectorstore_c": vs_c,
 
             "retrieved_docs": [],
             "problems_contexts_text": "",

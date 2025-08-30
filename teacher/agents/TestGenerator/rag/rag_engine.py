@@ -1,6 +1,6 @@
 import os
 import glob
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 # from langchain_community.vectorstores import FAISS  # FAISS 제거
@@ -9,6 +9,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # 🔁 Milvus 관련 임포트 추가
 from langchain_milvus import Milvus
 from pymilvus import connections, utility
+from teacher.agents.milvus_utils import connect_milvus_fallback
 from collections import Counter
 
 
@@ -38,7 +39,7 @@ class RAGEngine:
         
         # 🔧 Milvus 설정 추가
         self.milvus_conf = {
-            "host": os.getenv("MILVUS_HOST", "localhost"),
+            "host": os.getenv("MILVUS_HOST", "standalone"),  # 컨테이너 내부 기본값 standalone
             "port": os.getenv("MILVUS_PORT", "19530"),
             "collection": os.getenv("MILVUS_COLLECTION", "rag_documents"),
             "topk": int(os.getenv("MILVUS_TOPK", "15")),
@@ -151,14 +152,17 @@ class RAGEngine:
             new_splits = text_splitter.split_documents(new_documents)
 
             # 🔧 Milvus 연결 및 컬렉션 관리
-            host = self.milvus_conf["host"]
+            host_env = self.milvus_conf["host"]
             port = self.milvus_conf["port"]
             collection = self.milvus_conf["collection"]
             
             # 연결 정리 후 재접속
-            if "default" in connections.list_connections():
-                connections.disconnect(alias="default")
-            connections.connect(alias="default", host=host, port=port)
+            # host fallback (컨테이너/호스트 양쪽 지원)
+            used_host = connect_milvus_fallback(hosts=[host_env], port=port)
+            if not used_host:
+                print("🚫 Milvus 연결 불가. 새 문서 추가 중단")
+                return False
+            host_env = used_host
 
             if self.vectorstore:
                 # 기존 Milvus 벡터스토어에 추가
@@ -180,11 +184,14 @@ class RAGEngine:
                     "enable_dynamic_field": True,  # 동적 필드 허용
                 }
                 
+                if self.embeddings_model is None:
+                    print("🚫 임베딩 모델이 초기화되지 않아 Milvus 생성 중단")
+                    return False
                 self.vectorstore = Milvus.from_documents(
                     documents=new_splits,
-                    embedding=self.embeddings_model,
+                    embedding=self.embeddings_model,  # type: ignore
                     collection_name=collection,
-                    connection_args={"host": host, "port": port},
+                    connection_args={"host": host_env, "port": port},
                     index_params=index_params,
                     search_params=search_params,
                     **schema_config
@@ -201,7 +208,7 @@ class RAGEngine:
         
         return False
     
-    def retrieve_documents(self, query: str, subject_area: str = "", weakness_concepts: List[str] = None) -> Dict[str, Any]:
+    def retrieve_documents(self, query: str, subject_area: str = "", weakness_concepts: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         쿼리에 관련된 문서를 검색
         
@@ -242,7 +249,7 @@ class RAGEngine:
         except Exception as e:
             return {"error": f"문서 검색 오류: {e}"}
     
-    def prepare_context(self, documents: List[Document], weakness_concepts: List[str] = None) -> str:
+    def prepare_context(self, documents: List[Document], weakness_concepts: Optional[List[str]] = None) -> str:
         """
         검색된 문서에서 컨텍스트 준비
         

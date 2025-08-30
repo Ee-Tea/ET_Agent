@@ -1,15 +1,18 @@
 import os
-from typing import TypedDict, List, Dict, Literal, Optional, Tuple, Any
+from typing import TypedDict, List, Dict, Literal, Optional, Tuple, Any, Union
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_milvus import Milvus
 from pymilvus import connections
+import time
 from langgraph.graph import StateGraph, END
 from langchain_huggingface import HuggingFaceEmbeddings
 import json, re
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 from ..base_agent import BaseAgent
 from datetime import datetime
+from teacher.agents.milvus_utils import connect_milvus_fallback
 
 
 load_dotenv()
@@ -27,7 +30,7 @@ class SolutionState(TypedDict):
     user_problem: str
     user_problem_options: List[str]
     
-    vectorstore: Milvus
+    vectorstore: Optional[Milvus]
 
     retrieved_docs: List[Document]
     similar_questions_text : str
@@ -59,12 +62,13 @@ class SolutionAgent(BaseAgent):
 
     def _llm(self, temperature: float = 0):
         return ChatOpenAI(
-            api_key=OPENAI_API_KEY=REDACTED=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-            model=OPENAI_LLM_MODEL,  # ✅ 환경변수에서 가져온 모델
+            api_key=SecretStr(OPENAI_API_KEY=REDACTED OPENAI_API_KEY=REDACTED None,
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+            model=OPENAI_LLM_MODEL,
             temperature=temperature,
         )
 
-    def _create_graph(self) -> StateGraph:
+    def _create_graph(self):
         """워크플로우 그래프 생성"""
 
         # ✅ LangGraph 구성
@@ -88,7 +92,6 @@ class SolutionAgent(BaseAgent):
             lambda s: "ok" if s["validated"] else ("back" if s.get("retry_count", 0) < 5 else END),
             {"ok": "store", "back": "generate_solution"}
         )
-
         return graph.compile()
     
     #----------------------------------------nodes------------------------------------------------------
@@ -167,7 +170,14 @@ class SolutionAgent(BaseAgent):
         """
 
         response = llm_gen.invoke(prompt)
-        result = response.content.strip()
+        # response.content 가 list / str 둘 다 가능성
+        raw_content: Union[str, List[Any]] = response.content  # type: ignore
+        if isinstance(raw_content, list):
+            # 메시지 조각 결합
+            result = "\n".join([c if isinstance(c, str) else json.dumps(c, ensure_ascii=False) for c in raw_content])
+        else:
+            result = raw_content or ""
+        result = result.strip()
         print("🧠 LLM 응답 완료")
 
         answer_match = re.search(r"정답:\s*(.+)", result)
@@ -203,7 +213,12 @@ class SolutionAgent(BaseAgent):
         """
 
         validation_response = llm.invoke(validation_prompt)
-        result_text = validation_response.content.strip().lower()
+        vr = validation_response.content  # type: ignore
+        if isinstance(vr, list):
+            vr_text = "\n".join([v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for v in vr])
+        else:
+            vr_text = (vr or "")
+        result_text = vr_text.strip().lower()
 
         # ✅ '네'가 포함된 응답일 경우에만 유효한 풀이로 판단
         print("📌 검증 응답:", result_text)
@@ -222,129 +237,103 @@ class SolutionAgent(BaseAgent):
     def _store_to_vector_db(self, state: SolutionState) -> SolutionState:  
         print("\n🧩 [4단계] 임베딩 및 벡터 DB 저장 시작")
 
-    
-        vectorstore = state["vectorstore"] 
+        vectorstore = state.get("vectorstore")
+        if not vectorstore:
+            print("⚠️ 벡터스토어 없음 – 저장 단계 건너뜀")
+            return state
 
-        # 중복 문제 확인
-        similar = vectorstore.similarity_search(state["user_problem"], k=1)
-        if similar and state["user_problem"].strip() in similar[0].page_content:
+        try:
+            similar = vectorstore.similarity_search(state["user_problem"], k=1)
+        except Exception as e:
+            print(f"⚠️ 중복 확인 실패 (유사 검색 오류): {e}")
+            similar = []
+
+        if similar and state["user_problem"].strip() in (similar[0].page_content or ""):
             print("⚠️ 동일한 문제가 존재하여 저장 생략")
         else:
-            # 문제, 해답, 풀이를 각각 metadata로 저장
-            doc = Document(
-                page_content=state["user_problem"],
-                metadata={
-                    "options": json.dumps(state.get("user_problem_options", [])), 
-                    "answer": state["generated_answer"],
-                    "explanation": state["generated_explanation"],
-                    "subject": state["generated_explanation"],
-                }
-            )
-            vectorstore.add_documents([doc])
-            print("✅ 문제+해답+풀이 저장 완료")
+            try:
+                doc = Document(
+                    page_content=state["user_problem"],
+                    metadata={
+                        "options": json.dumps(state.get("user_problem_options", [])),
+                        "answer": state.get("generated_answer", ""),
+                        "explanation": state.get("generated_explanation", ""),
+                        "subject": state.get("generated_subject", ""),
+                    }
+                )
+                vectorstore.add_documents([doc])
+                print("✅ 문제+해답+풀이 저장 완료")
+            except Exception as e:
+                print(f"🚫 문서 저장 실패: {e}")
 
-        # 결과를 state에 저장 (항상 실행)
         print(f"\n📝 결과 저장 시작:")
         print(f"   - 현재 문제: {state['user_problem'][:50]}...")
-        print(f"   - 생성된 정답: {state['generated_answer'][:30]}...")
-        print(f"   - 검증 상태: {state['validated']}")
-        
+        print(f"   - 생성된 정답: {state.get('generated_answer','')[:30]}...")
+        print(f"   - 검증 상태: {state.get('validated')}")
+
         item = {
-            "user_problem": state["user_problem"],
-            "user_problem_options": state["user_problem_options"],
-            "generated_answer": state["generated_answer"],
-            "generated_explanation": state["generated_explanation"],
-            "generated_subject": state["generated_subject"],
-            "validated": state["validated"],
-            "chat_history": state.get("chat_history", [])
+            "user_problem": state.get("user_problem", ""),
+            "user_problem_options": state.get("user_problem_options", []),
+            "generated_answer": state.get("generated_answer", ""),
+            "generated_explanation": state.get("generated_explanation", ""),
+            "generated_subject": state.get("generated_subject", ""),
+            "validated": state.get("validated", False),
+            "chat_history": state.get("chat_history", []),
         }
-        
-        
-        state["results"].append(item)
+        state.setdefault("results", []).append(item)
         print(f"✅ 결과 저장 완료: {len(state['results'])}개")
-        for key, value in item.items():
-            print(f"{key}: {value}")
-        
         return state
 
     def invoke(
-            self, 
-            user_input_txt: str,
-            user_problem: str,
-            user_problem_options: List[str],
-            vectorstore: Optional[Milvus] = None,
-            recursion_limit: int = 1000,
-        ) -> Dict:
-
+        self,
+        user_input_txt: str,
+        user_problem: str,
+        user_problem_options: List[str],
+        vectorstore: Optional[Milvus] = None,
+        recursion_limit: int = 1000,
+    ) -> Dict:
         # ✅ Milvus 연결 및 벡터스토어 생성
         if vectorstore is None:
-            try:
-                embedding_model = HuggingFaceEmbeddings(
-                    model_name="jhgan/ko-sroberta-multitask",
-                    model_kwargs={"device": "cpu"}
-                )
-
-                if "default" in connections.list_connections():
-                    connections.disconnect("default")
-                connections.connect(alias="default", host="localhost", port="19530")
-
+            embedding_model = HuggingFaceEmbeddings(
+                model_name="jhgan/ko-sroberta-multitask",
+                model_kwargs={"device": "cpu"}
+            )
+            port = os.getenv("MILVUS_PORT", "19530")
+            collection = os.getenv("MILVUS_COLLECTION", "problems")
+            used_host = connect_milvus_fallback(port=port)
+            if used_host:
                 vectorstore = Milvus(
                     embedding_function=embedding_model,
-                    collection_name="problems",
-                    connection_args={"host": "localhost", "port": "19530"}
+                    collection_name=collection,
+                    connection_args={"host": used_host, "port": port}
                 )
-                print("✅ Milvus 벡터스토어 연결 성공")
-            except Exception as e:
-                print(f"⚠️ Milvus 연결 실패: {e}")
-                print("   - 벡터스토어 없이 실행을 계속합니다.")
+            else:
+                print("🚫 Milvus 연결 실패 → 벡터스토어 없이 진행")
                 vectorstore = None
-        
-        
+
         initial_state: SolutionState = {
             "user_input_txt": user_input_txt,
-
             "user_problem": user_problem,
             "user_problem_options": user_problem_options,
-
-            "vectorstore": vectorstore,
-
+            "vectorstore": vectorstore,  # Optional
             "retrieved_docs": [],
             "similar_questions_text": "",
-
             "generated_answer": "",
             "generated_explanation": "",
             "generated_subject": "",
             "validated": False,
             "retry_count": 0,
-
             "results": [],
-            
             "chat_history": []
         }
-        
-        final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
-        
-        # 그래프 시각화
-        # try:
-        #     graph_image_path = "solution_agent_workflow.png"
-        #     with open(graph_image_path, "wb") as f:
-        #         f.write(self.graph.get_graph().draw_mermaid_png())
-        #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        # except Exception as e:
-        #     print(f"그래프 시각화 중 오류 발생: {e}")
-        #     print("워크플로우는 정상적으로 작동합니다.")
 
-        # 결과 확인 및 디버깅
+        final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})  # type: ignore
+
         results = final_state.get("results", [])
         print(f"   - 총 결과 수: {len(results)}")
-        
-        if results:
-            for i, result in enumerate(results):
-                print(f"   - 결과 {i+1}: {result.get('question', '')[:30]}...")
-        else:
+        if not results:
             print("   ⚠️ results가 비어있습니다!")
             print(f"   - final_state 내용: {final_state}")
-        
         return final_state
 
 
@@ -383,7 +372,7 @@ if __name__ == "__main__":
     user_problem_options_raw = input("\n❓ 사용자 보기 (쉼표로 구분): ").strip()
     user_problem_options = [opt.strip() for opt in user_problem_options_raw.split(",") if opt.strip()]
 
-    final_state = agent.execute(
+    final_state = agent.invoke(
         user_input_txt=user_input_txt,
         user_problem=user_problem,
         user_problem_options=user_problem_options,

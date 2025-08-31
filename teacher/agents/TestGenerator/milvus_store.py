@@ -83,8 +83,9 @@ def load_questions_from_json(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     _connect_milvus(host, port, alias="default")
 
-    index_params = {"index_type": "AUTOINDEX", "metric_type": "IP"}
-    search_params = {"metric_type": "IP"}  # 필요 시 {"params": {"ef": 64}} 등 추가
+    # 컬렉션이 L2로 구축된 환경과 호환되도록 기본 메트릭을 L2로 설정
+    index_params = {"index_type": "AUTOINDEX", "metric_type": "L2"}
+    search_params = {"metric_type": "L2"}  # 필요 시 {"params": {"ef": 64}} 등 추가
 
     # 3) 컬렉션 관리: 드롭 or 생성/추가
     if drop_old and utility.has_collection(collection_name):

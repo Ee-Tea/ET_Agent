@@ -9,7 +9,7 @@ VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "faiss_pdf_db")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 GROQ_API_KEY=REDACTED("GROQ_API_KEY=REDACTED = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.8"))
 
 if not GROQ_API_KEY=REDACTED ValueError("GROQ_API_KEY=REDACTED에 설정되어야 합니다.")
 

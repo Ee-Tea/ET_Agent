@@ -248,3 +248,10 @@ data/
 data/**
 *.rdb
 *.aof
+keys/
+*.pem
+data\redis\
+data/redis/
+
+.env(suby)
+.env(**

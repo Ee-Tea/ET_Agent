@@ -17,7 +17,8 @@ import re
 from groq import Groq
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
+from langchain_community.tools.tavily_search import TavilySearchResults
 
 # 환경 변수 로드
 load_dotenv()
@@ -61,7 +62,7 @@ def check_collection():
             )
             
             has_data = len(sample_results) > 0
-            print(f"�� 쿼리 결과: {len(sample_results)}개")
+            print(f"쿼리 결과: {len(sample_results)}개")
             print(f"🔍 데이터 존재 여부: {'있음' if has_data else '없음'}")
             
             if has_data:
@@ -102,7 +103,7 @@ def check_collection():
         print(f"컬렉션 '{collection_name}'을 새로 생성했습니다.")
         embed_and_store_csv()
 
-    # 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
+# 컬렉션에 인덱스 생성 (임베딩 필드에 대해)
     if not collection.has_index():
         index_params = {
             "metric_type": "IP",
@@ -125,14 +126,12 @@ def classify_question_simple(query: str) -> str:
     # 핵심 의도 키워드 (가장 중요한 것들만)
     selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있', '팔까', '팔면', '파는게', '파는 것', '파는것']
     price_intent = ['가격', '시세', '얼마', '값', '원']
-    location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳']
+    location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳','판매처']
     
     # "농작물"이 포함된 경우 특별 처리
     if "농작물" in query_lower:
         if any(keyword in query_lower for keyword in selling_intent):
             return "판매처" # "농작물을 팔고 싶어" → 판매처
-        elif any(keyword in query_lower for keyword in price_intent):
-            return "정보 부족"  # "농작물 가격" (농작물은 구체적이지 않음)
         else:
             return "정보 부족"  # "농작물"만
     
@@ -149,7 +148,7 @@ def classify_question_simple(query: str) -> str:
     if any(keyword in query_lower for keyword in location_intent):
         return "판매처"  # 위치만 요구
     
-    return "기타"
+    return "시세+판매처"
 
 # api 요청
 def fetch_api_data(query=None):
@@ -238,7 +237,7 @@ def fetch_api_data(query=None):
                 docs.append(doc)
     else:
         print("API 호출 실패:", response.status_code)
-        print(response.text)
+
     if docs and any(any(k in doc for k in extract_keywords(query)) for doc in docs):
         return docs
     else:
@@ -248,8 +247,6 @@ def fetch_api_data(query=None):
 def search_market_docs(query, top_k=3):
     # 전역 변수 collection을 사용하지 않고 로컬에서 처리
     try:
-        from pymilvus import connections, Collection, utility
-        
         # Milvus 연결
         connections.connect("default", host=milvus_host, port=milvus_port)
         
@@ -341,41 +338,61 @@ def search_market_docs(query, top_k=3):
             pass
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
 
-def web_search_tool(query: str) -> str:
-    """Tavily를 사용하여 웹 검색을 수행합니다."""
+def supplement_missing_info_with_web_search(query: str, missing_info_type: str, existing_context: dict) -> dict:
+    """웹 검색으로 부족한 정보를 보완합니다."""
+    print(f"🔍 웹 검색으로 {missing_info_type} 정보 보완 중...")
+    
+    supplemented_context = existing_context.copy()
+    
     try:
-        from langchain_community.tools.tavily_search import TavilySearchResults
-        from dotenv import load_dotenv
-        import os
-        
-        load_dotenv()
         tavily_api_key = os.getenv("TAVILY_API_KEY")
         
         if not tavily_api_key:
-            return "Tavily API 키가 설정되지 않았습니다."
+            print("⚠️ Tavily API 키가 설정되지 않았습니다.")
+            return supplemented_context
         
-        tavily_tool = TavilySearchResults(max_results=3, api_key=tavily_api_key)
-        search_results = tavily_tool.invoke({"query": query})
+        tavily_tool = TavilySearchResults(max_results=5, api_key=tavily_api_key)
         
-        # 검색 결과 요약
-        summary_prompt = f"""
-        다음 웹 검색 결과를 바탕으로 사용자 질문에 답변해주세요:
+        search_queries = []
+        if missing_info_type == "판매처":
+            vendor_types = ["농산물 공판장", "로컬푸드 직매장", "농협 농산물산지유통센터", "농산물 도매시장"]
+            for v_type in vendor_types:
+                search_queries.append(f"{query} {v_type}")
+        else:
+            search_queries.append(f"{query} {missing_info_type}")
+
+        # 여러 검색어로 검색 실행 및 결과 취합
+        all_search_results = []
+        seen_urls = set()
+        for s_query in search_queries:
+            results = tavily_tool.invoke({"query": s_query})
+            for result in results:
+                url = result.get('url')
+                if url not in seen_urls:
+                    all_search_results.append(result)
+                    seen_urls.add(url)
         
-        질문: {query}
-        검색 결과: {search_results}
-        
-        규칙:
-        - 검색 결과에 있는 정보만 사용
-        - 한글로 자연스럽게 답변
-        - 구체적인 정보 포함
-        """
-        
-        llm = GroqLLM(model="openai/gpt-oss-20b", api_key=groq_api_key)
-        answer = llm.invoke(summary_prompt)
-        return answer
-        
+        web_info = []
+        if all_search_results:
+            for result in all_search_results:
+                summary = result.get('content', '')[:150]
+                web_info.append(f"웹 검색: {result.get('title', '')} - {summary}... (출처: {result.get('url')})")
+
+        if web_info:
+            if missing_info_type == "판매처":
+                supplemented_context['판매처'] = web_info
+            elif missing_info_type == "시세":
+                supplemented_context['실시간시세'] = web_info
+            
+            supplemented_context['used_web_search'] = True
+            print(f"✅ 웹 검색 완료: {missing_info_type} 정보 보완")
+        else:
+            print(f"⚠️ 웹 검색으로도 {missing_info_type} 정보를 찾을 수 없었습니다.")
+            
     except Exception as e:
-        return f"웹 검색 중 오류가 발생했습니다: {e}"
+        print(f"❌ 웹 검색 중 오류 발생: {e}")
+    
+    return supplemented_context
 
 # 키워드 추출
 def extract_keywords(query):
@@ -430,7 +447,7 @@ class GroqLLM:
                 model=self.model,
                 messages=messages,
                 temperature=0.8,
-                max_completion_tokens=512,
+                max_completion_tokens=1024,
                 top_p=0.8,
                 reasoning_effort="low",
                 stream=True,
@@ -491,13 +508,15 @@ class GraphState(dict):
     query: str = ""
     question_classification: str = ""
     context: Dict[str, Any] = {}
-    context_str_for_judge: str = ""
     pred_answer: str = ""
     is_recommend_ok: bool = False
     exit: bool = False
     retry_count: int = 0
     final_answer: str = ""
-    skip_llm: bool = False
+    needs_web_search: bool = False
+    missing_info_types: List[str] = []
+    used_web_search: bool = False
+    validation_details: Optional[dict] = None
 
 # LangGraph 노드 함수
 def node_input_graph(state: GraphState) -> GraphState:
@@ -517,7 +536,7 @@ def node_input_graph(state: GraphState) -> GraphState:
 def node_classify_question(state: GraphState) -> GraphState:
     """질문을 분류하여 적절한 도구를 결정합니다."""
     query = state["query"]
-    print(f"🔍 질문 분류 중: {query}")
+    print(f"🔍 질문 분류 중...")
     
     classification = classify_question_simple(query)
     state["question_classification"] = classification
@@ -530,17 +549,8 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
     query = state["query"]
     classification = state.get("question_classification", "시세+판매처")
     
-    print(f"🛠️ 도구 선택 및 정보 수집: {classification}")
+    print(f"🛠️ 정보 수집 중...")
     
-    if classification == "정보 부족":
-        print("⚠️ 너무 일반적인 질문 - LLM 호출 없이 바로 안내 메시지 제공")
-        state["context"] = {"정보 부족": True}
-        state["pred_answer"] = "원하는 정보를 구체적으로 입력해주세요. 예시:\n- '지역명'에서 '작물명'을 팔고 싶어\n- '작물명' 가격이 얼마인가요?"
-        state["is_recommend_ok"] = True
-        state["final_answer"] = state["pred_answer"]  # 최종 답변도 바로 설정
-        state["skip_llm"] = True  # LLM 호출 건너뛰기 플래그
-        return state
-
     # 분류에 따라 직접 도구 실행
     results = {
         "실시간시세": [],
@@ -557,9 +567,7 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
     elif classification == "시세+판매처":
         results["실시간시세"] = fetch_api_data(query)[:1]
         results["판매처"] = execute_milvus_search(query)
-    elif classification == "기타":
-        results["웹검색"] = [web_search_tool(query)]
-    
+
     state["context"] = results
     
     # 사용된 도구 정보 기록
@@ -571,37 +579,66 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
     if results.get("웹검색"):
         tools_used.append("웹 검색")
     
-    print(f" 사용된 도구: {', '.join(tools_used)}")
+    print(f"✅ 정보 수집 완료.")
     
     return state
 
 def node_llm_summarize_graph(state: GraphState) -> GraphState:
-    context = state["context"]
+    """LLM을 사용하여 최종 답변을 생성합니다."""
+    print("💻 최종 답변 생성 중...")
     classification = state["question_classification"]
+    
+    # 컨텍스트를 출처에 따라 명확히 구분하여 구성
+    context = state["context"]
+    context_str = ""
 
-    # LLM 호출을 건너뛰어야 하는 경우
-    if state.get("skip_llm", False):
-        print("⏭️ LLM 호출 건너뛰기 - 이미 답변 생성됨")
-        return state
+    # 1. API/DB 정보 분리 (웹 검색 결과가 아닌 것)
+    db_prices = [p for p in context.get("실시간시세", []) if not str(p).startswith('웹 검색:')]
+    db_vendors = [v for v in context.get("판매처", []) if not str(v).startswith('웹 검색:')]
+
+    if db_prices:
+        context_str += "[실시간시세 정보 (API)]\n" + "\n".join(map(str, db_prices)) + "\n\n"
+    if db_vendors:
+        context_str += "[판매처 정보 (DB)]\n" + "\n".join(map(str, db_vendors)) + "\n\n"
+
+    # 2. 웹 검색 정보 분리
+    web_prices = [p for p in context.get("실시간시세", []) if str(p).startswith('웹 검색:')]
+    web_vendors = [v for v in context.get("판매처", []) if str(v).startswith('웹 검색:')]
+
+    if web_prices or web_vendors:
+        context_str += "[웹 검색 정보]\n"
+        if web_prices:
+            context_str += "\n".join(map(str, web_prices)) + "\n"
+        if web_vendors:
+            context_str += "\n".join(map(str, web_vendors)) + "\n"
+        context_str += "\n"
+
+    # 시스템 지침 구성
+    system_instruction = make_system_instruction(classification)
     
-    # 분류별 컨텍스트 매핑
-    context_mapping = {
-        "시세": ["실시간시세"],
-        "판매처": ["판매처"],
-        "시세+판매처": ["실시간시세", "판매처"],
-        "기타": ["웹검색"]
-    }
-    
-    # 필요한 컨텍스트만 선택
-    selected_keys = context_mapping.get(classification, [])
-    context_parts = [
-        f"{key} 정보: {context[key]}" 
-        for key in selected_keys 
-        if context.get(key)
-    ]
-    
-    context_str = "\n".join(context_parts)
-    
+    source_instruction = """
+    [출처 표기 지침]
+    - 답변에 정보를 포함할 때, 반드시 아래 규칙에 따라 출처를 명시해야 합니다.
+    - `[실시간시세 정보 (API)]`에서 가져온 정보의 출처는 'https://www.kamis.or.kr/customer/main/main.do'을 명시하세요.
+    - `[판매처 정보 (DB)]`에서 가져온 정보의 출처는 'https://www.data.go.kr/data/15025997/fileData.do'을 명시하세요.
+    - `[웹 검색 정보]`에서 가져온 정보의 출처는 각 항목 끝에 '(출처: URL)' 형식으로 제공된 URL을 사용해야 합니다.
+    - 만약 "정보가 없습니다"라는 내용만 있다면, 해당 정보와 출처는 답변에 포함하지 마세요.
+    - 각 정보의 출처를 절대 섞거나 잘못 표기해서는 안 됩니다.
+    """
+    system_instruction += source_instruction
+
+    if state.get("used_web_search"):
+        web_search_instruction = f"""
+        [추가 지시]
+        - 사용자의 원래 질문인 '{state['query']}'와 가장 관련성 높은 정보를 중심으로 답변을 요약해주세요.
+        """
+        # 판매처 정보가 부족하여 웹 검색을 했을 경우, LLM에게 사용자의 의도를 명확히 전달
+        if "판매처" in state.get("missing_info_types", []):
+            web_search_instruction += "- 사용자는 농작물을 '판매'할 수 있는 장소(공판장, 도매시장, 로컬푸드 등)를 찾고 있으니, 검색 결과를 바탕으로 해당 장소들을 추천해주세요.\n- 판매처 정보는 사용자의 질문에 포함된 지역과 다르다면 해당 정보는 무시\n"
+        
+        web_search_instruction += "- 만약 웹 검색 결과에도 유용한 정보가 없다면, 정보가 없다고 솔직하게 답변해주세요."
+        system_instruction += web_search_instruction
+
     # 검증 피드백 추가
     if state.get("validation_details") and state.get("retry_count", 0) > 0:
         issues = state["validation_details"].get("issues", [])
@@ -612,12 +649,11 @@ def node_llm_summarize_graph(state: GraphState) -> GraphState:
     pred_answer = ask_llm_groq(
         prompt=state["query"],
         context=context_str,
-        system_instruction=make_system_instruction(classification)
+        system_instruction=system_instruction
     )
     
     state.update({
-        "pred_answer": pred_answer,
-        "context_str_for_judge": context_str
+        "pred_answer": pred_answer
     })
     return state
 
@@ -629,6 +665,10 @@ def validate_prices(original_context, pred_answer):
 
     # 원본 컨텍스트에서 가격 값 추출 (콤마가 포함된 숫자 + '원' 패턴)
     for doc in original_context.get('실시간시세', []):
+        # "해당 작물에 대한 정보는 현재 없습니다" 체크
+        if "해당 작물에 대한 정보는 현재 없습니다" in doc:
+            return False, ["시세 정보가 없습니다"]
+            
         price_matches = re.findall(r'(\d{1,3}(?:,\d{3})*)원', doc)
         context_prices.extend(price_matches)
         
@@ -637,8 +677,7 @@ def validate_prices(original_context, pred_answer):
         context_prices.extend(simple_price_matches)
     
     # 중복 제거하지 않고 순서대로 유지
-    print(f"원본 컨텍스트에서 추출된 가격 (순서 유지): {context_prices}")
-    
+
     # LLM 답변에서 가격 정보 추출 (동일한 패턴 적용)
     answer_price_matches = re.findall(r'(\d{1,3}(?:,\d{3})*)원', pred_answer)
     answer_prices.extend(answer_price_matches)
@@ -647,19 +686,13 @@ def validate_prices(original_context, pred_answer):
     answer_prices.extend(simple_answer_matches)
 
     # 중복 제거하지 않고 순서대로 유지
-    print(f"LLM 답변에서 추출된 가격 (순서 유지): {answer_prices}")
 
     # 가격 매칭 검증 (1:1 매칭, 순서 고려, 중복 제한)
-    if not context_prices:
-        print("원본 컨텍스트에 가격 정보가 없습니다.")
-        return True, []  # 가격 정보가 없으면 검증 통과
     
     # 원본 가격의 출현 횟수 계산
     context_price_count = {}
     for price in context_prices:
         context_price_count[price] = context_price_count.get(price, 0) + 1
-    
-    print(f"원본 가격 출현 횟수: {context_price_count}")
     
     # 1:1 매칭 검증 (순서대로, 정확한 매칭만, 중복 제한)
     matched_prices = []
@@ -681,9 +714,7 @@ def validate_prices(original_context, pred_answer):
             if context_price in matched_price_count:
                 current_count = matched_price_count[context_price]
                 max_allowed = context_price_count[context_price]
-                print(f"  중복 체크: {context_price} (현재 {current_count}/{max_allowed})")
                 if current_count >= max_allowed:
-                    print(f"  중복 제한으로 건너뛰기: {context_price}")
                     continue
             
             # 정확한 매칭만 허용
@@ -692,7 +723,6 @@ def validate_prices(original_context, pred_answer):
                 used_answer_indices.add(j)
                 matched_price_count[context_price] = matched_price_count.get(context_price, 0) + 1
                 matched = True
-                print(f"정확한 매칭: {context_price} ← {answer_price} (매칭 횟수: {matched_price_count[context_price]})")
                 break
         
         if not matched:
@@ -716,8 +746,6 @@ def validate_prices(original_context, pred_answer):
     for price in answer_prices:
         answer_price_count[price] = answer_price_count.get(price, 0) + 1
     
-    print(f"LLM 답변 가격 출현 횟수: {answer_price_count}")
-    
     for price, answer_count in answer_price_count.items():
         context_count = context_price_count.get(price, 0)
         if answer_count > context_count:
@@ -727,25 +755,37 @@ def validate_prices(original_context, pred_answer):
     price_match_score = len(matched_prices) / len(context_prices)
     is_perfect_match = price_match_score == 1.0
     
-    print(f"가격 매칭 점수: {len(matched_prices)}/{len(context_prices)} = {price_match_score:.2f}")
-    print(f"완벽한 매칭: {'✅' if is_perfect_match else '❌'}")
-    print(f"매칭된 가격 횟수: {matched_price_count}")
-    
     # 검증 로직
     issues = []
     
     # 1. 가격 정보 매칭 - 100% 매칭되어야만 통과
     if is_perfect_match and not hallucination_prices:  # 할루시네이션이 없어야 함
-        print("✅ 가격 정보 완벽 매칭 - 통과")
         price_valid = True
     else:
-        print("❌ 가격 정보 매칭 실패 - 불통과")
         price_valid = False
         
+        # 할루시네이션에 대한 피드백
         if hallucination_prices:
-            issues.append(f'할루시네이션 감지로 인한 가격 매칭 실패')
-        else:
-            issues.append(f'가격 정보 불완전 매칭: {len(matched_prices)}/{len(context_prices)}')
+            issues.append(f"제공된 정보에 없는 내용(예: '{hallucination_prices[0]}')을 생성했습니다. 제공된 참고 정보만 사용해주세요.")
+
+        # 누락된 가격에 대한 피드백
+        if missing_prices:
+            context_docs = original_context.get('실시간시세', [])
+            missing_info_feedback = []
+            
+            # 누락된 가격이 포함된 원본 문서를 찾음
+            for doc in context_docs:
+                doc_prices = re.findall(r'(\d{1,3}(?:,\d{3})*)원', doc) + re.findall(r'(\d{4,})원', doc)
+                if any(price in doc_prices for price in missing_prices):
+                    missing_info_feedback.append(doc)
+
+            # 구체적인 피드백 메시지 생성
+            if missing_info_feedback:
+                unique_feedback_docs = list(dict.fromkeys(missing_info_feedback))
+                issues.append('다음 중요 정보를 답변에서 누락했습니다. 반드시 포함시켜 다시 답변해주세요: ' + " | ".join(unique_feedback_docs))
+            # 원본 문서를 찾지 못한 경우에 대한 예외 처리
+            elif missing_prices:
+                issues.append(f'가격 정보를 일부({len(missing_prices)}개) 누락했습니다.')
         
         if missing_prices:
             issues.append(f'누락된 가격: {missing_prices}')
@@ -753,14 +793,6 @@ def validate_prices(original_context, pred_answer):
             issues.append(f'할루시네이션 가격: {hallucination_prices}')
     
     # 상세한 검증 정보 출력
-    print(f"\n=== 상세 검증 결과 ===")
-    if matched_prices:
-        print(f"✅ 매칭된 가격: {matched_prices}")
-    if missing_prices:
-        print(f"❌ 누락된 가격: {missing_prices}")
-    if hallucination_prices:
-        print(f" 할루시네이션 가격: {hallucination_prices}")
-    
     return price_valid, issues
 
 def validate_vendors(original_context, pred_answer):
@@ -778,6 +810,10 @@ def validate_vendors(original_context, pred_answer):
                 if vendor and vendor != "해당 지역에 위치한 판매점 정보가 없습니다." and len(vendor.strip()) > 0:
                     context_has_vendors = True
                     break
+
+    # 판매점 정보가 없으면 검증 실패로 처리 (웹 검색 필요)
+    if not context_has_vendors:
+        return False, ["판매처 정보가 없습니다"]
 
     # LLM 답변에 판매점 정보 부족 키워드가 있는지 확인
     no_vendor_keywords = [
@@ -799,16 +835,11 @@ def validate_vendors(original_context, pred_answer):
         # 원본에 판매점 정보가 있는데 LLM이 "없습니다"라고 답변
         hallucination_detected = True
         hallucination_issues.append("판매점 정보 할루시네이션: 원본에 판매점 정보가 있음에도 '없습니다'라고 표시")
-        print("❌ 판매점 정보 할루시네이션 감지: 원본에 판매점 정보가 있음에도 '없습니다'라고 표시")
     
     elif not context_has_vendors and not answer_has_no_vendor:
         # 원본에 판매점 정보가 없는데 LLM이 "있습니다"라고 답변
         hallucination_detected = True
         hallucination_issues.append("판매점 정보 할루시네이션: 원본에 판매점 정보가 없음에도 '있습니다'라고 표시")
-        print("❌ 판매점 정보 할루시네이션 감지: 원본에 판매점 정보가 없음에도 '있습니다'라고 표시")
-    
-    else:
-        print("✅ 판매점 정보 할루시네이션 검증 통과")
     
     return not hallucination_detected, hallucination_issues
 
@@ -817,8 +848,9 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
     pred_answer = state["pred_answer"]
     original_context = state["context"]
     question_classification = state.get("question_classification", "시세+판매처")
+    retry_count = state.get("retry_count", 0)
     
-    print(f"🔍 응답 품질 검증 중... (질문 분류: {question_classification})")
+    print(f"🔍 응답 품질 검증 중... (질문 분류: {question_classification}, 재시도: {retry_count}회)")
     
     # 검증 실행
     validations = {}
@@ -831,35 +863,79 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
     if question_classification in ["판매처", "시세+판매처"]:
         validations['vendor'] = validate_vendors(original_context, pred_answer)
     
-    # 전체 검증 결과
-    all_valid = all(validations.values()) if validations else True
-    all_issues = [issue for validation in validations.values() for issue in validation[1]]
+    # 전체 검증 결과 - 튜플의 첫 번째 값(is_valid)만 추출하여 평가
+    all_valid = all(is_valid for is_valid, _ in validations.values()) if validations else True
+    all_issues = [issue for _, issues in validations.values() for issue in issues]
+    
+    print(f"✅ 검증 완료: {'통과' if all_valid else '실패'}")
+    
+    # 웹 검색 필요성 판단 - 1회 재분석 후에만 고려
+    needs_web_search = False
+    missing_info_types = []
+    
+    # 1회 재분석 후에도 검증이 실패한 경우에만 웹 검색 고려
+    if retry_count >= 1 and not all_valid:
+        # 검증 실패 시 어떤 정보가 부족한지 분석
+        for validation_name, (is_valid, issues) in validations.items():
+            if not is_valid:
+                if validation_name == 'price':
+                    missing_info_types.append("시세")
+                elif validation_name == 'vendor':
+                    missing_info_types.append("판매처")
+        
+        # 웹 검색이 필요한 경우 상태 업데이트
+        if missing_info_types and not state.get("used_web_search"):
+            needs_web_search = True
     
     # 상태 업데이트
     state.update({
         "is_recommend_ok": all_valid,
         "validation_details": {"validations": validations, "issues": all_issues},
-        "needs_web_search": not all_valid
+        "needs_web_search": needs_web_search,
+        "missing_info_types": missing_info_types
     })
 
     return state
 
 def node_reanalyze_graph(state: GraphState) -> GraphState:
     state["retry_count"] += 1
-    query = state["query"]
-
-    # 이전 검증 실패 정보 출력
-    if state.get("validation_details"):
-        print(f"재분석 {state['retry_count']}회차: 이전 검증에서 발견된 문제점:")
-        for issue in state.get("validation_details", {}).get("issues", []):
-            print(f"  - {issue}")
-        print("위 문제점들을 해결하여 재분석합니다.")
-    
+    print(f"🔄 재분석 중... (시도: {state['retry_count']}회)")
     # node_collect_info_graph와 동일한 로직 사용
     return node_collect_info_graph(state)
 
+def node_web_search_supplement(state: GraphState) -> GraphState:
+    """웹 검색으로 부족한 정보를 보완합니다."""
+    if not state.get("needs_web_search"):
+        return state
+    
+    query = state["query"]
+    original_context = state["context"]
+    missing_info_types = state.get("missing_info_types", [])
+    
+    print(f"🔍 웹 검색으로 정보 보강 중...")
+    
+    # 부족한 정보 타입별로 웹 검색 수행
+    supplemented_context = original_context.copy()
+    
+    for info_type in missing_info_types:
+        supplemented_context = supplement_missing_info_with_web_search(
+            query, info_type, supplemented_context
+        )
+    
+    # 보완된 컨텍스트로 상태 업데이트
+    state["context"] = supplemented_context
+    state["used_web_search"] = True
+    
+    return state
+
 def node_output_graph(state: GraphState) -> GraphState:
-    if state["retry_count"] >= 2 and not state["is_recommend_ok"]:
+    # 웹 검색을 통해 답변을 보완한 경우, 검증 결과와 상관없이 보완된 답변을 최종 답변으로 사용
+    if state.get("used_web_search"):
+        state["final_answer"] = f"{state['pred_answer']}"
+        return state
+
+    if state["retry_count"] >= 1 and not state["is_recommend_ok"]:
+        # 웹 검색 없이 1회 재분석 후 종료
         state["final_answer"] = "해당 작물과 지역에 대한 시세 또는 판매처 정보가 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
     else:
         state["final_answer"] = f"{state['pred_answer']}"
@@ -873,36 +949,61 @@ graph.add_node("classify_question", node_classify_question)
 graph.add_node("collect_info", node_collect_info_graph)
 graph.add_node("llm_summarize", node_llm_summarize_graph)
 graph.add_node("judge_recommendation", node_judge_recommendation_graph)
+graph.add_node("web_search_supplement", node_web_search_supplement)  # 웹 검색 노드 추가
 graph.add_node("reanalyze", node_reanalyze_graph)
 graph.add_node("output", node_output_graph)
 
 graph.add_edge("input", "classify_question")
 graph.add_edge("classify_question", "collect_info")
 graph.add_edge("collect_info", "llm_summarize")
-graph.add_edge("llm_summarize", "judge_recommendation")
 
 # 조건부 분기 로직
+def summarize_branch(state: GraphState) -> str:
+    """LLM 요약 후 분기: 웹 검색을 했다면 검증 없이 바로 출력, 아니면 검증으로 이동"""
+    if state.get("used_web_search"):
+        return "output"
+    else:
+        return "judge_recommendation"
+
 def judge_branch(state: GraphState) -> str:
+    """검증 결과에 따라 분기"""
     if state.get("exit"):
         return END
     
     if state.get("is_recommend_ok"):
         return "output"
     
-    # 2회 재분석 후에도 적절하지 않으면 종료
-    if state["retry_count"] >= 2:
-        return "output"
-    else:
+    # 재분석 횟수가 1회 미만인 경우
+    if state["retry_count"] < 1:
         return "reanalyze"
+    
+    # 재분석 횟수가 1회 이상인 경우
+    # 웹 검색이 필요하고 아직 수행되지 않았다면 웹 검색 실행
+    if state.get("needs_web_search") and not state.get("used_web_search"):
+        return "web_search_supplement"
+    
+    # 재시도가 모두 소진되었거나 웹 검색을 이미 수행한 경우 종료
+    return "output"
+
+graph.add_conditional_edges(
+    "llm_summarize",
+    summarize_branch,
+    {
+        "output": "output",
+        "judge_recommendation": "judge_recommendation",
+    },
+)
 
 graph.add_conditional_edges(
     "judge_recommendation", 
     judge_branch,
     {
         "output": "output",
+        "web_search_supplement": "web_search_supplement",  # 웹 검색 분기 추가
         "reanalyze": "reanalyze"
     }
 )
+graph.add_edge("web_search_supplement", "llm_summarize")  # 웹 검색 후 LLM으로
 graph.add_edge("reanalyze", "llm_summarize")
 graph.add_edge("output", END)
 
@@ -914,10 +1015,10 @@ def run(state):
     판매처 에이전트의 워크플로우를 실행합니다.
     오케스트레이터에서 전달받은 상태를 바탕으로 LangGraph를 실행합니다.
     """
+    print("\n\n===== Sales Agent 실행 시작 =====")
     # 컬렉션 초기화 추가
     try:
         check_collection()
-        print("✅ Milvus 컬렉션 초기화 완료")
     except Exception as e:
         print(f"❌ Milvus 컬렉션 초기화 실패: {e}")
         # 컬렉션 초기화 실패 시에도 계속 진행
@@ -938,7 +1039,7 @@ if __name__ == "__main__":
     # LangGraph를 컴파일하고 단독으로 실행
     app = graph.compile()
 
-    # 판매처 에이전트 단독 실행# 그래프 시각화
+    # 판매처 에이전트 단독 실행, 그래프 시각화
     try:
         graph_image_path = "sales_agent_workflow.png"
         with open(graph_image_path, "wb") as f:
@@ -946,7 +1047,7 @@ if __name__ == "__main__":
         print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     except Exception as e:
         print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": ""})
+    result_state = app.invoke({"query": "덕정에서 사과를 팔고 싶어"})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

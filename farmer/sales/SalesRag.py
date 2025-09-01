@@ -5,9 +5,10 @@ from dotenv import load_dotenv
 import os
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+import numpy as np
 
 # 임베딩 모델
-embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
+embedder = SentenceTransformer("BAAI/bge-m3")
 
 # 환경 변수 로드
 load_dotenv()
@@ -25,9 +26,20 @@ def embed_and_store_csv(csv_path="sales/info_20240812.csv"):
     for _, row in df.iterrows():
         doc = f"{row['판매장 이름']} ({row['주소']} / 주요 품목: {row['품목']})"
         docs.append(doc)
+    
     if docs:
         embeddings = embedder.encode(docs)
-        collection.insert([embeddings.tolist(), docs], fields=["embedding", "text"])
+        
+        # 데이터 형태 검증
+        if embeddings.shape[1] != 1024:
+            raise ValueError(f"임베딩 차원이 1024가 아닙니다: {embeddings.shape[1]}")
+        
+        # 올바른 형태로 데이터 준비
+        embedding_data = embeddings.tolist()  # 2D 리스트 형태 유지
+        text_data = docs
+        
+        # Milvus에 데이터 삽입
+        collection.insert([embedding_data, text_data], fields=["embedding", "text"])
 
 # 실행
 if __name__ == "__main__":
@@ -44,8 +56,8 @@ if __name__ == "__main__":
     print(f"'{collection_name}' 컬렉션을 새로 생성합니다.")
     fields = [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
-        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512),
+        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=1024),
+        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024),
     ]
     schema = CollectionSchema(fields, "시장 가격 문서 컬렉션")
     collection = Collection(collection_name, schema)

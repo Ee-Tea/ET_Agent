@@ -21,7 +21,7 @@ from langchain.retrievers import EnsembleRetriever
 
 # RAGAS 라이브러리
 from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_utilization
+from ragas.metrics import faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
 from datasets import Dataset
 
 # --- 1. 환경 설정 ---
@@ -312,13 +312,14 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     metrics_to_evaluate = [
         faithfulness,
         answer_relevancy,
-        context_utilization
+        ContextUtilization(),
+        LLMContextPrecisionWithoutReference()
     ]
 
     try:
         result = evaluate(
-            dataset=dataset, 
-            metrics=metrics_to_evaluate, 
+            dataset=dataset,
+            metrics=metrics_to_evaluate,
             llm=ragas_llm,
             embeddings=ragas_embeddings
         )
@@ -336,6 +337,8 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
             print(f"answer_relevancy: {result_df['answer_relevancy'].iloc[0]:.4f}")
         if 'context_utilization' in result_df.columns:
             print(f"context_utilization: {result_df['context_utilization'].iloc[0]:.4f}")
+        if 'llm_context_precision_without_reference' in result_df.columns:
+            print(f"context_precision: {result_df['llm_context_precision_without_reference'].iloc[0]:.4f}")
         
         print("\n--- 전체 평가 데이터프레임 ---")
         print(result_df)
@@ -344,7 +347,8 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
 
     except Exception as e:
         print(f"❌ RAGAS 평가 중 오류가 발생했습니다: {e}")
-        return pd.DataFrame({'faithfulness': [0.0], 'answer_relevancy': [0.0], 'context_utilization': [0.0]})
+        # 오류 발생 시에도 일관된 DataFrame 구조를 반환
+        return pd.DataFrame({'faithfulness': [0.0], 'answer_relevancy': [0.0], 'context_utilization': [0.0], 'context_precision': [0.0]})
 
 # --- 7. 메인 실행 로직 ---
 if __name__ == "__main__":

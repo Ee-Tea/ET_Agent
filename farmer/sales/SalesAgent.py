@@ -10,72 +10,31 @@ import os
 import pandas as pd
 from konlpy.tag import Okt
 import re
-from groq import Groq
+from langchain_groq import ChatGroq
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
 from langchain_community.tools.tavily_search import TavilySearchResults
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
+import asyncio
 
 # 임베딩 모델
-embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
+embedder = SentenceTransformer("BAAI/bge-m3")
 
 # 환경 변수 로드
 load_dotenv()
 api_key = os.getenv("KAMIS_API_KEY")
 api_id = os.getenv("KAMIS_ID")
-groq_api_key = os.getenv(f"OPENAI_KEY1")
+openai_api_key = os.getenv("OPENAI_KEY1")
 milvus_host = os.getenv("MILVUS_HOST", "localhost")
 milvus_port = os.getenv("MILVUS_PORT", "19530")
 collection_name = "market_price_docs"
 
-***REMOVED*** LLM 모델 클래스
-class GroqLLM:
-    def __init__(self, model="openai/gpt-oss-20b", api_key=None):
-        self.model = model
-        self.api_key = groq_api_key
-        self.client = None
-
-    def invoke(self, prompt: str, context: str = None, system_instruction: str = None):
-        messages = []
-        
-        # 시스템 메시지로 컨텍스트와 지시사항 전달
-        if context or system_instruction:
-            system_content = ""
-            if context:
-                system_content += f"[참고 정보]\n{context}\n\n"
-            if system_instruction:
-                system_content += system_instruction
-            
-            messages.append({
-                "role": "system", 
-                "content": system_content
-            })
-        
-        # 사용자 질문
-        messages.append({
-            "role": "user", 
-            "content": prompt
-        })
-        
-        try:
-            self.client = Groq(api_key=self.api_key)
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.8,
-                max_completion_tokens=1024,
-                top_p=0.8,
-                reasoning_effort="low",
-                stream=True,
-                stop=None
-            )
-            result = "".join(chunk.choices[0].delta.content or "" for chunk in completion)
-            return result.strip()
-        except Exception as e:
-            print(f"API key 실패: {e}")
-            return f"LLM 호출 실패"
+# LLM 및 프롬프트 설정
+llm = ChatGroq(model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+               temperature=0.7,
+               api_key=openai_api_key)
 
 # 상태 스키마 정의
 class GraphState(TypedDict):
@@ -91,6 +50,7 @@ class GraphState(TypedDict):
     missing_info_types: List[str]
     used_web_search: bool
     validation_details: Optional[dict]
+    ragas_scores: Optional[Dict[str, float]]
 
 # 키워드 추출
 def extract_keywords(query):
@@ -127,19 +87,19 @@ def node_classify_question(state: GraphState) -> GraphState:
     print(f"✅ 질문 분류 완료: {classification}")
     return state
 
-# 질문 분류 함수
+# 키워드로 질문 분류 함수
 def classify_question_simple(query: str) -> str:
     """핵심 의도 키워드만으로 질문을 분류합니다."""
     query_lower = query.lower()
     
     # 핵심 의도 키워드 (가장 중요한 것들만)
-    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있', '팔까', '팔면', '파는게', '파는 것', '파는것']
+    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있', '팔까', '팔면', '파는게', '파는 것', '파는것', '시세와 판매처', '시세와 판매점', '가격과 판매처','시세와 판매점', '가격과 판매점','가격과 판매처']
     price_intent = ['가격', '시세', '얼마', '값', '원']
-    location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳','판매처']
+    location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳','판매처', '시장']
     
     # "농작물"이 포함된 경우 특별 처리
     if "농작물" in query_lower:
-        if any(keyword in query_lower for keyword in selling_intent):
+        if any(keyword in query_lower for keyword in selling_intent + location_intent):
             return "판매처" # "농작물을 팔고 싶어" → 판매처
         else:
             return "정보 부족"  # "농작물"만
@@ -342,7 +302,7 @@ def search_market_docs(query, local_collection, top_k=3):
         query_nouns = extract_keywords(query)
 
         # 미리 정의된 지역명 리스트와 명사 키워드를 비교하여 지역명만 추출
-        predefined_locations = ['함평','서산','대전', '춘천','광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산광역', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
+        predefined_locations = ['인천','함평','서산','대전', '춘천','광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
         locations = [kw for kw in query_nouns if kw in predefined_locations or any(suffix in kw for suffix in ['시', '군', '구', '도'])]
 
         # 1. 지역 키워드 임베딩 검색
@@ -467,7 +427,7 @@ def node_llm_summarize_graph(state: GraphState) -> GraphState:
         context_str += "\n\n위의 문제점들을 해결하여 다시 답변을 생성해주세요."
 
     # LLM 호출
-    pred_answer = ask_llm_groq(
+    pred_answer = ask_llm_openai(
         prompt=state["query"],
         context=context_str,
         system_instruction=system_instruction
@@ -519,12 +479,39 @@ def make_system_instruction(classification="시세+판매처"):
     """
 
 # LLM 호출 함수
-def ask_llm_groq(prompt, context="", system_instruction=None, model="openai/gpt-oss-20b"):
+def ask_llm_openai(prompt, context="", system_instruction=None, model="gpt-4o-mini"):
     if system_instruction is None:
         system_instruction = make_system_instruction()
     
-    llm = GroqLLM(model=model, api_key=groq_api_key)
-    return llm.invoke(prompt, context, system_instruction)
+    # LangChain ChatGroq를 사용하여 LLM 호출
+    try:
+        # 시스템 메시지와 사용자 메시지 구성
+        messages = []
+        
+        if context or system_instruction:
+            system_content = ""
+            if context:
+                system_content += f"[참고 정보]\n{context}\n\n"
+            if system_instruction:
+                system_content += system_instruction
+            
+            messages.append({
+                "role": "system", 
+                "content": system_content
+            })
+        
+        messages.append({
+            "role": "user", 
+            "content": prompt
+        })
+        
+        # ChatGroq를 사용하여 응답 생성
+        response = llm.invoke(messages)
+        return response.content.strip()
+        
+    except Exception as e:
+        print(f"LLM 호출 실패: {e}")
+        return f"LLM 호출 실패"
 
 # ===============================
 # 응답 품질 검증
@@ -883,6 +870,52 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
     return supplemented_context
 
 # ===============================
+# RAGAS 검증
+# ===============================
+def node_ragas_validation(state: GraphState) -> GraphState:
+    """RAGAS를 사용하여 답변 품질을 평가합니다."""
+    print("📊 RAGAS 검증 중...")
+    
+    try:
+        # SalesRAGAS 모듈에서 필요한 함수들 import
+        from SalesRAGAS import SalesRAGASEvaluator
+        
+        # 평가기 초기화
+        evaluator = SalesRAGASEvaluator()
+        
+        # 현재 상태에서 평가 데이터 준비
+        question = state["query"]
+        answer = state["pred_answer"]
+        context = state["context"]
+        
+        # 컨텍스트를 문자열로 변환 (SalesRAGAS의 _format_context 메서드 활용)
+        context_str = evaluator._format_context(context)
+        
+        # 개별 RAGAS 평가 실행 (비동기)
+        async def run_ragas_evaluation():
+            return await evaluator._evaluate_single_ragas_simple(
+                question, answer, context_str
+            )
+        
+        # 비동기 실행
+        ragas_scores = asyncio.run(run_ragas_evaluation())
+        
+        if ragas_scores:
+            state["ragas_scores"] = ragas_scores
+            print(f"✅ RAGAS 검증 완료:")
+            for metric, score in ragas_scores.items():
+                print(f"  - {metric}: {score:.3f}")
+        else:
+            state["ragas_scores"] = {}
+            print("⚠️ RAGAS 검증 실패")
+        
+    except Exception as e:
+        print(f"❌ RAGAS 검증 중 오류 발생: {e}")
+        state["ragas_scores"] = {}
+    
+    return state
+
+# ===============================
 # 최종 답변
 # ===============================
 def node_output_graph(state: GraphState) -> GraphState:
@@ -896,6 +929,13 @@ def node_output_graph(state: GraphState) -> GraphState:
         state["final_answer"] = "해당 작물과 지역에 대한 시세 또는 판매처 정보가 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
     else:
         state["final_answer"] = f"{state['pred_answer']}"
+    
+    # RAGAS 점수가 있으면 출력
+    if state.get("ragas_scores"):
+        print(f"\n📊 RAGAS 평가 결과:")
+        for metric, score in state["ragas_scores"].items():
+            print(f"  - {metric}: {score:.3f}")
+    
     return state
 
 # ===============================
@@ -910,6 +950,7 @@ graph.add_node("llm_summarize", node_llm_summarize_graph)
 graph.add_node("judge_recommendation", node_judge_recommendation_graph)
 graph.add_node("web_search_supplement", node_web_search_supplement)  # 웹 검색 노드 추가
 graph.add_node("reanalyze", node_reanalyze_graph)
+graph.add_node("ragas_validation", node_ragas_validation)  # RAGAS 검증 노드 추가
 graph.add_node("output", node_output_graph)
 
 graph.add_edge("input", "classify_question")
@@ -919,7 +960,7 @@ graph.add_edge("collect_info", "llm_summarize")
 # 회귀자 여부
 def summarize_branch(state: GraphState) -> str:
     if state.get("used_web_search"):
-        return "output"
+        return "ragas_validation"  # 웹 검색 후에도 RAGAS 검증으로
     else:
         return "judge_recommendation"
 
@@ -929,7 +970,7 @@ def judge_branch(state: GraphState) -> str:
         return END
     
     if state.get("is_recommend_ok"):
-        return "output"
+        return "ragas_validation"  # RAGAS 검증으로 이동
     
     # 재분석 횟수가 1회 미만인 경우
     if state["retry_count"] < 1:
@@ -940,14 +981,14 @@ def judge_branch(state: GraphState) -> str:
     if state.get("needs_web_search") and not state.get("used_web_search"):
         return "web_search_supplement"
     
-    # 재시도가 모두 소진되었거나 웹 검색을 이미 수행한 경우 종료
-    return "output"
+    # 재시도가 모두 소진되었거나 웹 검색을 이미 수행한 경우 RAGAS 검증으로 이동
+    return "ragas_validation"
 
 graph.add_conditional_edges(
     "llm_summarize",
     summarize_branch,
     {
-        "output": "output",
+        "ragas_validation": "ragas_validation",  # RAGAS 검증으로 변경
         "judge_recommendation": "judge_recommendation",
     },
 )
@@ -956,13 +997,14 @@ graph.add_conditional_edges(
     "judge_recommendation", 
     judge_branch,
     {
-        "output": "output",
+        "ragas_validation": "ragas_validation",  # RAGAS 검증으로 변경
         "web_search_supplement": "web_search_supplement",  # 웹 검색 분기 추가
         "reanalyze": "reanalyze"
     }
 )
 graph.add_edge("web_search_supplement", "llm_summarize")  # 웹 검색 후 LLM으로
 graph.add_edge("reanalyze", "llm_summarize")
+graph.add_edge("ragas_validation", "output")  # RAGAS 검증 후 output으로
 graph.add_edge("output", END)
 
 graph.set_entry_point("input")
@@ -982,14 +1024,14 @@ if __name__ == "__main__":
     app = graph.compile()
 
     # 판매처 에이전트 단독 실행, 그래프 시각화
-    try:
-        graph_image_path = "sales_agent_workflow.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "경주에서 쪽파를 팔고 싶어"})
+    # try:
+    #     graph_image_path = "sales_agent_workflow.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류 발생: {e}")
+    result_state = app.invoke({"query": "울산에서 감자 시세와 판매처를 알려주세요"})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

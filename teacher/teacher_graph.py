@@ -2199,82 +2199,7 @@ class Teacher:
         print("✅ LangGraph 워크플로우 그래프 생성 완료")
         return builder.compile(checkpointer=self.checkpointer)
 
-    def invoke(self, state: TeacherState, config: Optional[Dict] = None) -> TeacherState:
-        """LangGraph 기반으로 워크플로우를 실행합니다."""
-        if config is None:
-            config = {"configurable": {"thread_id": "default"}}
-        
-        # 체크포인터와 함께 그래프 실행
-        try:
-            result = self.graph.invoke(state, config)
-            return result
-        except Exception as e:
-            print(f"❌ 그래프 실행 중 오류 발생: {e}")
-            # interrupt가 발생한 경우 체크포인터에서 상태 복구 시도
-            if "interrupt" in str(e).lower():
-                print("🔄 interrupt가 발생했습니다. 체크포인터에서 상태를 확인하세요.")
-                print("💡 Command(resume)을 사용하여 워크플로우를 재개할 수 있습니다.")
-            raise
 
-    def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> TeacherState:
-        """Command(resume)을 사용하여 중단된 워크플로우를 재개합니다."""
-        if config is None:
-            config = {"configurable": {"thread_id": "default"}}
-        
-        # 상위 그래프에서 재개: 사용자 피드백을 임시 저장하여 solution 노드가 서브그래프 초기 상태로 전달
-        try:
-            self._pending_user_feedback = resume_data
-        except Exception:
-            pass
-
-        # LangGraph 버전에 따른 Command import 시도
-        try:
-            from langgraph.checkpoint.memory import Command
-        except ImportError:
-            try:
-                from langgraph import Command
-            except ImportError:
-                try:
-                    from langgraph.types import Command
-                except ImportError:
-                    print("❌ Command를 import할 수 없습니다. LangGraph 버전을 확인해주세요.")
-                    raise ImportError("Command import 실패")
-        
-        try:
-            print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
-            print(f"🔍 체크포인터 상태 확인: {self.checkpointer}")
-            
-            # 숏텀 메모리에서 solution_agent 상태 복구 시도
-            try:
-                from common.short_term.redis_memory import RedisLangGraphMemory
-                redis_memory = RedisLangGraphMemory()
-                
-                # solution_agent의 메모리 키들을 찾아서 상태 복구
-                memory_keys = redis_memory.keys("solution_*")
-                if memory_keys:
-                    print(f"🔍 숏텀 메모리에서 solution 상태 발견: {len(memory_keys)}개")
-                    for key in memory_keys:
-                        state_data = redis_memory.get(key)
-                        if state_data and state_data.get("interrupt_occurred"):
-                            print(f"💾 복구된 상태: {key}")
-                            # 상태를 체크포인터에 저장
-                            if hasattr(self, 'checkpointer') and self.checkpointer:
-                                self.checkpointer.put(config.get("configurable", {}).get("thread_id", "default"), state_data)
-            except Exception as mem_err:
-                print(f"⚠️ 숏텀 메모리 복구 실패: {mem_err}")
-            
-            # Command(resume)을 사용하여 중단된 지점부터 재개
-            resume_command = Command(resume={"data": resume_data})
-            print(f"📤 Command(resume) 전송: {resume_command}")
-            
-            # 체크포인터가 설정된 그래프로 재개
-            result = self.graph.invoke(resume_command, config)
-            print("✅ 워크플로우 재개 완료")
-            return result
-        except Exception as e:
-            print(f"❌ 워크플로우 재개 실패: {e}")
-            print(f"🔍 오류 상세: {type(e).__name__}: {str(e)}")
-            raise
 
     # ── Memory IO ────────────────────────────────────────────────────────────
 
@@ -2283,7 +2208,7 @@ class Teacher:
 def create_app() -> Any:
     """Streamlit 앱에서 사용할 teacher graph 앱을 생성합니다."""
     orch = Teacher(user_id="streamlit_user", service="teacher", chat_id="web")
-    return orch.build_teacher_graph()
+    return orch.graph
 
 if __name__ == "__main__":
     """
@@ -2303,7 +2228,7 @@ if __name__ == "__main__":
 
     # 오케스트레이터 & 그래프 컴파일
     orch = Teacher(user_id=USER_ID, service=SERVICE, chat_id=CHAT_ID)
-    app = orch.build_teacher_graph()
+    app = orch.graph
 
     print("\n=== Teacher Graph 테스트 ===")
     print("질문을 입력하세요. (종료: exit/quit)\n")

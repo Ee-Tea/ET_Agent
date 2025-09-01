@@ -68,7 +68,7 @@ class MainState(TypedDict):
     user_query: str                    # 사용자 입력
     user_id: str                       # 사용자 ID
     chat_id: str                       # 채팅 ID
-    service_classification: str        # 서비스 분류 결과 (farmer/teacher)
+    service_classification: str        # 서비스 분류 결과 (farmer/teacher/irrelevant)
     classification_confidence: float   # 분류 신뢰도
     classification_reason: str         # 분류 이유
     llm_response: str                  # LLM 응답
@@ -79,6 +79,18 @@ class MainState(TypedDict):
     farmer_state: NotRequired[Dict]    # Farmer 상태
     final_response: str                # 최종 응답
     session_data: Dict[str, Any]       # 세션 데이터
+    # 새로운 필드들
+    is_relevant: NotRequired[bool]     # 질문 관련성 (농사 자격증 관련인지)
+    relevance_check_reason: NotRequired[str]  # 관련성 체크 이유
+    service_consistent: NotRequired[bool]     # 서비스 일관성
+    is_first_question: NotRequired[bool]      # 첫 번째 질문인지
+    consistency_message: NotRequired[str]     # 일관성 체크 메시지
+    previous_service: NotRequired[str]        # 이전 서비스
+    # 메모리 관련 필드들
+    chat_history: NotRequired[List[Dict]]     # 채팅 히스토리
+    loaded_memory_data: NotRequired[Dict]     # 로드된 메모리 데이터
+    memory_loaded: NotRequired[bool]          # 메모리 로드 성공 여부
+    memory_saved: NotRequired[bool]           # 메모리 저장 성공 여부
 
 class MainOrchestrator:
     """메인 오케스트레이터 클래스"""
@@ -124,13 +136,229 @@ class MainOrchestrator:
 
         self.app = self.graph.compile(checkpointer=self.memory)
     
-    def classify_service(self, state: MainState) -> MainState:
+    def load_memory_data(self, state: MainState) -> MainState:
         """
-        사용자 입력을 분석하여 서비스를 분류하는 노드 (키워드 기반 휴리스틱)
+        숏텀 메모리에서 데이터를 로드하는 노드
+        """
+        user_id = state["user_id"]
+        chat_id = state["chat_id"]
+        
+        try:
+            print(f"📥 메모리 데이터 로드 중... user_id={user_id}, chat_id={chat_id}")
+            
+            # 채팅 히스토리 로드
+            chat_history = self.memory.get_chat_history()
+            
+            # 세션 데이터 로드
+            session_key = f"session_{user_id}_{chat_id}"
+            session_data = self.memory.get(session_key) or {}
+            
+            # 메모리에서 기존 상태 데이터 로드 (있는 경우)
+            memory_keys = self.memory.keys(f"{user_id}_{chat_id}_*")
+            loaded_data = {}
+            
+            for key in memory_keys:
+                if "session" not in key:  # 세션 데이터는 별도로 처리
+                    data = self.memory.get(key)
+                    if data:
+                        # 키에서 데이터 타입 추출 (예: user_chat_shared, user_chat_generation 등)
+                        key_parts = key.split('_')
+                        if len(key_parts) >= 3:
+                            data_type = '_'.join(key_parts[2:])
+                            loaded_data[data_type] = data
+            
+            print(f"✅ 메모리 로드 완료: 히스토리={len(chat_history)}개, 세션={bool(session_data)}, 데이터={len(loaded_data)}개")
+            
+            return {
+                **state,
+                "session_data": session_data,
+                "chat_history": chat_history,
+                "loaded_memory_data": loaded_data,
+                "memory_loaded": True
+            }
+            
+        except Exception as e:
+            print(f"❌ 메모리 로드 중 오류: {e}")
+            return {
+                **state,
+                "session_data": {},
+                "chat_history": [],
+                "loaded_memory_data": {},
+                "memory_loaded": False,
+                "error_message": f"메모리 로드 오류: {str(e)}"
+            }
+    
+    def save_memory_data(self, state: MainState) -> MainState:
+        """
+        상태를 숏텀 메모리에 저장하는 노드
+        """
+        user_id = state["user_id"]
+        chat_id = state["chat_id"]
+        
+        try:
+            print(f"💾 메모리 데이터 저장 중... user_id={user_id}, chat_id={chat_id}")
+            
+            # 현재 대화를 채팅 히스토리에 추가
+            current_interaction = {
+                "timestamp": time.time(),
+                "user_query": state["user_query"],
+                "service_classification": state.get("service_classification", ""),
+                "final_response": state.get("final_response", ""),
+                "is_relevant": state.get("is_relevant", True),
+                "service_consistent": state.get("service_consistent", True)
+            }
+            
+            self.memory.add_to_chat_history(current_interaction)
+            
+            # 세션 데이터 저장
+            session_data = state.get("session_data", {})
+            if session_data:
+                session_key = f"session_{user_id}_{chat_id}"
+                self.memory.put(session_key, session_data)
+            
+            # Teacher 상태가 있는 경우 저장
+            teacher_state = state.get("teacher_state")
+            if teacher_state:
+                # Teacher의 주요 상태들을 개별적으로 저장
+                for state_key in ["shared", "generation", "solution", "score", "analysis", "artifacts"]:
+                    if state_key in teacher_state and teacher_state[state_key]:
+                        memory_key = f"{user_id}_{chat_id}_{state_key}"
+                        self.memory.put(memory_key, teacher_state[state_key])
+            
+            # Farmer 상태가 있는 경우 저장
+            farmer_state = state.get("farmer_state")
+            if farmer_state:
+                memory_key = f"{user_id}_{chat_id}_farmer_state"
+                self.memory.put(memory_key, farmer_state)
+            
+            print(f"✅ 메모리 저장 완료")
+            
+            return {
+                **state,
+                "memory_saved": True
+            }
+            
+        except Exception as e:
+            print(f"❌ 메모리 저장 중 오류: {e}")
+            return {
+                **state,
+                "memory_saved": False,
+                "error_message": f"메모리 저장 오류: {str(e)}"
+            }
+    
+    def check_question_relevance(self, state: MainState) -> MainState:
+        """
+        질문이 농사 자격증과 관련이 있는지 확인하는 노드
         """
         user_query = state["user_query"]
         
         try:
+            # LLM을 사용한 관련성 체크
+            relevance_prompt = f"""
+사용자의 질문이 농사 자격증(농산업기사, 종자산업기사 등)과 관련이 있는지 분석해주세요.
+
+질문: {user_query}
+
+다음 중 하나로만 답변해주세요:
+- "relevant": 농사 자격증, 농업 기술, 작물 재배, 농업 관련 질문
+- "irrelevant": 농사 자격증과 전혀 무관한 질문
+
+답변:
+"""
+            
+            response = self.llm.invoke(relevance_prompt)
+            relevance = response.content.strip().lower()
+            
+            is_relevant = "relevant" in relevance
+            
+            print(f"🔍 질문 관련성 체크: {'관련됨' if is_relevant else '무관함'}")
+            
+            return {
+                **state,
+                "is_relevant": is_relevant,
+                "relevance_check_reason": relevance
+            }
+            
+        except Exception as e:
+            print(f"❌ 관련성 체크 중 오류: {e}")
+            return {
+                **state,
+                "is_relevant": True,  # 오류 시 기본적으로 관련 있다고 가정
+                "relevance_check_reason": f"오류로 인한 기본값: {str(e)}"
+            }
+
+    def check_service_consistency(self, state: MainState) -> MainState:
+        """
+        메인에서 로드한 메모리 데이터를 기반으로 서비스 일관성을 체크하는 노드
+        """
+        user_query = state["user_query"]
+        
+        try:
+            # 메인에서 로드한 데이터 사용
+            session_data = state.get("session_data", {})
+            chat_history = state.get("chat_history", [])
+            
+            # 현재 세션에 기존 서비스 분류가 있는지 확인
+            previous_service = session_data.get("locked_service")
+            
+            # 채팅 히스토리에서 최근 서비스 분류 확인
+            if not previous_service and chat_history:
+                # 가장 최근 대화에서 서비스 확인
+                for interaction in reversed(chat_history):
+                    if interaction.get("service_classification") in ["teacher", "farmer"]:
+                        previous_service = interaction["service_classification"]
+                        break
+            
+            print(f"🔄 서비스 일관성 체크: 이전={previous_service}")
+            print(f"📚 채팅 히스토리: {len(chat_history)}개 대화")
+            
+            # 첫 번째 질문인 경우 또는 기존 서비스가 없는 경우
+            if not previous_service:
+                return {
+                    **state,
+                    "service_consistent": True,
+                    "is_first_question": True,
+                    "consistency_message": ""
+                }
+            
+            # 기존 서비스가 있는 경우, 분류 단계로 넘어가서 비교
+            return {
+                **state,
+                "service_consistent": True,  # 우선 True로 설정, 분류 후 다시 체크
+                "is_first_question": False,
+                "consistency_message": "",
+                "previous_service": previous_service
+            }
+            
+        except Exception as e:
+            print(f"❌ 서비스 일관성 체크 중 오류: {e}")
+            return {
+                **state,
+                "service_consistent": True,
+                "is_first_question": True,
+                "consistency_message": "",
+                "error_message": f"일관성 체크 오류: {str(e)}"
+            }
+
+    def classify_service(self, state: MainState) -> MainState:
+        """
+        사용자 입력을 분석하여 서비스를 분류하는 노드
+        """
+        user_query = state["user_query"]
+        is_first_question = state.get("is_first_question", True)
+        previous_service = state.get("previous_service")
+        
+        try:
+            # 첫 번째 질문이 아니고 이전 서비스가 있는 경우, 해당 서비스로 고정
+            if not is_first_question and previous_service:
+                print(f"🔒 서비스 고정됨: {previous_service}")
+                return {
+                    **state,
+                    "service_classification": previous_service,
+                    "classification_confidence": 1.0,
+                    "classification_reason": f"이전 세션에서 고정된 서비스: {previous_service}"
+                }
+            
             # LLM을 사용한 서비스 분류
             classification_prompt = f"""
 사용자의 질문을 분석하여 어떤 서비스가 필요한지 분류해주세요.
@@ -138,8 +366,8 @@ class MainOrchestrator:
 질문: {user_query}
 
 다음 중 하나로만 답변해주세요:
-- "farmer": 농업, 재배, 작물, 농사 관련 질문
-- "teacher": 자격증, 시험, 학습, 교육 관련 질문
+- "farmer": 농업, 재배, 작물, 농사, 농업기술, 작물관리 관련 질문
+- "teacher": 자격증, 시험, 학습, 교육, 문제풀이, 시험준비 관련 질문
 
 답변:
 """
@@ -161,7 +389,7 @@ class MainOrchestrator:
             return {
                 **state,
                 "service_classification": service_classification,
-                "classification_confidence": 1.0,  # 단순화를 위해 고정값
+                "classification_confidence": 1.0,
                 "classification_reason": "LLM 분류 결과"
             }
             
@@ -174,6 +402,223 @@ class MainOrchestrator:
                 "classification_reason": f"오류로 인한 기본값: {str(e)}"
             }
     
+    def handle_irrelevant_question(self, state: MainState) -> MainState:
+        """
+        농사 자격증과 무관한 질문에 대한 안내 응답을 생성하는 노드
+        """
+        user_query = state["user_query"]
+        
+        try:
+            # LLM을 사용한 친절한 안내 응답 생성
+            response_prompt = f"""
+사용자가 농사 자격증과 관련 없는 질문을 했습니다. 친절하고 도움이 되는 안내 메시지를 작성해주세요.
+
+사용자 질문: {user_query}
+
+다음 내용을 포함하여 응답해주세요:
+1. 질문에 대한 간단한 답변 (가능한 경우)
+2. 이 시스템은 농사 자격증(농산업기사, 종자산업기사 등) 관련 질문에 특화되어 있다는 안내
+3. 농사 자격증 관련 질문을 입력해달라는 요청
+4. 친근하고 도움이 되는 톤
+
+한국어로 200자 이내로 작성해주세요.
+"""
+            
+            # LLM 모델 설정을 더 관대하게 변경
+            client_for_response = OpenAI(base_url=llm_base_url, api_key=llm_api_key)
+            response = client_for_response.chat.completions.create(
+                model=llm_model,
+                messages=[{"role": "user", "content": response_prompt}],
+                temperature=0.7,
+                max_tokens=300
+            )
+            
+            generated_response = response.choices[0].message.content.strip()
+            
+            print(f"🚫 무관한 질문 처리됨")
+            
+            return {
+                **state,
+                "final_response": generated_response,
+                "hitl_required": False,
+                "service_classification": "irrelevant"
+            }
+            
+        except Exception as e:
+            print(f"❌ 무관한 질문 응답 생성 중 오류: {e}")
+            fallback_response = f"""
+안녕하세요! 
+
+죄송하지만 이 시스템은 농사 자격증(농산업기사, 종자산업기사 등) 관련 질문에 특화되어 있습니다.
+
+농업 기술, 작물 재배, 시험 준비 등 농사 자격증과 관련된 질문을 입력해주시면 더 정확하고 도움이 되는 답변을 드릴 수 있습니다.
+
+감사합니다! 😊
+"""
+            return {
+                **state,
+                "final_response": fallback_response,
+                "hitl_required": False,
+                "service_classification": "irrelevant",
+                "error_message": f"응답 생성 오류: {str(e)}"
+            }
+
+    def handle_service_inconsistency(self, state: MainState) -> MainState:
+        """
+        서비스 일관성 문제를 처리하는 노드
+        """
+        consistency_message = state.get("consistency_message", "")
+        
+        return {
+            **state,
+            "final_response": consistency_message,
+            "hitl_required": True,
+            "hitl_data": {
+                "type": "service_consistency",
+                "message": consistency_message,
+                "options": ["계속", "새 채팅"]
+            }
+        }
+
+    def update_session_data(self, state: MainState) -> MainState:
+        """
+        세션 데이터를 업데이트하여 서비스 고정 상태를 저장하는 노드
+        """
+        service_classification = state.get("service_classification")
+        is_first_question = state.get("is_first_question", False)
+        
+        # 첫 번째 질문이고 유효한 서비스인 경우, 세션에 고정
+        if is_first_question and service_classification in ["teacher", "farmer"]:
+            try:
+                # 메모리에 서비스 고정 상태 저장
+                session_update = {
+                    "locked_service": service_classification,
+                    "first_classification_time": time.time(),
+                    "service_locked": True
+                }
+                
+                # 세션 데이터 업데이트
+                updated_session_data = {**state.get("session_data", {}), **session_update}
+                
+                print(f"🔒 서비스 고정됨: {service_classification}")
+                
+                return {
+                    **state,
+                    "session_data": updated_session_data
+                }
+                
+            except Exception as e:
+                print(f"❌ 세션 데이터 업데이트 중 오류: {e}")
+                return state
+        
+        return state
+
+    def route_after_relevance_check(self, state: MainState) -> str:
+        """
+        관련성 체크 후 라우팅 결정
+        """
+        is_relevant = state.get("is_relevant", True)
+        
+        if not is_relevant:
+            return "handle_irrelevant_question"
+        else:
+            return "check_service_consistency"
+
+    def route_after_consistency_check(self, state: MainState) -> str:
+        """
+        일관성 체크 후 라우팅 결정
+        """
+        service_consistent = state.get("service_consistent", True)
+        
+        if not service_consistent:
+            return "handle_service_inconsistency"
+        else:
+            return "classify_service"
+
+    def check_final_service_consistency(self, state: MainState) -> MainState:
+        """
+        서비스 분류 후 실제 서비스 불일치를 체크하는 노드
+        """
+        current_service = state.get("service_classification", "teacher")
+        previous_service = state.get("previous_service")
+        is_first_question = state.get("is_first_question", False)
+        
+        # 첫 번째 질문이거나 이전 서비스가 없는 경우 일관성 문제 없음
+        if is_first_question or not previous_service:
+            return {
+                **state,
+                "service_consistent": True
+            }
+        
+        # 서비스가 다른 경우
+        if previous_service != current_service:
+            consistency_message = f"""
+🚨 서비스 변경 감지됨!
+
+기존 대화에서는 '{previous_service}' 서비스를 사용하고 있었는데,
+현재 질문은 '{current_service}' 서비스가 필요한 것으로 분류되었습니다.
+
+더 나은 답변을 위해 새로운 채팅을 시작하는 것을 권장합니다.
+현재 대화를 계속하시겠습니까, 아니면 새 채팅을 시작하시겠습니까?
+
+- 현재 대화 계속: '계속'
+- 새 채팅 시작: '새 채팅'
+"""
+            return {
+                **state,
+                "service_consistent": False,
+                "consistency_message": consistency_message
+            }
+        
+        # 서비스가 일관된 경우
+        return {
+            **state,
+            "service_consistent": True
+        }
+
+    def route_after_classification(self, state: MainState) -> str:
+        """
+        서비스 분류 후 라우팅 결정
+        """
+        is_first_question = state.get("is_first_question", False)
+        
+        # 첫 번째 질문인 경우 세션 데이터 업데이트
+        if is_first_question:
+            return "update_session_data"
+        else:
+            # 기존 대화인 경우 최종 일관성 체크
+            return "check_final_service_consistency"
+
+    def route_after_final_consistency_check(self, state: MainState) -> str:
+        """
+        최종 일관성 체크 후 라우팅 결정
+        """
+        service_consistent = state.get("service_consistent", True)
+        
+        if not service_consistent:
+            return "handle_service_inconsistency"
+        else:
+            service = state.get("service_classification", "teacher")
+            if service == "farmer":
+                return "execute_farmer"
+            elif service == "teacher":
+                return "teacher_app"
+            else:
+                return "teacher_app"
+
+    def route_after_session_update(self, state: MainState) -> str:
+        """
+        세션 데이터 업데이트 후 라우팅 결정
+        """
+        service = state.get("service_classification", "teacher")
+        
+        if service == "farmer":
+            return "execute_farmer"
+        elif service == "teacher":
+            return "teacher_app"
+        else:
+            return "teacher_app"
+
     def should_use_hitl(self, state: MainState) -> str:
         """
         HITL 사용 여부를 결정하는 조건부 엣지
@@ -302,64 +747,9 @@ class MainOrchestrator:
     
     def execute_teacher(self, state: MainState) -> MainState:
         """
-        Teacher 서비스를 실행하는 노드
-        
-        Args:
-            state: 현재 상태
-            
-        Returns:
-            MainState: Teacher 실행 결과가 포함된 상태
+        호환성 유지를 위한 래퍼. 현재는 서브그래프 노드 `teacher_app`을 사용합니다.
         """
-        user_query = state["user_query"]
-        
-        try:
-            # Teacher 서비스 실행을 위한 상태 준비
-            teacher_state = {
-                "user_query": user_query,
-                "intent": state.get("intent", ""),
-                "shared": state.get("shared", {}),
-                "work": state.get("work", {}),
-                "retrieval": state.get("retrieval", {}),
-                "generation": state.get("generation", {}),
-                "solution": state.get("solution", {}),
-                "score": state.get("score", {}),
-                "analysis": state.get("analysis", {}),
-                "history": state.get("history", []),
-                "session": state.get("session", {}),
-                "artifacts": state.get("artifacts", {}),
-                "routing": state.get("routing", {})
-            }
-            
-            # Teacher 실행 (invoke 사용)
-            result = self.teacher.graph.invoke(teacher_state)
-            
-            # 결과를 메인 상태에 병합
-            return {
-                **state,
-                "intent": result.get("intent", ""),
-                "shared": result.get("shared", {}),
-                "work": result.get("work", {}),
-                "retrieval": result.get("retrieval", {}),
-                "generation": result.get("generation", {}),
-                "solution": result.get("solution", {}),
-                "score": result.get("score", {}),
-                "analysis": result.get("analysis", {}),
-                "history": result.get("history", []),
-                "session": result.get("session", {}),
-                "artifacts": result.get("artifacts", {}),
-                "routing": result.get("routing", {}),
-                "final_response": result.get("llm_response", "Teacher 서비스 실행 완료"),
-                "hitl_required": False
-            }
-                
-        except Exception as e:
-            print(f"❌ Teacher 서비스 실행 중 오류: {e}")
-            return {
-                **state,
-                "error_message": str(e),
-                "final_response": f"Teacher 서비스 실행 중 오류가 발생했습니다: {str(e)}",
-                "hitl_required": False
-            }
+        return state
     
     def execute_farmer(self, state: MainState) -> MainState:
         """
@@ -457,9 +847,29 @@ class MainOrchestrator:
             "session_data": session_data
         }
     
+    def clear_short_term_memory(self):
+        """
+        숏텀 메모리 초기화
+        테스트 실행 전에 호출하여 이전 상태를 정리
+        """
+        try:
+            # Redis 메모리 초기화
+            if hasattr(self.memory, 'clear'):
+                self.memory.clear(include_questions=True)
+                print("🧹 Redis 숏텀 메모리 초기화 완료")
+            
+            # Teacher 메모리 초기화
+            if hasattr(self.teacher, 'memory') and hasattr(self.teacher.memory, 'clear'):
+                self.teacher.memory.clear(include_questions=True)
+                print("🧹 Teacher 숏텀 메모리 초기화 완료")
+                
+        except Exception as e:
+            print(f"⚠️ 메모리 초기화 중 오류: {e}")
+            print("📝 메모리 초기화를 건너뜁니다.")
+    
     def _create_graph(self) -> StateGraph:
         """
-        LangGraph 워크플로우 생성
+        LangGraph 워크플로우 생성 - 새로운 분기 로직 포함
         
         Returns:
             StateGraph: 생성된 그래프
@@ -467,28 +877,97 @@ class MainOrchestrator:
         # 그래프 빌더 생성
         builder = StateGraph(MainState)
 
-
-        # 노드 추가
+        # 메모리 관련 노드
+        builder.add_node("load_memory_data", self.load_memory_data)
+        builder.add_node("save_memory_data", self.save_memory_data)
+        
+        # 노드 추가 - 새로운 분기 로직
+        builder.add_node("check_question_relevance", self.check_question_relevance)
+        builder.add_node("handle_irrelevant_question", self.handle_irrelevant_question)
+        builder.add_node("check_service_consistency", self.check_service_consistency)
+        builder.add_node("handle_service_inconsistency", self.handle_service_inconsistency)
         builder.add_node("classify_service", self.classify_service)
+        builder.add_node("check_final_service_consistency", self.check_final_service_consistency)
+        builder.add_node("update_session_data", self.update_session_data)
+        
+        # 기존 노드들
         builder.add_node("hitl_confirmation", self.hitl_confirmation)
-        builder.add_node("execute_teacher", self.execute_teacher)
+        # Teacher 서브그래프를 그대로 노드로 등록하여 interrupt가 버블업되도록 구성
+        builder.add_node("teacher_app", self.teacher.graph)
+        builder.add_node("merge_teacher_result", self.merge_teacher_result)
         builder.add_node("execute_farmer", self.execute_farmer)
         builder.add_node("finalize_response", self.finalize_response)
         
-        # 엣지 추가
-        builder.add_edge(START, "classify_service")
+        # 새로운 워크플로우 엣지 추가
+        # 1. 시작 -> 메모리 로드 -> 관련성 체크
+        builder.add_edge(START, "load_memory_data")
+        builder.add_edge("load_memory_data", "check_question_relevance")
+        
+        # 2. 관련성 체크 후 분기
+        builder.add_conditional_edges(
+            "check_question_relevance",
+            self.route_after_relevance_check,
+            {
+                "handle_irrelevant_question": "handle_irrelevant_question",
+                "check_service_consistency": "check_service_consistency"
+            }
+        )
+        
+        # 3. 무관한 질문 처리 -> 메모리 저장 -> 종료
+        builder.add_edge("handle_irrelevant_question", "save_memory_data")
+        
+        # 4. 서비스 일관성 체크 후 분기
+        builder.add_conditional_edges(
+            "check_service_consistency",
+            self.route_after_consistency_check,
+            {
+                "handle_service_inconsistency": "handle_service_inconsistency",
+                "classify_service": "classify_service"
+            }
+        )
+        
+        # 5. 서비스 불일치 처리 (HITL 필요) -> 메모리 저장 -> 종료
+        builder.add_edge("handle_service_inconsistency", "save_memory_data")
+        
+        # 6. 서비스 분류 후 분기
         builder.add_conditional_edges(
             "classify_service",
-            self.should_use_hitl,
+            self.route_after_classification,
             {
-                "hitl_confirmation": "hitl_confirmation",
-                "execute_teacher": "execute_teacher",
+                "update_session_data": "update_session_data",
+                "check_final_service_consistency": "check_final_service_consistency"
+            }
+        )
+        
+        # 6-1. 최종 일관성 체크 후 분기
+        builder.add_conditional_edges(
+            "check_final_service_consistency",
+            self.route_after_final_consistency_check,
+            {
+                "handle_service_inconsistency": "handle_service_inconsistency",
+                "teacher_app": "teacher_app",
                 "execute_farmer": "execute_farmer"
             }
         )
-        builder.add_edge("hitl_confirmation", "execute_teacher")  # HITL 후 기본적으로 Teacher로
-        builder.add_edge("execute_teacher", "finalize_response")
-        builder.add_edge("execute_farmer", "finalize_response")
+        
+        # 7. 세션 데이터 업데이트 후 서비스 실행
+        builder.add_conditional_edges(
+            "update_session_data",
+            self.route_after_session_update,
+            {
+                "teacher_app": "teacher_app",
+                "execute_farmer": "execute_farmer"
+            }
+        )
+        
+        # 8. 서비스 실행 후 메모리 저장
+        builder.add_edge("teacher_app", "merge_teacher_result")
+        builder.add_edge("merge_teacher_result", "save_memory_data")
+        builder.add_edge("execute_farmer", "save_memory_data")
+        
+        # 9. 기존 엣지들 - 메모리 저장 후 완료
+        builder.add_edge("hitl_confirmation", "teacher_app")
+        builder.add_edge("save_memory_data", "finalize_response")
         builder.add_edge("finalize_response", END)
         
         return builder
@@ -550,19 +1029,28 @@ class MainOrchestrator:
         Returns:
             Dict[str, Any]: 재개 결과
         """
+        # LangGraph Command를 사용해 정확히 중단 지점에서 재개
         try:
-            result = self.app.invoke(
-                {"hitl_response": hitl_response},
-                config=config
-            )
+            from langgraph.checkpoint.memory import Command
+        except Exception:
+            try:
+                from langgraph.types import Command
+            except Exception:
+                from langgraph import Command  # 최후 시도
+        try:
+            thread_id = f"{self.user_id}_{self.chat_id}"
+            if config is None:
+                config = {}
+            config.update({
+                "thread_id": thread_id,
+                "checkpoint_id": f"main_orchestrator"
+            })
+            resume_cmd = Command(resume=hitl_response)
+            result = self.app.invoke(resume_cmd, config=config)
             return dict(result)
-            
         except Exception as e:
             print(f"❌ 워크플로우 재개 중 오류: {e}")
-            return {
-                "error": str(e),
-                "hitl_response": hitl_response
-            }
+            return {"error": str(e), "hitl_response": hitl_response}
 
 def main():
 
@@ -577,12 +1065,23 @@ def main():
     
     # 예제 실행
     test_queries = [
-        "토마토 재배 방법을 알려줘",
-        "소프트웨어 설계 문제 3개 만들어줘",
+        # "토마토 재배 방법을 알려줘",
+        # "소프트웨어 설계 문제 3개 만들어줘",
+        """
+        문제 6. 데이터베이스 성능에 많은 영향을 주는 DBMS의 구성 요소로, 독립적인 저장 공간을 보유하며
+        데이터베이스에 저장된 자료를 더욱 빠르게 조회하기 위해 사용되는 것은?
+        1) 인덱스
+        2) 테이블
+        3) 뷰
+        4) 트리거   이거 풀어줘
+        """
     ]
     
     for i, query in enumerate(test_queries, 1):
         print(f"\n=== 테스트 {i}: {query} ===")
+        
+        # 테스트 실행 전 숏텀 메모리 초기화
+        orchestrator.clear_short_term_memory()
         
         result = orchestrator.run(query)
         

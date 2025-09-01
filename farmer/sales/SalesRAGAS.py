@@ -322,6 +322,3 @@ class SalesRAGASEvaluator:
             import traceback
             traceback.print_exc()
             return None
-
-
-

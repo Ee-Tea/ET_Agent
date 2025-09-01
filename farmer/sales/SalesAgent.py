@@ -18,6 +18,8 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 import asyncio
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # 임베딩 모델
 embedder = SentenceTransformer("BAAI/bge-m3")
@@ -51,6 +53,7 @@ class GraphState(TypedDict):
     used_web_search: bool
     validation_details: Optional[dict]
     ragas_scores: Optional[Dict[str, float]]
+    ragas_passed: bool
 
 # 키워드 추출
 def extract_keywords(query):
@@ -89,35 +92,53 @@ def node_classify_question(state: GraphState) -> GraphState:
 
 # 키워드로 질문 분류 함수
 def classify_question_simple(query: str) -> str:
-    """핵심 의도 키워드만으로 질문을 분류합니다."""
-    query_lower = query.lower()
+    """LLM을 사용하여 질문을 분류합니다."""
     
-    # 핵심 의도 키워드 (가장 중요한 것들만)
-    selling_intent = ['팔고 싶어', '팔 수 있', '거래', '판매', '매매', '팔래','팔고싶어','팔수 있','팔수있','팔 수있', '팔까', '팔면', '파는게', '파는 것', '파는것', '시세와 판매처', '시세와 판매점', '가격과 판매처','시세와 판매점', '가격과 판매점','가격과 판매처']
-    price_intent = ['가격', '시세', '얼마', '값', '원']
-    location_intent = ['파는 곳', '판매점', '직매장', '시장', '어디', '파는곳','판매처', '시장']
+    # 분류 프롬프트
+    classification_prompt = ChatPromptTemplate.from_template("""
+당신은 농작물 시세 및 판매처 관련 질문을 분류하는 전문가입니다.
+사용자의 질문을 분석하여 다음 4가지 카테고리 중 하나로 분류해주세요:
+
+1. "시세" - 가격, 시세, 얼마, 값, 원 등 가격 정보만 요구하는 경우
+2. "판매처" - 파는 곳, 판매점, 직매장, 시장, 어디, 판매처 등 판매 장소만 요구하는 경우  
+3. "시세+판매처" - 가격과 판매처 정보를 모두 요구하는 경우
+4. "정보 부족" - 구체적인 작물명이 없는데 시세를 요구한 경우 혹은 구체적인 지역명이 없는데 판매처를 요구한 경우
+
+**분류 기준 예시:**
+- "시세"와 "판매처" 키워드가 함께 있으면 → "시세+판매처"
+- "농작물"과 "시세" 키워드가 함께 있을 때는 작물명의 유무에 따라 → "시세" or "정보 부족"
+- "농작물"과 "판매처" 키워드가 함께 있을 때는 지역명의 유무에 따라 → "판매처" or "정보 부족"
+- 구체적인 작물명과 "팔고 싶어", "판매" 등이 있으면 → "시세+판매처"
+- 가격 관련 키워드만 있으면 → "시세"
+- 판매처 관련 키워드만 있으면 → "판매처"
+- 애매한 경우 → "시세+판매처" (기본값)
+
+질문: {query}
+
+분류 결과 (반드시 위 4가지 중 하나만 출력):
+""")
     
-    # "농작물"이 포함된 경우 특별 처리
-    if "농작물" in query_lower:
-        if any(keyword in query_lower for keyword in selling_intent + location_intent):
-            return "판매처" # "농작물을 팔고 싶어" → 판매처
-        else:
-            return "정보 부족"  # "농작물"만
-    
-    # 일반적인 분류 로직
-    if any(keyword in query_lower for keyword in selling_intent):
-        return "시세+판매처"  # 구체적인 작물명 + 팔고 싶다는 의도
-    
-    if any(keyword in query_lower for keyword in price_intent):
-        if any(keyword in query_lower for keyword in location_intent):
-            return "시세+판매처"  # 가격 + 위치 모두 요구
-        else:
-            return "시세"  # 가격만 요구
-    
-    if any(keyword in query_lower for keyword in location_intent):
-        return "판매처"  # 위치만 요구
-    
-    return "시세+판매처"
+    try:
+        # LLM 체인 생성
+        chain = classification_prompt | llm | StrOutputParser()
+        
+        # 분류 실행
+        result = chain.invoke({"query": query})
+        
+        # 결과 정리
+        classification = result.strip()
+        
+        # 유효한 분류인지 확인
+        valid_classifications = ["시세", "판매처", "시세+판매처", "정보 부족"]
+        if classification not in valid_classifications:
+            print(f"⚠️ LLM 분류 결과가 유효하지 않음: {classification}, 기본값 사용")
+            return "시세+판매처"
+        
+        return classification
+        
+    except Exception as e:
+        print(f"⚠️ LLM 분류 중 오류 발생: {e}, 기본값 사용")
+        return "시세+판매처"
 
 # ===============================
 # 정보 수집
@@ -415,7 +436,7 @@ def node_llm_summarize_graph(state: GraphState) -> GraphState:
         """
         # 판매처 정보가 부족하여 웹 검색을 했을 경우, LLM에게 사용자의 의도를 명확히 전달
         if "판매처" in state.get("missing_info_types", []):
-            web_search_instruction += "- 사용자는 농작물을 '판매'할 수 있는 장소(공판장, 도매시장, 로컬푸드 등)를 찾고 있으니, 검색 결과를 바탕으로 해당 장소들을 추천해주세요.\n- 판매처 정보는 사용자의 질문에 포함된 지역과 다르다면 해당 정보는 무시\n"
+            web_search_instruction += "- 사용자는 **사용자가 농작물을 '판매'할 수 있는 장소(공판장, 도매시장, 로컬푸드 등)**를 찾고 있으니, 검색 결과를 바탕으로 해당 장소들을 추천해주세요.\n- 판매처 정보는 사용자의 질문에 포함된 지역과 다르다면 해당 정보는 무시\n"
         
         web_search_instruction += "- 만약 웹 검색 결과에도 유용한 정보가 없다면, 정보가 없다고 솔직하게 답변해주세요."
         system_instruction += web_search_instruction
@@ -471,7 +492,7 @@ def make_system_instruction(classification="시세+판매처"):
     - `[실시간시세 정보 (API)]`에서 가져온 정보의 출처는 'https://www.kamis.or.kr/customer/main/main.do'을 명시
     - `[판매처 정보 (DB)]`에서 가져온 정보의 출처는 'https://www.data.go.kr/data/15025997/fileData.do'을 명시
     - `[웹 검색 정보]`에서 가져온 정보의 출처는 각 항목 끝에 '(출처: URL)' 형식으로 제공된 URL을 사용
-    - 출처는 반드시 명시해야하지만 정보가 없다면 출처도 제외
+    - **출처는 반드시 명시**해야하지만 정보가 없다면 출처도 제외
     {f"- {template['exclude']}" if template['exclude'] else ""}
 
     [예시]
@@ -876,6 +897,11 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     """RAGAS를 사용하여 답변 품질을 평가합니다."""
     print("📊 RAGAS 검증 중...")
     
+    # RAGAS 임계값 설정
+    CONTEXT_PRECISION_THRESHOLD = 0.7
+    FAITHFULNESS_THRESHOLD = 0.7
+    ANSWER_RELEVANCY_THRESHOLD = 0.5
+    
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import
         from SalesRAGAS import SalesRAGASEvaluator
@@ -903,15 +929,30 @@ def node_ragas_validation(state: GraphState) -> GraphState:
         if ragas_scores:
             state["ragas_scores"] = ragas_scores
             print(f"✅ RAGAS 검증 완료:")
-            for metric, score in ragas_scores.items():
-                print(f"  - {metric}: {score:.3f}")
+            
+            # 임계값 확인
+            context_precision_score = ragas_scores.get('context_precision', 0.0)
+            faithfulness_score = ragas_scores.get('faithfulness', 0.0)
+            answer_relevancy_score = ragas_scores.get('answer_relevancy', 0.0)
+            
+            # 임계값 미달 시 실패 처리 (모든 메트릭이 임계값을 넘어야 통과)
+            if (context_precision_score < CONTEXT_PRECISION_THRESHOLD or 
+                faithfulness_score < FAITHFULNESS_THRESHOLD or 
+                answer_relevancy_score < ANSWER_RELEVANCY_THRESHOLD):
+                state["ragas_passed"] = False
+                print("❌ RAGAS 임계값 미달로 실패")
+            else:
+                state["ragas_passed"] = True
+                print("✅ RAGAS 임계값 통과")
         else:
             state["ragas_scores"] = {}
+            state["ragas_passed"] = False
             print("⚠️ RAGAS 검증 실패")
         
     except Exception as e:
         print(f"❌ RAGAS 검증 중 오류 발생: {e}")
         state["ragas_scores"] = {}
+        state["ragas_passed"] = False
     
     return state
 
@@ -919,15 +960,14 @@ def node_ragas_validation(state: GraphState) -> GraphState:
 # 최종 답변
 # ===============================
 def node_output_graph(state: GraphState) -> GraphState:
-    # 웹 검색을 통해 답변을 보완한 경우, 검증 결과와 상관없이 보완된 답변을 최종 답변으로 사용
-    if state.get("used_web_search"):
-        state["final_answer"] = f"{state['pred_answer']}"
-        return state
-
-    if state["retry_count"] >= 1 and not state["is_recommend_ok"]:
-        # 웹 검색 없이 1회 재분석 후 종료
-        state["final_answer"] = "해당 작물과 지역에 대한 시세 또는 판매처 정보가 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
+    # RAGAS 검증 결과 확인
+    ragas_passed = state.get("ragas_passed", False)
+    
+    # RAGAS 임계값 미달 시 실패 메시지 출력
+    if not ragas_passed:
+        state["final_answer"] = "죄송합니다. 해당 작물과 지역에 대한 시세 또는 판매처 정보를 찾을 수 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
     else:
+        # RAGAS 통과 시 정상 답변 출력
         state["final_answer"] = f"{state['pred_answer']}"
     
     # RAGAS 점수가 있으면 출력
@@ -1031,7 +1071,7 @@ if __name__ == "__main__":
     #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     # except Exception as e:
     #     print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "울산에서 감자 시세와 판매처를 알려주세요"})
+    result_state = app.invoke({"query": "경주에 위치한 농작물 판매처와 꽈리고추 시세를 알려주세요"})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

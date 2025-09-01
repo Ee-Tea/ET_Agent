@@ -11,7 +11,8 @@ ROOT_DIR = os.path.abspath(os.path.join(CUR_DIR, ".."))
 if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
-from teacher_graph import Orchestrator
+from teacher import Teacher
+from common.short_term.redis_memory import RedisLangGraphMemory
 
 
 class StubGenerator:
@@ -85,7 +86,12 @@ class StubGenerator:
 
 def main() -> None:
     # Orchestrator 생성(에이전트 초기화는 켜두되, generator는 스텁으로 교체)
-    orch = Orchestrator(user_id="u1", service="svc", chat_id="c1", init_agents=True)
+    orch = Teacher(user_id="u1", service="svc", chat_id="c1", init_agents=True)
+    # 테스트 시작 전 상태 초기화 (shared/history 및 세션 문제 키 제거)
+    try:
+        RedisLangGraphMemory(user_id="u1", service="svc", chat_id="c1").clear(include_questions=True)
+    except Exception as _:
+        pass
     orch.generator_runner = StubGenerator()
 
     # 스레드 식별자

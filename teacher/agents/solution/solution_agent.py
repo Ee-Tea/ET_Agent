@@ -152,7 +152,7 @@ class SolutionAgent(BaseAgent):
         host: str = "localhost",
         port: str = "19530",
         coll_p: str = "problems",
-        coll_c: str = "concept_summary",
+        coll_c: str = "concepts",
         model_name: str = "jhgan/ko-sroberta-multitask",
     ):
         # 1) 이벤트 루프 보장
@@ -217,7 +217,7 @@ class SolutionAgent(BaseAgent):
                 embedding_function=emb,
                 collection_name=coll_c,
                 connection_args={"uri": f"http://{host}:{port}"},
-                text_field=txt_c,     # concept_summary라면 보통 'content'
+                text_field=txt_c,     # concepts라면 보통 'content'
                 vector_field=vec_c,   # ← 여기서 반드시 'embedding'으로 잡힐 것
             )
             print(f"✅ Milvus '{coll_c}' 연결 OK (text_field={txt_c}, vector_field={vec_c})")
@@ -1323,7 +1323,7 @@ if __name__ == "__main__":
     MILVUS_HOST     = os.getenv("MILVUS_HOST", "localhost")
     MILVUS_PORT     = os.getenv("MILVUS_PORT", "19530")
     PROBLEMS_COLL   = os.getenv("PROBLEMS_COLL", "problems")
-    CONCEPT_COLL    = os.getenv("CONCEPT_COLL", "concept_summary")
+    CONCEPT_COLL    = os.getenv("CONCEPT_COLL", "concepts")
     INSTRUCTION     = os.getenv("AGENT_INSTRUCTION", "정답 번호와 풀이, 과목을 알려줘.")  # ← input() 제거
     RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "200"))
     ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "0"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)

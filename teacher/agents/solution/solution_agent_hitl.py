@@ -988,7 +988,7 @@ class SolutionAgent(BaseAgent):
             if state["retry_count"] >= 5:
                 print("⚠️ 검증 5회 실패 → 그래도 결과를 저장 단계로 진행합니다.")
             else:
-            print(f"⚠️ 검증 실패 (재시도 {state['retry_count']}/5)")
+                print(f"⚠️ 검증 실패 (재시도 {state['retry_count']}/5)")
         else:
             print("✅ 검증 결과: 통과")
             

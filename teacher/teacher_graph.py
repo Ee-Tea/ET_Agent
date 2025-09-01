@@ -133,6 +133,10 @@ class Orchestrator:
             self.solution_runner  = None
             self.score_runner     = None
             self.analyst_runner   = None
+        # resume 시 Redis 식별자 접근 필요하므로 보관
+        self.user_id = user_id
+        self.service = service
+        self.chat_id = chat_id
 
         # LangGraph 기반 그래프 생성
         self.checkpointer = InMemorySaver()
@@ -477,7 +481,8 @@ class Orchestrator:
                 print(f"⚠️ 숏텀 메모리 복구 실패: {mem_err}")
             
             # Command(resume)을 사용하여 중단된 지점부터 재개
-            resume_command = Command(resume={"data": resume_data})
+            # 재개 데이터는 그대로 전달하여 await 노드에서 직접 소비하도록 한다
+            resume_command = Command(resume=resume_data)
             print(f"📤 Command(resume) 전송: {resume_command}")
             
             # 체크포인터가 설정된 그래프로 재개
@@ -1185,13 +1190,33 @@ class Orchestrator:
             from langgraph.types import interrupt
         except Exception:
             def interrupt(msg):
-                raise Exception(f"interrupt: {msg}")
+                return msg
         payload = {
             "type": "output_mode_choice",
             "message": "출력 방식을 선택하세요: 'pdf' 또는 'form'",
             "options": ["pdf", "form"],
         }
-        interrupt(payload)
+        # 최초 호출 시 여기서 중단되고, 재개 시 선택값이 반환됩니다.
+        choice = interrupt(payload)
+        try:
+            new_state: TeacherState = {**state}
+            new_state.setdefault("routing", {})
+            # 문자열 형태("pdf"/"form") 지원
+            if isinstance(choice, str):
+                val = choice.strip().lower()
+                if val in ("pdf", "form"):
+                    new_state["routing"]["output_mode"] = val
+                    return new_state
+            # 사전 형태({"output_mode": "form"} 또는 {"data": "form"}) 지원
+            if isinstance(choice, dict):
+                mode = (choice.get("output_mode") or choice.get("data") or choice.get("mode"))
+                if isinstance(mode, str):
+                    val = mode.strip().lower()
+                    if val in ("pdf", "form"):
+                        new_state["routing"]["output_mode"] = val
+                        return new_state
+        except Exception:
+            pass
         return state
 
     @traceable(name="teacher.decide_output_mode")
@@ -1248,14 +1273,30 @@ class Orchestrator:
             from langgraph.types import interrupt
         except Exception:
             def interrupt(msg):
-                raise Exception(f"interrupt: {msg}")
+                return msg
         payload = {
             "type": "form_questions",
             "message": "아래 문제에 대한 정답을 입력해 주세요.",
             "questions": shared.get("question", []),
             "options": shared.get("options", []),
         }
-        interrupt(payload)
+        # 최초 호출 시 여기서 중단되고, 재개 시 사용자 답안이 반환됩니다.
+        answers = interrupt(payload)
+        try:
+            if isinstance(answers, dict) and "user_answer" in answers:
+                shared["user_answer"] = [str(x).strip() for x in (answers.get("user_answer") or [])]
+                return new_state
+            # nested 형태 처리: {"data": {"user_answer": [...]}}
+            if isinstance(answers, dict) and isinstance(answers.get("data"), dict):
+                data_obj = answers.get("data")
+                if "user_answer" in data_obj:
+                    shared["user_answer"] = [str(x).strip() for x in (data_obj.get("user_answer") or [])]
+                    return new_state
+            if isinstance(answers, list) and answers:
+                shared["user_answer"] = [str(x).strip() for x in answers]
+                return new_state
+        except Exception:
+            pass
         return new_state
 
     @traceable(name="teacher.commit_form_answers")
@@ -2130,27 +2171,33 @@ class Orchestrator:
             print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
             print(f"🔍 체크포인터 상태 확인: {self.checkpointer}")
             
-            # 숏텀 메모리에서 solution_agent 상태 복구 시도
-            try:
-                from common.short_term.redis_memory import RedisLangGraphMemory
-                redis_memory = RedisLangGraphMemory()
-                
-                # solution_agent의 메모리 키들을 찾아서 상태 복구
-                memory_keys = redis_memory.keys("solution_*")
-                if memory_keys:
-                    print(f"🔍 숏텀 메모리에서 solution 상태 발견: {len(memory_keys)}개")
-                    for key in memory_keys:
-                        state_data = redis_memory.get(key)
-                        if state_data and state_data.get("interrupt_occurred"):
-                            print(f"💾 복구된 상태: {key}")
-                            # 상태를 체크포인터에 저장
-                            if hasattr(self, 'checkpointer') and self.checkpointer:
-                                self.checkpointer.put(config.get("configurable", {}).get("thread_id", "default"), state_data)
-            except Exception as mem_err:
-                print(f"⚠️ 숏텀 메모리 복구 실패: {mem_err}")
+            # 숏텀 메모리에서 solution_agent 상태 복구 시도 (옵션)
+            import os as _os
+            if _os.getenv("ENABLE_STM_RECOVERY", "0") == "1":
+                try:
+                    from common.short_term.redis_memory import RedisLangGraphMemory
+                    # 현재 Orchestrator가 생성될 때 사용한 동일 식별자를 활용
+                    user_id = getattr(self, 'user_id', 'u1')
+                    service = getattr(self, 'service', 'svc')
+                    chat_id = getattr(self, 'chat_id', 'c1')
+                    redis_memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
+                    
+                    # solution_agent의 메모리 키들을 찾아서 상태 복구
+                    memory_keys = redis_memory.keys("solution_*")
+                    if memory_keys:
+                        print(f"🔍 숏텀 메모리에서 solution 상태 발견: {len(memory_keys)}개")
+                        for key in memory_keys:
+                            state_data = redis_memory.get(key)
+                            if state_data and state_data.get("interrupt_occurred"):
+                                print(f"💾 복구된 상태: {key}")
+                                # 상태를 체크포인터에 저장
+                                if hasattr(self, 'checkpointer') and self.checkpointer:
+                                    self.checkpointer.put(config.get("configurable", {}).get("thread_id", "default"), state_data)
+                except Exception as mem_err:
+                    print(f"⚠️ 숏텀 메모리 복구 실패: {mem_err}")
             
-            # Command(resume)을 사용하여 중단된 지점부터 재개
-            resume_command = Command(resume={"data": resume_data})
+            # Command(resume)을 사용하여 중단된 지점부터 재개 (재개 데이터 원형 전달)
+            resume_command = Command(resume=resume_data)
             print(f"📤 Command(resume) 전송: {resume_command}")
             
             # 체크포인터가 설정된 그래프로 재개

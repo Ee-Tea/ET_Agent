@@ -651,7 +651,7 @@ class InfoProcessingExamAgent(BaseAgent):
                 # 컨텍스트 없을 때 과목 일반 개념 기반 생성 폴백
                 fallback_prompt = (
                     f"당신은 정보처리기사 출제 전문가입니다. {subject_area} 과목의 기본 개념을 바탕으로 "
-                    f"객관식 문제 {generate_count}개를 생성하세요.\n\n"
+                    f"객관식 문제 {needed_count}개를 생성하세요.\n\n"
                     "출제 규칙:\n"
                     "1) 보기에는 번호(1. 2. 3. 4.)를 절대 붙이지 말고, 순수 텍스트만 사용하세요.\n"
                     "2) 정답(answer)은 보기의 '번호'(문자열)로만 적으세요. 예: \"2\"\n"

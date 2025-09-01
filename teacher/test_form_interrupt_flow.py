@@ -11,7 +11,7 @@ ROOT_DIR = os.path.abspath(os.path.join(CUR_DIR, ".."))
 if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
-from teacher import Teacher
+from teacher_graph import Teacher
 from common.short_term.redis_memory import RedisLangGraphMemory
 
 

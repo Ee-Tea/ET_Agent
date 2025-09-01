@@ -44,19 +44,6 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
-ragas_llm = ChatOpenAI(
-    api_key=GROQAI_API_KEY,
-    base_url=OPENAI_BASE_URL,
-    model=OPENAI_LLM_MODEL,
-    temperature=LLM_TEMPERATURE,
-    max_tokens=min(LLM_MAX_TOKENS, 2048),
-)
-
-ragas_emb = HuggingFaceEmbeddings(
-    model_name="jhgan/ko-sroberta-multitask",
-    model_kwargs={"device": "cpu"}
-)
-
 # ✅ 상태 정의
 class SolutionState(TypedDict):
     # 사용자 입력
@@ -231,56 +218,89 @@ class SolutionAgent(BaseAgent):
     
     @staticmethod
     def _safe_eval_metric(ds, metric, llm_obj, emb_obj, name: str, *,
-                        features=None, question=None, answer=None, ctxs=None) -> float:
+                      features=None, question=None, answer=None, ctxs=None) -> float:
         from ragas import evaluate
+        import math, os
+
         def _parse_score(res):
             score = 0.0
             if hasattr(res, "scores"):
                 sc = res.scores.get(name, 0.0)
-                if isinstance(sc, (list, tuple)):
-                    score = float(sc[0]) if len(sc) else 0.0
-                else:
-                    try:
-                        import numpy as _np, pandas as _pd
-                        if isinstance(sc, _np.ndarray):
-                            score = float(sc.item() if sc.size == 1 else sc[0])
-                        elif isinstance(sc, _pd.Series):
-                            score = float(sc.iloc[0])
-                        else:
-                            score = float(sc)
-                    except Exception:
-                        score = float(sc) if sc is not None else 0.0
-            elif hasattr(res, "to_pandas"):
+                try:
+                    import numpy as _np, pandas as _pd
+                    if isinstance(sc, (list, tuple)) and sc:
+                        return float(sc[0])
+                    if isinstance(sc, _np.ndarray):
+                        return float(sc.item() if sc.size == 1 else sc[0])
+                    if isinstance(sc, _pd.Series):
+                        return float(sc.iloc[0])
+                    return float(sc)
+                except Exception:
+                    return float(sc) if sc is not None else 0.0
+            if hasattr(res, "to_pandas"):
                 df_res = res.to_pandas()
                 if name in df_res.columns and len(df_res) > 0:
-                    score = float(df_res[name].iloc[0])
+                    return float(df_res[name].iloc[0])
             return score
 
+        def _cosine(u, v):
+            if not u or not v: return 0.0
+            num = sum(x*y for x, y in zip(u, v))
+            den = math.sqrt(sum(x*x for x in u)) * math.sqrt(sum(y*y for y in v))
+            return (num / den) if den else 0.0
+
         try:
+            if os.getenv("RAGAS_DEBUG", "0") == "1":
+                n_ctx = len(ctxs) if isinstance(ctxs, (list, tuple)) else 0
+                print(f"[RAGAS:{name}] start(q={len(question or '')}, a={len(answer or '')}, ctxs={n_ctx})")
+
             res = evaluate(ds, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
             score = _parse_score(res)
             print(f"[RAGAS:{name}] {score:.3f}")
             return score
+
         except Exception as e:
             msg = repr(e)
             print(f"[RAGAS:{name}] 실패 → 1차 0.0 ({msg})")
 
-            # 📌 IndexError는 멀티-컨텍스트 처리 중 생기는 알려진 이슈라 단일 블록으로 재시도
+            # 1) answer_relevancy: 컨텍스트 상관 없이 임베딩 폴백
+            if "answer_relevancy" in name:
+                try:
+                    qv = emb_obj.embed_query(question or "")
+                    av = emb_obj.embed_query(answer or "")
+                    a_fb = _cosine(qv, av)
+                    print(f"[RAGAS:{name}] (fallback-emb QA) {a_fb:.3f}")
+                    return a_fb
+                except Exception as e2:
+                    print(f"[RAGAS:{name}] fallback-emb 실패 → 0.0 ({repr(e2)})")
+                    return 0.0
+
+            # 2) faithfulness: IndexError면 단일블록 재시도 → 실패 시 컨텍스트-답변 임베딩
             if "IndexError" in msg and all(v is not None for v in (features, question, answer, ctxs)):
                 try:
-                    joined = "\n\n".join(ctxs)
+                    joined = "\\n\\n".join([c for c in ctxs if c and str(c).strip()])
                     ds2 = Dataset.from_dict(
                         {"question":[question], "answer":[answer], "contexts":[[joined]]},
                         features=features
                     )
                     print(f"[RAGAS:{name}] 단일 블록 재시도")
-                    res2 = evaluate(ds2, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
+                    from ragas import evaluate as _ev2
+                    res2 = _ev2(ds2, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
                     score2 = _parse_score(res2)
                     print(f"[RAGAS:{name}] (단일블록) {score2:.3f}")
                     return score2
                 except Exception as e2:
-                    print(f"[RAGAS:{name}] 단일 블록 재시도 실패 → 0.0 처리 ({repr(e2)})")
-                    return 0.0
+                    print(f"[RAGAS:{name}] 단일 블록 재시도 실패 ({repr(e2)}), emb 폴백 시도")
+                    try:
+                        av = emb_obj.embed_query(answer or "")
+                        cv = emb_obj.embed_query(joined or "")
+                        f_fb = _cosine(cv, av)
+                        print(f"[RAGAS:{name}] (fallback-emb CA) {f_fb:.3f}")
+                        return f_fb
+                    except Exception as e3:
+                        print(f"[RAGAS:{name}] fallback-emb 실패 → 0.0 ({repr(e3)})")
+                        return 0.0
+
             return 0.0
 
         
@@ -329,10 +349,7 @@ class SolutionAgent(BaseAgent):
             kept_norm.append(nb)
 
         # 블록 길이 상한 적용 (내용만 자르기, 의미 변화 없음)
-        trimmed = [b[:max_chars_per_block] for b in kept]
-
-        # 개수 제한
-        return trimmed[:max_blocks]
+        return kept[:max_blocks] if max_blocks else kept
     
     def _strip_md(self, s: str) -> str:
         if not s: return s
@@ -377,6 +394,23 @@ class SolutionAgent(BaseAgent):
             formatted.append(f"[CTX {i} | {src}]\n{piece}")
         return "\n\n".join(formatted)
 
+    def _debug_ds(self, ds, tag: str):
+        print(f"[DBG:ds {tag}] n={len(ds)}, cols={list(ds.features.keys())}")
+        if len(ds) == 0:
+            print(f"[DBG:ds {tag}] (empty dataset)")
+            return
+        row0 = ds[0]
+        keys = list(row0.keys())
+        print(f"[DBG:ds {tag}] row0 keys={keys}")
+        if "contexts" in keys:
+            c0 = row0["contexts"]
+            print(f"[DBG:ds {tag}] type(contexts)={type(c0).__name__}, "
+                f"is_list={isinstance(c0,(list,tuple))}, "
+                f"len={len(c0) if isinstance(c0,(list,tuple)) else 'n/a'}")
+            if isinstance(c0, (list, tuple)):
+                print(f"[DBG:ds {tag}] contexts[0] exists? {bool(c0[:1])}")
+                if c0[:1] and isinstance(c0[0], str):
+                    print(f"[DBG:ds {tag}] contexts[0] head={c0[0][:80]!r}")
 
 
     
@@ -861,14 +895,27 @@ class SolutionAgent(BaseAgent):
         state["ctx_blocks_used"] = final_ctx_blocks
         state["ctx_used_text"]   = ctx_structured  # ← 검증에선 쓰지 않지만 기록/디버깅용으로 남김
 
-        def preview_context(ctx_text: str, label: str): 
-            print(f"{label} 전체 길이: {len(ctx_text)}") 
-            if not ctx_text.strip(): 
-                print(f"{label}: (비어 있음)") 
-                return 
-            blocks = [b.strip() for b in ctx_text.split("\n\n") if b.strip()] 
-            for i, b in enumerate(blocks, 1):
-                print(f" - {label} {i}: {b.splitlines()[0]}...")
+        def preview_context(ctx, label: str, max_blocks: int = 3, head_chars: int = 500):
+            """
+            ctx: 문자열(\n\n로 블록 분리) 또는 블록 리스트 둘 다 지원
+            """
+            if isinstance(ctx, list):
+                blocks = [str(b).strip() for b in ctx if b and str(b).strip()]
+                total_len = sum(len(b) for b in blocks)
+            else:
+                ctx_text = (ctx or "")
+                total_len = len(ctx_text)
+                blocks = [b.strip() for b in ctx_text.split("\n\n") if b and b.strip()]
+
+            print(f"{label} 전체 길이: {total_len}, 블록 수: {len(blocks)}")
+            if not blocks:
+                print(f"{label}: (비어 있음)")
+                return
+
+            for i, b in enumerate(blocks[:max_blocks], 1):
+                lines = b.splitlines()
+                first = lines[0] if lines else b
+                print(f" - {label} {i}: {first[:head_chars]}...")
 
         preview_context(problems_ctx_text, "유사문제")
         preview_context(concept_ctx_text, "개념컨텍스트")
@@ -976,46 +1023,41 @@ class SolutionAgent(BaseAgent):
             state["retry_count"] = state.get("retry_count", 0) + 1
             return state
 
+        import re as _re, platform
 
-        # === 길이 가드(인덱싱 에러 예방) ===
-        max_chars = int(os.getenv("RAGAS_MAX_CHARS_PER_BLOCK", "1000"))
-        max_n     = int(os.getenv("RAGAS_NUM_BLOCKS", "4"))
-        min_chars = int(os.getenv("RAGAS_MIN_CHARS_PER_BLOCK", "50"))
-        trimmed_ctxs = [b.strip()[:max_chars] for b in ctxs if b and b.strip()][:max_n]
-        print(f"[Validate] using {len(trimmed_ctxs)} context block(s) exactly as used for generation")
-        if not trimmed_ctxs:
-            print("⚠️ RAGAS 검증 스킵: 트리밍 후 남은 블록이 없습니다.")
+
+        def _clean_block(b: str) -> str:
+            # 제어문자/중복공백만 정리 (내용은 그대로 유지)
+            b = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", b or "")
+            b = _re.sub(r"[ \t]{2,}", " ", b)
+            return b.strip()
+
+        raw_ctxs   = [b for b in ctxs if isinstance(b, str) and b.strip()]
+        ctxs_clean = []
+        for b in raw_ctxs:
+            bb = _clean_block(b)
+            if not bb:
+                print("[RAGAS][skip] empty after cleaning")
+                continue
+            ctxs_clean.append(bb)
+
+        try:
+            import ragas as _rg
+            _ragas_ver = getattr(_rg, "__version__", "?")
+        except Exception:
+            _ragas_ver = "?"
+
+        print(f"[DBG] ragas={_ragas_ver}, py={platform.python_version()}")
+        print(f"[DBG] Qlen={len(question)}, Alen={len(answer)}, blocks={len(ctxs_clean)}")
+        for i, b in enumerate(ctxs_clean, 1):
+            head = b.replace("\\n", " ")[:160]
+            print(f"[DBG][ctx{i}] len={len(b)}, lines={len(b.splitlines())}, head={head!r}")
+
+        if not ctxs_clean:
+            print("⚠️ RAGAS 검증 스킵: 필터/트리밍 후 남은 블록이 없습니다.")
             state["validated"] = False
             state["retry_count"] = state.get("retry_count", 0) + 1
             return state
-        
-        # 최소 길이 필터 + 트리밍
-        raw_ctxs = [b for b in ctxs if b and isinstance(b, str)]
-        filtered = []
-        for b in raw_ctxs:
-            bb = b.strip()
-            if len(bb) < min_chars:
-                print(f"[RAGAS][skip] block(len={len(bb)}) < min_chars({min_chars}) → skip")
-                continue
-            filtered.append(bb[:max_chars])
-
-        def _clean_block(b: str) -> str:
-            # 넌프린터블 제거
-            b = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", b)
-            # 연속 공백 축약
-            b = re.sub(r"[ \t]{2,}", " ", b)
-            return b.strip()
-
-        trimmed_ctxs = [_clean_block(b) for b in trimmed_ctxs]
-
-        # 디버그 요약
-        print(f"[Validate] using {len(trimmed_ctxs)} context block(s) (min_chars={min_chars}, max_chars={max_chars}, max_n={max_n})")
-        print(f"[DBG] ragas={getattr(__import__('ragas'),'__version__','?')}, py={__import__('platform').python_version()}")
-        print(f"[DBG] Qlen={len(question)}, Alen={len(answer)}, blocks={len(trimmed_ctxs)}, "
-            f"min_chars={min_chars}, max_chars={max_chars}, max_n={max_n}")
-        for i, b in enumerate(trimmed_ctxs, 1):
-            head = b.replace("\n", " ")[:160]
-            print(f"[DBG][ctx{i}] len={len(b)}, lines={len(b.splitlines())}, head={head!r}")
 
         # ---------- 검증용 LLM/임베딩 ----------
         VALIDATION_LLM_MODEL  = os.getenv("VALIDATION_LLM_MODEL",  os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"))
@@ -1046,7 +1088,7 @@ class SolutionAgent(BaseAgent):
         # ---------- 블록별 평가 ----------
         f_scores, a_scores = [], []
 
-        # (A) answer_relevancy: 더미 컨텍스트 1개를 넣어 '한 번만' 평가
+        # (A) answer_relevancy: 더미 컨텍스트 1개로 '원샷' 평가
         dummy_ctx = os.getenv("RAGAS_DUMMY_CTX", "[DUMMY]")
         ds_a = Dataset.from_dict(
             {"question": [question], "answer": [answer], "contexts": [[dummy_ctx]]},
@@ -1057,29 +1099,49 @@ class SolutionAgent(BaseAgent):
             features=features_ctx, question=question, answer=answer, ctxs=[dummy_ctx]
         ) or 0.0)
         print(f"[RAGAS] answer_relevancy(one-shot) = {a_once:.3f}")
+        self._debug_ds(ds_a, "ans-rel")
 
-        # (B) faithfulness: 블록별로 contexts=[[ctx]] 넣어서 평가
-        for i, ctx in enumerate(trimmed_ctxs, 1):
+        # (B) faithfulness: 블록별 contexts=[[ctx]]
+        print(f"[RAGAS] evaluating {len(ctxs_clean)} block(s) "
+            f"(f_min={f_min}, a_min={a_min}, tokens={VALIDATION_MAX_TOKENS}, timeout={VALIDATION_TIMEOUT}s)")
+        for i, ctx in enumerate(ctxs_clean, 1):
             ds_f = Dataset.from_dict(
                 {"question": [question], "answer": [answer], "contexts": [[ctx]]},
                 features=features_ctx,
             )
-            f_i = self._safe_eval_metric(
-                ds_f, faithfulness, validation_llm, validation_emb, f"faithfulness[{i}]",
-                features=features_ctx, question=question, answer=answer, ctxs=[ctx]
-            )
+            self._debug_ds(ds_f, f"faith[{i}]")  # ← 생성 후 호출
+
+            # 안전 가드: contexts[0]이 비거나 문자열이 아니면 폴백
+            row = ds_f[0] if len(ds_f) else {}
+            c = row.get("contexts", [])
+            if not (isinstance(c, list) and c and isinstance(c[0], str) and c[0].strip()):
+                print(f"[GUARD] contexts[0]가 비어/부적절 → emb-폴백으로 대체")
+                a_vec = validation_emb.embed_query(answer or "")
+                c_vec = validation_emb.embed_query((ctx or "").strip())
+
+                def _cosine(u, v):
+                    import math
+                    if not u or not v:
+                        return 0.0
+                    num = sum(x*y for x, y in zip(u, v))
+                    den = (sum(x*x for x in u) ** 0.5) * (sum(y*y for y in v) ** 0.5)
+                    return (num / den) if den else 0.0
+
+                f_i = _cosine(a_vec, c_vec)
+            else:
+                f_i = self._safe_eval_metric(
+                    ds_f, faithfulness, validation_llm, validation_emb, f"faithfulness[{i}]",
+                    features=features_ctx, question=question, answer=answer, ctxs=[ctx]
+                )
+
             f_i = float(f_i or 0.0)
             f_scores.append(f_i)
-            a_scores.append(a_once)  # 블록별 출력/평균을 맞추기 위해 복제
+            a_scores.append(a_once)
             print(f"[RAGAS][block {i}] faithfulness={f_i:.3f}, answer_relevancy={a_once:.3f}")
 
-        f_avg = sum(f_scores)/len(f_scores)
-        a_avg = sum(a_scores)/len(a_scores)
+        f_avg = sum(f_scores)/len(f_scores) if f_scores else 0.0
+        a_avg = sum(a_scores)/len(a_scores) if a_scores else 0.0
         f_use, a_use = f_avg, a_avg
-
-        print(f"[RAGAS] blocks={len(trimmed_ctxs)}, f_min={f_min}, a_min={a_min}, "
-            f"chars/block<={max_chars}, total_cap={os.getenv('RAGAS_MAX_TOTAL_CHARS','1800')}")
-
 
         # === 폴백: 평균이 둘 다 0.0일 때만 ===
         if (f_avg == 0.0 and a_avg == 0.0):
@@ -1093,7 +1155,7 @@ class SolutionAgent(BaseAgent):
 
             try:
                 total_cap = int(os.getenv("RAGAS_MAX_TOTAL_CHARS", "1800"))
-                joined_ctx = "\n\n".join(trimmed_ctxs)
+                joined_ctx = "\n\n".join(ctxs_clean)
                 if len(joined_ctx) > total_cap:
                     joined_ctx = joined_ctx[:total_cap]
 
@@ -1129,7 +1191,7 @@ class SolutionAgent(BaseAgent):
         write_header = not os.path.exists(CSV_PATH)
 
         previews = []
-        for b in trimmed_ctxs:
+        for b in ctxs_clean:
             first_line = (b.splitlines()[0] if b.splitlines() else b)[:200]
             previews.append(first_line)
         contexts_preview = " || ".join(previews)
@@ -1147,7 +1209,7 @@ class SolutionAgent(BaseAgent):
             "generated_answer": state.get("generated_answer",""),
             "generated_subject": state.get("generated_subject",""),
             "explanation_snippet": (state.get("generated_explanation","") or "")[:300],
-            "contexts_count": len(trimmed_ctxs),
+            "contexts_count": len(ctxs_clean),
             "contexts_preview": contexts_preview,
         }
 

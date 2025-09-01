@@ -807,7 +807,7 @@ class SolutionAgent(BaseAgent):
             blocks = [b.strip() for b in ctx_text.split("\n\n") if b.strip()]
             for i, b in enumerate(blocks[:3], 1):   # 최대 3개까지만
                 first_line = b.splitlines()[0]
-                print(f" - {label} {i}: {first_line[:200]}...")  # 앞 120자만
+                print(f" - {label} {i}: {first_line[:500]}...")  # 앞 120자만
             if len(blocks) > 3:
                 print(f" ... (총 {len(blocks)}개 중 상위 3개만 표시)")
 

@@ -11,6 +11,7 @@ import pandas as pd
 from konlpy.tag import Okt
 import re
 from langchain_groq import ChatGroq
+# from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
@@ -37,9 +38,8 @@ collection_name = "market_price_docs"
 llm = ChatGroq(model_name="meta-llama/llama-4-scout-17b-16e-instruct",
                temperature=0.7,
                api_key=openai_api_key)
-
-# 상태 스키마 정의
-class GraphState(TypedDict):
+# gpt-4o-mini
+# llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY=REDACTED GraphState(TypedDict):
     query: str
     question_classification: str
     context: Dict[str, Any]

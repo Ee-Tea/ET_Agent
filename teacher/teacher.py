@@ -2215,7 +2215,7 @@ class Teacher:
     # Streamlit 앱에서 사용할 함수
 def create_app() -> Any:
     """Streamlit 앱에서 사용할 teacher graph 앱을 생성합니다."""
-    orch = Orchestrator(user_id="streamlit_user", service="teacher", chat_id="web")
+    orch = Teacher(user_id="streamlit_user", service="teacher", chat_id="web")
     return orch.build_teacher_graph()
 
 if __name__ == "__main__":
@@ -2235,7 +2235,7 @@ if __name__ == "__main__":
     CHAT_ID  = os.getenv("TEST_CHAT_ID", "local")
 
     # 오케스트레이터 & 그래프 컴파일
-    orch = Orchestrator(user_id=USER_ID, service=SERVICE, chat_id=CHAT_ID)
+    orch = Teacher(user_id=USER_ID, service=SERVICE, chat_id=CHAT_ID)
     app = orch.build_teacher_graph()
 
     print("\n=== Teacher Graph 테스트 ===")

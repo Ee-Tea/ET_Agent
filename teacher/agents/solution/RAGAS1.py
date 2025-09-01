@@ -19,7 +19,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0,
-    api_key=,
+    api_key=OPENAI_API_KEY,
 )
 emb = HuggingFaceEmbeddings(
         model_name="jhgan/ko-sroberta-multitask",

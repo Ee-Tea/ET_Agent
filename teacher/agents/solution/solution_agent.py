@@ -14,14 +14,83 @@ import asyncio, sys
 from concurrent.futures import ThreadPoolExecutor
 import copy
 from datasets import Dataset, Features, Value, Sequence
+import os
+os.environ.setdefault("RAGAS_DISABLE_TRACING", "1")
+os.environ.setdefault("OPENINFERENCE_DISABLED", "1")
+os.environ.pop("LANGCHAIN_TRACING_V2", None)
+os.environ.pop("LANGSMITH_API_KEY=REDACTED)
+
+def _install_ragas_safe_parse():
+    try:
+        import ragas.callbacks as _cbs
+        import ragas.dataset_schema as _ds
+
+        # 원본 레퍼런스들
+        _orig_cbs = getattr(_cbs, "parse_run_traces", None)
+        _orig_ds  = getattr(_ds,  "parse_run_traces", None)
+
+        # 이미 패치됐다면 무시
+        if getattr(_orig_cbs, "_patched_safe", False) and getattr(_orig_ds, "_patched_safe", False):
+            return
+
+        def _safe_parse_run_traces(*args, **kwargs):
+            """
+            Accepts both positional and keyword calls:
+            parse_run_traces(run_traces, run_id=...) / parse_run_traces(run_traces)
+            Returns {} on empty/None traces or on any exception.
+            """
+            try:
+                run_traces = kwargs.get("run_traces", None)
+                if run_traces is None and args:
+                    run_traces = args[0]
+                # 빈/None → 안전 반환
+                if not run_traces:
+                    return {}
+                if isinstance(run_traces, (list, tuple)) and len(run_traces) == 0:
+                    return {}
+                # 원본 중 살아있는 쪽을 호출
+                target = _orig_cbs if callable(_orig_cbs) else _orig_ds
+                if callable(target):
+                    return target(*args, **kwargs)
+                return {}
+            except Exception as e:
+                print(f"[RAGAS] parse_run_traces bypass: {e}")
+                return {}
+
+        # 두 모듈 모두 덮어쓰기 (dataset_schema는 import-by-value라 별도 패치 필수)
+        _safe_parse_run_traces._patched_safe = True
+        _cbs.parse_run_traces = _safe_parse_run_traces
+        _ds.parse_run_traces  = _safe_parse_run_traces
+        print("[RAGAS] Patched parse_run_traces in both callbacks and dataset_schema")
+    except Exception as e:
+        print(f"[RAGAS] safe patch not applied: {e}")
+
+_install_ragas_safe_parse()
 from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy
-import json
+from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
 import os, json, glob
 from datetime import datetime
 from langchain_milvus import Milvus
 from pymilvus import connections, Collection
 from difflib import SequenceMatcher
+# RAGAS 래퍼 & 데이터 스키마
+from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
+from ragas.dataset_schema import SingleTurnSample
+
+# RAGAS 지표
+from ragas.metrics import faithfulness, answer_relevancy
+from ragas import evaluate as ragas_evaluate
+
+try:
+    from ragas import EvaluationDataset  # 신버전 권장 경로
+except Exception:
+    from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
+try:
+    from ragas import EvaluationDataset  # 신버전
+except Exception:
+    from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
+
 
 try:
     from rank_bm25 import BM25Okapi  # optional fallback(bm25 인덱스 없이 후보군 위에서 sparse 스코어링)
@@ -58,7 +127,8 @@ class SolutionState(TypedDict):
 
     retrieved_docs: List[Document]
     problems_contexts_text : str
-    concept_contexts: List[Document]
+
+    concept_contexts : List[Document]
     concept_contexts_text: str
 
     # 문제 해답/풀이/과목 생성
@@ -66,7 +136,6 @@ class SolutionState(TypedDict):
     generated_explanation: str   # 풀이
     generated_subject: str
 
-    extra_context_text: str
     ctx_blocks_used : List[str]
 
     results: List[Dict]
@@ -216,92 +285,7 @@ class SolutionAgent(BaseAgent):
         opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
         return f"{(problem or '').strip()}\n{opts}"
     
-    @staticmethod
-    def _safe_eval_metric(ds, metric, llm_obj, emb_obj, name: str, *,
-                      features=None, question=None, answer=None, ctxs=None) -> float:
-        from ragas import evaluate
-        import math, os
 
-        def _parse_score(res):
-            score = 0.0
-            if hasattr(res, "scores"):
-                sc = res.scores.get(name, 0.0)
-                try:
-                    import numpy as _np, pandas as _pd
-                    if isinstance(sc, (list, tuple)) and sc:
-                        return float(sc[0])
-                    if isinstance(sc, _np.ndarray):
-                        return float(sc.item() if sc.size == 1 else sc[0])
-                    if isinstance(sc, _pd.Series):
-                        return float(sc.iloc[0])
-                    return float(sc)
-                except Exception:
-                    return float(sc) if sc is not None else 0.0
-            if hasattr(res, "to_pandas"):
-                df_res = res.to_pandas()
-                if name in df_res.columns and len(df_res) > 0:
-                    return float(df_res[name].iloc[0])
-            return score
-
-        def _cosine(u, v):
-            if not u or not v: return 0.0
-            num = sum(x*y for x, y in zip(u, v))
-            den = math.sqrt(sum(x*x for x in u)) * math.sqrt(sum(y*y for y in v))
-            return (num / den) if den else 0.0
-
-        try:
-            if os.getenv("RAGAS_DEBUG", "0") == "1":
-                n_ctx = len(ctxs) if isinstance(ctxs, (list, tuple)) else 0
-                print(f"[RAGAS:{name}] start(q={len(question or '')}, a={len(answer or '')}, ctxs={n_ctx})")
-
-            res = evaluate(ds, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
-            score = _parse_score(res)
-            print(f"[RAGAS:{name}] {score:.3f}")
-            return score
-
-        except Exception as e:
-            msg = repr(e)
-            print(f"[RAGAS:{name}] 실패 → 1차 0.0 ({msg})")
-
-            # 1) answer_relevancy: 컨텍스트 상관 없이 임베딩 폴백
-            if "answer_relevancy" in name:
-                try:
-                    qv = emb_obj.embed_query(question or "")
-                    av = emb_obj.embed_query(answer or "")
-                    a_fb = _cosine(qv, av)
-                    print(f"[RAGAS:{name}] (fallback-emb QA) {a_fb:.3f}")
-                    return a_fb
-                except Exception as e2:
-                    print(f"[RAGAS:{name}] fallback-emb 실패 → 0.0 ({repr(e2)})")
-                    return 0.0
-
-            # 2) faithfulness: IndexError면 단일블록 재시도 → 실패 시 컨텍스트-답변 임베딩
-            if "IndexError" in msg and all(v is not None for v in (features, question, answer, ctxs)):
-                try:
-                    joined = "\\n\\n".join([c for c in ctxs if c and str(c).strip()])
-                    ds2 = Dataset.from_dict(
-                        {"question":[question], "answer":[answer], "contexts":[[joined]]},
-                        features=features
-                    )
-                    print(f"[RAGAS:{name}] 단일 블록 재시도")
-                    from ragas import evaluate as _ev2
-                    res2 = _ev2(ds2, metrics=[metric], llm=llm_obj, embeddings=emb_obj)
-                    score2 = _parse_score(res2)
-                    print(f"[RAGAS:{name}] (단일블록) {score2:.3f}")
-                    return score2
-                except Exception as e2:
-                    print(f"[RAGAS:{name}] 단일 블록 재시도 실패 ({repr(e2)}), emb 폴백 시도")
-                    try:
-                        av = emb_obj.embed_query(answer or "")
-                        cv = emb_obj.embed_query(joined or "")
-                        f_fb = _cosine(cv, av)
-                        print(f"[RAGAS:{name}] (fallback-emb CA) {f_fb:.3f}")
-                        return f_fb
-                    except Exception as e3:
-                        print(f"[RAGAS:{name}] fallback-emb 실패 → 0.0 ({repr(e3)})")
-                        return 0.0
-
-            return 0.0
 
         
     def _split_blocks(self, text: str) -> list[str]:
@@ -314,42 +298,6 @@ class SolutionAgent(BaseAgent):
         # 간단·빠른 유사도(토치/임베딩 불필요)
         return SequenceMatcher(a=a, b=b).ratio()
 
-    def _sanitize_context_blocks(
-        self,
-        problems_ctx_text: str,
-        concept_ctx_text: str,
-        *,
-        max_blocks: int = None,
-        max_chars_per_block: int = None,
-        sim_thresh: float = None,
-    ) -> list[str]:
-        """
-        - 두 소스(유사문제/개념)에서 블록 나누기
-        - 중복/유사 블록 제거(SequenceMatcher)
-        - 블록 수 상한, 블록 길이 상한 적용
-        """
-        import os
-
-        max_blocks = max_blocks or int(os.getenv("CTX_MAX_BLOCKS", "3"))          # 기본 3개
-        max_chars_per_block = max_chars_per_block or int(os.getenv("CTX_MAX_CHARS_PER_BLOCK", "6000"))
-        sim_thresh = sim_thresh or float(os.getenv("CTX_SIM_THRESH", "0.90"))     # 0~1, 높을수록 더 많이 제거
-
-        blocks = []
-        blocks += self._split_blocks(problems_ctx_text)
-        blocks += self._split_blocks(concept_ctx_text)
-
-        # 유사 중복 제거(앞선 블록을 우선)
-        kept = []
-        kept_norm = []
-        for b in blocks:
-            nb = re.sub(r"\s+", " ", b).strip().lower()
-            if any(self._sim_ratio(nb, kb) >= sim_thresh for kb in kept_norm):
-                continue
-            kept.append(b)
-            kept_norm.append(nb)
-
-        # 블록 길이 상한 적용 (내용만 자르기, 의미 변화 없음)
-        return kept[:max_blocks] if max_blocks else kept
     
     def _strip_md(self, s: str) -> str:
         if not s: return s
@@ -391,7 +339,7 @@ class SolutionAgent(BaseAgent):
                 continue
             src = "유사문제" if b in (p_blocks or []) else ("개념컨텍스트" if b in (c_blocks or []) else "기타")
             piece = b.strip()[:max_chars]
-            formatted.append(f"[CTX {i} | {src}]\n{piece}")
+            formatted.append(f"[CTX {i} | {src}] {piece}")
         return "\n\n".join(formatted)
 
     def _debug_ds(self, ds, tag: str):
@@ -411,6 +359,39 @@ class SolutionAgent(BaseAgent):
                 print(f"[DBG:ds {tag}] contexts[0] exists? {bool(c0[:1])}")
                 if c0[:1] and isinstance(c0[0], str):
                     print(f"[DBG:ds {tag}] contexts[0] head={c0[0][:80]!r}")
+
+    # === RAGAS trace parser 안전 패치 ===
+    @staticmethod
+    def _patch_ragas_trace_parsing():
+        try:
+            import ragas.callbacks as _rcb
+            _orig = getattr(_rcb, "parse_run_traces", None)
+            if not callable(_orig) or getattr(_orig, "_patched_safe", False):
+                return
+
+            def _safe_parse_run_traces(*args, **kwargs):
+                try:
+                    run_traces = kwargs.get("run_traces", None)
+                    if run_traces is None and args:
+                        run_traces = args[0]
+                    # 빈/None이면 바로 빈 딕셔너리 반환 → IndexError 근본 차단
+                    if not run_traces:
+                        return {}
+                    if isinstance(run_traces, (list, tuple)) and len(run_traces) == 0:
+                        return {}
+                    return _orig(*args, **kwargs)
+                except Exception as e:
+                    print(f"[RAGAS] parse_run_traces bypass: {e}")
+                    return {}
+
+            _safe_parse_run_traces._patched_safe = True
+            _rcb.parse_run_traces = _safe_parse_run_traces
+            print("[RAGAS] Patched callbacks.parse_run_traces (safe on empty traces)")
+        except Exception as e:
+            print(f"[RAGAS] patch failed: {e}")
+
+    # 패치 즉시 적용
+    _patch_ragas_trace_parsing()
 
 
     
@@ -959,13 +940,7 @@ class SolutionAgent(BaseAgent):
         clean  = self._strip_md(result)
         answer_idx, subject = self._extract_answer_subject(clean)
         print("🧠 LLM 응답 완료")
-
-        # answer_match = re.search(r"정답:\s*(.+)", result)
-        # explanation_match = re.search(r"풀이:\s*(.+)", result, re.DOTALL)
-        # subject_match = re.search(r"과목:\s*(.+)", result)
-        # state["generated_answer"] = answer_match.group(1).strip() if answer_match else ""
-        # state["generated_explanation"] = explanation_match.group(1).strip() if explanation_match else ""
-        # state["generated_subject"] = subject_match.group(1).strip() if subject_match else "기타"
+        
         state["generated_answer"]   = str(answer_idx) if answer_idx is not None else ""
         state["generated_explanation"] = clean  # 또는 별도 정규식으로 "풀이:"만 추출
         state["generated_subject"]  = subject
@@ -980,261 +955,163 @@ class SolutionAgent(BaseAgent):
         return state
 
 
+    @staticmethod
+    def _extract_scores(res) -> tuple[float, float]:
+        f_sc = r_sc = 0.0
+        try:
+            # 1) 신버전: res.scores 딕셔너리
+            if hasattr(res, "scores") and isinstance(res.scores, dict):
+                f_sc = float(res.scores.get("faithfulness", 0) or 0)
+                r_sc = float(res.scores.get("answer_relevancy", 0) or 0)
+                return f_sc, r_sc
+            # 2) 구버전: pandas 변환
+            if hasattr(res, "to_pandas"):
+                df = res.to_pandas()
+                if "faithfulness" in df.columns:
+                    f_sc = float(df["faithfulness"].iloc[0])
+                if "answer_relevancy" in df.columns:
+                    r_sc = float(df["answer_relevancy"].iloc[0])
+                return f_sc, r_sc
+        except Exception as e:
+            print(f"[RAGAS] score parse fallback: {e}")
+        return f_sc, r_sc
+
     def _validate_solution(self, state: SolutionState) -> SolutionState:
         """
-        RAGAS 검증 (블록별 개별 평가 → 평균으로 판정)
-        - faithfulness / answer_relevancy
-        - 길이 폭주 방지를 위해 per-block 트리밍 및 개수 상한
+        RAGAS 검증 (SingleTurnSample + Wrappers, ground_truth 없음)
+        - question : user_input_txt + user_problem + user_problem_options (원문)
+        - answer   : generated_answer / generated_explanation / generated_subject (원문 결합)
+        - contexts : problems_contexts_text, concept_contexts_text (원문 그대로)
+        - metrics  : faithfulness, answer_relevancy
         """
-        print("\n🧐 [3단계] RAGAS 기반 정합성 검증 시작 (블록별)")
+        print("\n🧪 [3단계] RAGAS 검증 시작 (SingleTurnSample + Wrappers / 원문 그대로)")
 
-        # 임계값
-        f_min = float(os.getenv("VALIDATE_FAITHFULNESS_MIN", "0.65"))
-        a_min = float(os.getenv("VALIDATE_ANS_REL_MIN", "0.55"))
+        def _norm(s: str) -> str:
+            return (s or "").strip()
 
-        # 질의/답변 텍스트
-        question = (state.get("user_input_txt") or "").strip()
-        prob = (state.get("user_problem") or "").strip()
-        opts = state.get("user_problem_options") or []
+        # 0) 안전장치: 다시 한 번 트레이스 파서 패치 보장
+        self._patch_ragas_trace_parsing()
+
+        # 1) question 구성
+        parts = []
+        if _norm(state.get("user_input_txt")):
+            parts.append(_norm(state.get("user_input_txt")))
+        parts.append(_norm(state.get("user_problem")))
+        opts = state.get("user_problem_options", []) or []
         if opts:
-            opts_blob = "\n".join(f"{i+1}) {o}" for i, o in enumerate(opts))
-            question = f"{question}\n\n[문제]\n{prob}\n\n[보기]\n{opts_blob}"
+            parts.append("[보기]")
+            parts.extend([f"{i+1}) {str(o)}" for i, o in enumerate(opts)])
+        question_text = "\n".join([p for p in parts if p])
 
-        answer = (
-            f"정답: {state.get('generated_answer','')}\n"
-            f"풀이: {state.get('generated_explanation','')}\n"
-            f"과목: {state.get('generated_subject','')}"
+        # 2) answer 구성(원문 그대로)
+        ans_num = _norm(state.get("generated_answer"))
+        expl    = _norm(state.get("generated_explanation"))
+        subj    = _norm(state.get("generated_subject"))
+        answer_text = "\n".join([x for x in [
+            f"정답: {ans_num}" if ans_num else "",
+            expl,
+            f"과목: {subj}" if subj else "",
+        ] if x])
+
+        # 3) contexts 구성(원문 그대로) + 폴백
+        p_txt = _norm(state.get("problems_contexts_text", ""))
+        c_txt = _norm(state.get("concept_contexts_text", ""))
+        ctx_list: List[str] = [t for t in (p_txt, c_txt) if t]
+        if not ctx_list:
+            buf = []
+            for d in (state.get("retrieved_docs") or []):
+                if _norm(getattr(d, "page_content", "")):
+                    buf.append(_norm(d.page_content))
+                md = getattr(d, "metadata", {}) or {}
+                if _norm(md.get("explanation")):
+                    buf.append(_norm(md.get("explanation")))
+            for d in (state.get("concept_contexts") or []):
+                if _norm(getattr(d, "page_content", "")):
+                    buf.append(_norm(d.page_content))
+            ctx_list = ["\n\n".join([s for s in buf if _norm(s)]) or ""]
+        # 최소 1개 보장
+        if not ctx_list:
+            ctx_list = [""]
+
+        print(f"[RAGAS] contexts 원문 사용: {len(ctx_list)}개")
+
+        # 4) SingleTurnSample + EvaluationDataset
+        sample = SingleTurnSample(
+            user_input=question_text,
+            response=answer_text,
+            retrieved_contexts=ctx_list,
+            reference=None,   # ground_truth 없음
         )
+        dataset = EvaluationDataset(samples=[sample])
 
-        # 컨텍스트 블록 가져오기
-        ctx_blocks = state.get("ctx_blocks_used")
-        if isinstance(ctx_blocks, list) and ctx_blocks:
-            ctxs = ctx_blocks
-        else:
-            blocks = self._sanitize_context_blocks(
-                state.get("problems_contexts_text", ""),
-                state.get("concept_contexts_text", "")
-            )
-            ctxs = blocks if blocks else []
+        # 5) Wrappers
+        eval_llm = self._llm(temperature=0)
+        llm_wrapped = RagasLLMWrapper(eval_llm)
 
-        if not ctxs:
-            print("⚠️ RAGAS 검증 스킵: 사용할 컨텍스트 블록이 없습니다.")
-            state["validated"] = False
-            state["retry_count"] = state.get("retry_count", 0) + 1
-            return state
-
-        import re as _re, platform
-
-
-        def _clean_block(b: str) -> str:
-            # 제어문자/중복공백만 정리 (내용은 그대로 유지)
-            b = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", b or "")
-            b = _re.sub(r"[ \t]{2,}", " ", b)
-            return b.strip()
-
-        raw_ctxs   = [b for b in ctxs if isinstance(b, str) and b.strip()]
-        ctxs_clean = []
-        for b in raw_ctxs:
-            bb = _clean_block(b)
-            if not bb:
-                print("[RAGAS][skip] empty after cleaning")
-                continue
-            ctxs_clean.append(bb)
-
-        try:
-            import ragas as _rg
-            _ragas_ver = getattr(_rg, "__version__", "?")
-        except Exception:
-            _ragas_ver = "?"
-
-        print(f"[DBG] ragas={_ragas_ver}, py={platform.python_version()}")
-        print(f"[DBG] Qlen={len(question)}, Alen={len(answer)}, blocks={len(ctxs_clean)}")
-        for i, b in enumerate(ctxs_clean, 1):
-            head = b.replace("\\n", " ")[:160]
-            print(f"[DBG][ctx{i}] len={len(b)}, lines={len(b.splitlines())}, head={head!r}")
-
-        if not ctxs_clean:
-            print("⚠️ RAGAS 검증 스킵: 필터/트리밍 후 남은 블록이 없습니다.")
-            state["validated"] = False
-            state["retry_count"] = state.get("retry_count", 0) + 1
-            return state
-
-        # ---------- 검증용 LLM/임베딩 ----------
-        VALIDATION_LLM_MODEL  = os.getenv("VALIDATION_LLM_MODEL",  os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"))
-        VALIDATION_BASE_URL   = os.getenv("VALIDATION_BASE_URL",   os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-        VALIDATION_API_KEY    = os.getenv("VALIDATION_API_KEY",    os.getenv("OPENAI_API_KEY=REDACTED = int(os.getenv("VALIDATION_LLM_MAX_TOKENS", "4096"))
-        VALIDATION_TIMEOUT    = int(os.getenv("VALIDATION_LLM_TIMEOUT", "120"))
-
-        validation_llm = ChatOpenAI(
-            api_key=VALIDATION_API_KEY,
-            base_url=VALIDATION_BASE_URL,
-            model=VALIDATION_LLM_MODEL,
-            temperature=0.0,
-            max_tokens=VALIDATION_MAX_TOKENS,
-            timeout=VALIDATION_TIMEOUT,
-        )
-        validation_emb = HuggingFaceEmbeddings(
-            model_name=os.getenv("VALIDATION_EMB_MODEL", "jhgan/ko-sroberta-multitask"),
-            model_kwargs={"device": "cpu"}
-        )
-
-        # ---------- 스키마 ----------
-        features_ctx = Features({
-            "question": Value("string"),
-            "answer":   Value("string"),
-            "contexts": Sequence(Value("string")),
-        })
-
-        # ---------- 블록별 평가 ----------
-        f_scores, a_scores = [], []
-
-        # (A) answer_relevancy: 더미 컨텍스트 1개로 '원샷' 평가
-        dummy_ctx = os.getenv("RAGAS_DUMMY_CTX", "[DUMMY]")
-        ds_a = Dataset.from_dict(
-            {"question": [question], "answer": [answer], "contexts": [[dummy_ctx]]},
-            features=features_ctx,
-        )
-        a_once = float(self._safe_eval_metric(
-            ds_a, answer_relevancy, validation_llm, validation_emb, "answer_relevancy",
-            features=features_ctx, question=question, answer=answer, ctxs=[dummy_ctx]
-        ) or 0.0)
-        print(f"[RAGAS] answer_relevancy(one-shot) = {a_once:.3f}")
-        self._debug_ds(ds_a, "ans-rel")
-
-        # (B) faithfulness: 블록별 contexts=[[ctx]]
-        print(f"[RAGAS] evaluating {len(ctxs_clean)} block(s) "
-            f"(f_min={f_min}, a_min={a_min}, tokens={VALIDATION_MAX_TOKENS}, timeout={VALIDATION_TIMEOUT}s)")
-        for i, ctx in enumerate(ctxs_clean, 1):
-            ds_f = Dataset.from_dict(
-                {"question": [question], "answer": [answer], "contexts": [[ctx]]},
-                features=features_ctx,
-            )
-            self._debug_ds(ds_f, f"faith[{i}]")  # ← 생성 후 호출
-
-            # 안전 가드: contexts[0]이 비거나 문자열이 아니면 폴백
-            row = ds_f[0] if len(ds_f) else {}
-            c = row.get("contexts", [])
-            if not (isinstance(c, list) and c and isinstance(c[0], str) and c[0].strip()):
-                print(f"[GUARD] contexts[0]가 비어/부적절 → emb-폴백으로 대체")
-                a_vec = validation_emb.embed_query(answer or "")
-                c_vec = validation_emb.embed_query((ctx or "").strip())
-
-                def _cosine(u, v):
-                    import math
-                    if not u or not v:
-                        return 0.0
-                    num = sum(x*y for x, y in zip(u, v))
-                    den = (sum(x*x for x in u) ** 0.5) * (sum(y*y for y in v) ** 0.5)
-                    return (num / den) if den else 0.0
-
-                f_i = _cosine(a_vec, c_vec)
-            else:
-                f_i = self._safe_eval_metric(
-                    ds_f, faithfulness, validation_llm, validation_emb, f"faithfulness[{i}]",
-                    features=features_ctx, question=question, answer=answer, ctxs=[ctx]
-                )
-
-            f_i = float(f_i or 0.0)
-            f_scores.append(f_i)
-            a_scores.append(a_once)
-            print(f"[RAGAS][block {i}] faithfulness={f_i:.3f}, answer_relevancy={a_once:.3f}")
-
-        f_avg = sum(f_scores)/len(f_scores) if f_scores else 0.0
-        a_avg = sum(a_scores)/len(a_scores) if a_scores else 0.0
-        f_use, a_use = f_avg, a_avg
-
-        # === 폴백: 평균이 둘 다 0.0일 때만 ===
-        if (f_avg == 0.0 and a_avg == 0.0):
-            print("[Fallback] 모든 블록 점수 0.0 → 임베딩 유사도 폴백")
-            import math
-            def _cosine(u, v):
-                if not u or not v: return 0.0
-                num = sum(x*y for x, y in zip(u, v))
-                den = math.sqrt(sum(x*x for x in u)) * math.sqrt(sum(y*y for y in v))
-                return (num / den) if den else 0.0
-
+        emb = None
+        for vs in (state.get("vectorstore_c"), state.get("vectorstore_p"),
+                getattr(self, "vectorstore_c", None), getattr(self, "vectorstore_p", None)):
             try:
-                total_cap = int(os.getenv("RAGAS_MAX_TOTAL_CHARS", "1800"))
-                joined_ctx = "\n\n".join(ctxs_clean)
-                if len(joined_ctx) > total_cap:
-                    joined_ctx = joined_ctx[:total_cap]
+                ef = getattr(vs, "embedding_function", None)
+                if ef is not None:
+                    emb = ef
+                    break
+            except Exception:
+                pass
+        if emb is None:
+            from langchain_huggingface import HuggingFaceEmbeddings
+            emb = HuggingFaceEmbeddings(
+                model_name=os.getenv("RAGAS_EMBED_MODEL", "jhgan/ko-sroberta-multitask"),
+                model_kwargs={"device": os.getenv("RAGAS_EMBED_DEVICE", "cpu")},
+            )
+        emb_wrapped = RagasEmbWrapper(emb)
 
-                q_vec = validation_emb.embed_query(question)
-                a_vec = validation_emb.embed_query(answer)
-                c_vec = validation_emb.embed_query(joined_ctx)
+        # 6) 평가 함수 (콜백 완전 차단 → trace 파서 경로 차단)
+        def _run(ds):
+            return ragas_evaluate(
+                ds,
+                metrics=[faithfulness, answer_relevancy],
+                llm=llm_wrapped,
+                embeddings=emb_wrapped,
+            )
 
-                a_fb = _cosine(q_vec, a_vec)   # answer relevancy 대체
-                f_fb = _cosine(c_vec, a_vec)   # faithfulness 대체
+        # 7) 실행 + 견고한 폴백
+        try:
+            res = _run(dataset)
+            f_sc, r_sc = self._extract_scores(res)
+        except Exception as e:
+            print(f"[RAGAS] 1st pass failed: {e} -> retry with 1 ctx")
+            subset = ctx_list[:1] or [""]
+            dataset2 = EvaluationDataset(samples=[
+                SingleTurnSample(
+                    user_input=question_text,
+                    response=answer_text,
+                    retrieved_contexts=subset,
+                    reference=None,
+                )
+            ])
+            res = _run(dataset2)
+            f_sc, r_sc = self._extract_scores(res)
 
-                a_fb_min = float(os.getenv("FALLBACK_ANS_REL_MIN", "0.32"))
-                f_fb_min = float(os.getenv("FALLBACK_FAITH_MIN",   "0.28"))
-                print(f"[Fallback] emb-based answer_relevancy={a_fb:.3f} (min {a_fb_min})")
-                print(f"[Fallback] emb-based faithfulness={f_fb:.3f} (min {f_fb_min})")
+        # 8) 임계값 판정 + state 반영
+        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.55"))
+        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.55"))
+        is_valid = (f_sc >= thr_f) and (r_sc >= thr_r)
 
-                a_use, f_use = a_fb, f_fb
-                a_min_eff, f_min_eff = a_fb_min, f_fb_min
-            except Exception as e:
-                print(f"[Fallback] 임베딩 계산 실패: {repr(e)}")
-                a_min_eff, f_min_eff = a_min, f_min
-        else:
-            a_min_eff, f_min_eff = a_min, f_min
+        state["validated"] = bool(is_valid)
+        if not is_valid:
+            state["retry_count"] = int(state.get("retry_count", 0)) + 1
 
-        # --- 최종 판정 (평균 또는 폴백 점수 기준) ---
-        ok = (f_use >= f_min_eff) and (a_use >= a_min_eff)
-        state["validated"] = bool(ok)
-        print(f"[Validate] final f={f_use:.3f} (min {f_min_eff}), "
-            f"a={a_use:.3f} (min {a_min_eff}) -> {'PASS' if ok else 'FAIL'}")
-
-        # ---------- 📄 CSV 로깅 ----------
-        CSV_PATH = os.getenv("VALIDATION_CSV_PATH", "./teacher/agents/solution/eval_results/validation_results.csv")
-        os.makedirs(os.path.dirname(CSV_PATH) or ".", exist_ok=True)
-        write_header = not os.path.exists(CSV_PATH)
-
-        previews = []
-        for b in ctxs_clean:
-            first_line = (b.splitlines()[0] if b.splitlines() else b)[:200]
-            previews.append(first_line)
-        contexts_preview = " || ".join(previews)
-
-        row = {
-            "validated": "PASS" if ok else "FAIL",
-            "faithfulness": f_use,                  # 최종 사용 점수
-            "answer_relevancy": a_use,              # 최종 사용 점수
-            "faithfulness_list": json.dumps(f_scores, ensure_ascii=False),
-            "answer_relevancy_list": json.dumps(a_scores, ensure_ascii=False),
-            "f_min": f_min, "a_min": a_min,
-            "f_min_eff": f_min_eff, "a_min_eff": a_min_eff,
-            "question_snippet": prob[:200],
-            "options_count": len(opts),
-            "generated_answer": state.get("generated_answer",""),
-            "generated_subject": state.get("generated_subject",""),
-            "explanation_snippet": (state.get("generated_explanation","") or "")[:300],
-            "contexts_count": len(ctxs_clean),
-            "contexts_preview": contexts_preview,
+        state.setdefault("eval", {})
+        state["eval"]["ragas"] = {
+            "faithfulness": f_sc,
+            "answer_relevancy": r_sc,
+            "thresholds": {"faithfulness": thr_f, "answer_relevancy": thr_r},
+            "n_contexts": len(ctx_list),
         }
 
-        try:
-            with open(CSV_PATH, "a", newline="", encoding="utf-8-sig") as fp:
-                writer = csv.DictWriter(fp, fieldnames=list(row.keys()))
-                if write_header:
-                    writer.writeheader()
-                writer.writerow(row)
-            print(f"[CSV] 검증 결과 저장: {CSV_PATH}")
-        except Exception as e:
-            print(f"[CSV] 저장 실패: {repr(e)}")
-
-        # 재시도 정책
-        if not state["validated"]:
-            state["retry_count"] = state.get("retry_count", 0) + 1
-            if state["retry_count"] >= 5:
-                print("⚠️ RAGAS 임계 미달 5회 → 결과를 저장 단계로 강제 진행")
-            else:
-                print(f"⚠️ RAGAS 임계 미달 → 재생성 시도 ({state['retry_count']}/5)")
-        else:
-            print("✅ RAGAS 검증 통과")
-
+        print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | ans_rel={r_sc:.3f}(thr {thr_r}) | validated={state['validated']}")
         return state
-
 
 
 

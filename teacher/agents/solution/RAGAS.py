@@ -54,7 +54,7 @@ def connect_vectorstore(
 ) -> Milvus:
     """
     컬렉션 스키마를 읽어 text/vector 필드명을 자동 추론한 뒤 LangChain Milvus 래퍼로 연결.
-    (problems=vector/text, concept_summary=embedding/content 같은 이질 스키마 대응)
+    (problems=vector/text, concepts=embedding/content 같은 이질 스키마 대응)
     """
     host = host or os.getenv("MILVUS_HOST", "localhost")
     port = port or os.getenv("MILVUS_PORT", "19530")
@@ -100,7 +100,7 @@ def connect_vectorstore(
 # ---------- 유틸 ----------
 def _ctx_text(d) -> str:
     md = getattr(d, "metadata", {}) or {}
-    # concept_summary는 content에, problems는 page_content에 있을 수 있음
+    # concepts는 content에, problems는 page_content에 있을 수 있음
     txt = (md.get("content") or getattr(d, "page_content", "") or "")
     return str(txt).strip()
 
@@ -243,7 +243,7 @@ def run_eval(
 
         rows.append(EvalRow(
             question=q_full,
-            contexts=ctx_texts,
+            contexts=retrieved_problems,
             answer=f"정답: {gen_ans}) {gen_text}\n풀이: {gen_exp}\n과목: {gen_sub}".strip(),
             ground_truth=gt_blob,
             metadata={
@@ -423,7 +423,7 @@ if __name__ == "__main__":
     MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 
     vectorstore_p = connect_vectorstore("problems", MILVUS_HOST, MILVUS_PORT)
-    vectorstore_c = connect_vectorstore("concept_summary", MILVUS_HOST, MILVUS_PORT)
+    vectorstore_c = connect_vectorstore("concepts", MILVUS_HOST, MILVUS_PORT)
 
     test_json_dir = "./teacher/exam/test_parsed_exam_json"
     json_files = glob.glob(os.path.join(test_json_dir, "*.json"))

@@ -16,9 +16,7 @@ OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED 평가에 사용할 LLM/임베�
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0,
-    api_key=,
-)
-emb = HuggingFaceEmbeddings(
+    api_key=OPENAI_API_KEY=REDACTED = HuggingFaceEmbeddings(
         model_name="jhgan/ko-sroberta-multitask",
         model_kwargs={"device": "cpu"}
     )

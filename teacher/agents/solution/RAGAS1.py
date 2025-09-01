@@ -7,17 +7,19 @@ from datasets import Dataset
 from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
 
-from teacher.agents.solution.solution_agent import SolutionAgent
+from teacher.agents.solution.solution_agent1 import SolutionAgent
 import glob
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
 # === RAGAS 평가에 사용할 LLM/임베딩 명시 (필수) ===
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0,
-    api_key=os.environ["OPENAI_API_KEY"],
+    api_key=,
 )
 emb = HuggingFaceEmbeddings(
         model_name="jhgan/ko-sroberta-multitask",

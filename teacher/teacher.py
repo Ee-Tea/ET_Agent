@@ -28,30 +28,30 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from common.short_term.redis_memory import RedisLangGraphMemory
 
-from agents.analysis.analysis_agent import AnalysisAgent
-from agents.score.score_engine import ScoreEngine as score_agent
-from agents.retrieve.retrieve_agent import retrieve_agent
+from .agents.analysis.analysis_agent import AnalysisAgent
+from .agents.score.score_engine import ScoreEngine as score_agent
+from .agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
-from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
+from .agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
 # from agents.TestGenerator.generator_backup import InfoProcessingExamAgent as generate_agent
 # from agents.solution.solution_agent import SolutionAgent as solution_agent
-from agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
-from teacher_nodes import (
+from .agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
+from .teacher_nodes import (
     get_user_answer, parse_generator_input, user_intent,                                    
     route_solution, route_score, route_analysis,
     mark_after_generator_solution, mark_after_solution_score, mark_after_score_analysis,
     post_generator_route, post_solution_route, post_score_route, post_analysis_route,
     generate_user_response, extract_problem_and_options
 )
-from file_path_mapper import FilePathMapper
+from .file_path_mapper import FilePathMapper
 from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
-from teacher_util import (
+from .teacher_util import (
     ensure_shared, validate_qas, safe_execute,
     has_questions, has_solution_answers, has_score, has_files_to_preprocess,
     extract_image_paths, extract_problems_from_images, SupportsExecute
 )
-from pdf_preprocessor import PDFPreprocessor
+from .pdf_preprocessor import PDFPreprocessor
 
 # ========== 타입/프로토콜 ==========
 
@@ -106,7 +106,13 @@ class Teacher:
         try:
             # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
             os.environ['REDIS_PORT'] = '6380'
-            self.memory = RedisLangGraphMemory(user_id=user_id, service=service, chat_id=chat_id)
+            self.memory = RedisLangGraphMemory(
+                user_id=user_id, 
+                service=service, 
+                chat_id=chat_id,
+                redis_host="localhost",
+                redis_port=6380
+            )
             # resume 시 동일 식별자로 재접속할 수 있도록 보관
             self.user_id = user_id
             self.service = service
@@ -121,7 +127,7 @@ class Teacher:
             self.memory = SimpleMemory()
         
         # PDF 전처리기 초기화
-        from unified_pdf_preprocessor import UnifiedPDFPreprocessor
+        from .unified_pdf_preprocessor import UnifiedPDFPreprocessor
         self.pdf_preprocessor = UnifiedPDFPreprocessor()
         
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
@@ -418,6 +424,63 @@ class Teacher:
                 print("🔄 interrupt가 발생했습니다. 체크포인터에서 상태를 확인하세요.")
                 print("💡 Command(resume)을 사용하여 워크플로우를 재개할 수 있습니다.")
             raise
+
+    def execute(self, state: Dict[str, Any], config: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        상위 오케스트레이터에서 호출할 수 있는 실행 함수입니다.
+        
+        Args:
+            state: TeacherState 형식의 상태 딕셔너리
+            config: LangGraph 설정 (선택사항)
+            
+        Returns:
+            Dict[str, Any]: 실행 결과 상태
+        """
+        try:
+            # TeacherState 형식으로 변환
+            teacher_state: TeacherState = {
+                "user_query": state.get("user_query", ""),
+                "intent": state.get("intent", ""),
+                "shared": state.get("shared", {}),
+                "work": state.get("work", {}),
+                "retrieval": state.get("retrieval", {}),
+                "generation": state.get("generation", {}),
+                "solution": state.get("solution", {}),
+                "score": state.get("score", {}),
+                "analysis": state.get("analysis", {}),
+                "history": state.get("history", []),
+                "session": state.get("session", {}),
+                "artifacts": state.get("artifacts", {}),
+                "routing": state.get("routing", {}),
+                "llm_response": state.get("llm_response", "")
+            }
+            
+            # 워크플로우 실행
+            result = self.invoke(teacher_state, config)
+            
+            # 결과를 딕셔너리로 변환하여 반환
+            return dict(result)
+            
+        except Exception as e:
+            print(f"❌ Teacher 실행 중 오류 발생: {e}")
+            # 오류 발생 시에도 현재 상태를 반환
+            return {
+                "error": str(e),
+                "user_query": state.get("user_query", ""),
+                "intent": state.get("intent", ""),
+                "shared": state.get("shared", {}),
+                "work": state.get("work", {}),
+                "retrieval": state.get("retrieval", {}),
+                "generation": state.get("generation", {}),
+                "solution": state.get("solution", {}),
+                "score": state.get("score", {}),
+                "analysis": state.get("analysis", {}),
+                "history": state.get("history", []),
+                "session": state.get("session", {}),
+                "artifacts": state.get("artifacts", {}),
+                "routing": state.get("routing", {}),
+                "llm_response": state.get("llm_response", "")
+            }
 
     def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> TeacherState:
         """Command(resume)을 사용하여 중단된 워크플로우를 재개합니다."""
@@ -2337,3 +2400,39 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("\n[Ctrl+C] 종료합니다.")
+
+    @traceable(name="teacher.build_form")
+    def build_form(self, state: TeacherState) -> TeacherState:
+        """
+        폼 출력용 payload를 구성하는 노드 (폼 생성 로직 분리)
+        - questions/options를 점검하고, UI가 바로 사용할 수 있는 form payload 생성
+        - artifacts.form_payload에 저장
+        - routing.output_mode를 form으로 확정
+        """
+        print("📝 폼 빌드 노드 실행 (build_form)")
+        new_state: TeacherState = ensure_shared({**state})
+        shared = new_state["shared"]
+        questions = shared.get("question", []) or []
+        options = shared.get("options", []) or []
+
+        if not questions or not options:
+            print("⚠️ 폼으로 표시할 문제/보기가 없습니다. PDF 경로로 우회")
+            new_state.setdefault("routing", {})
+            new_state["routing"]["output_mode"] = "pdf"
+            return new_state
+
+        total_n = min(len(questions), len(options))
+        form_payload = {
+            "type": "form_questions",
+            "title": "연습 문제 폼",
+            "message": "아래 문제에 대한 정답을 입력해 주세요.",
+            "questions": questions[:total_n],
+            "options": [opts if isinstance(opts, list) else [] for opts in options[:total_n]],
+            "count": total_n,
+        }
+
+        arts = new_state.setdefault("artifacts", {})
+        arts["form_payload"] = form_payload
+        new_state.setdefault("routing", {})
+        new_state["routing"]["output_mode"] = "form"
+        return new_state

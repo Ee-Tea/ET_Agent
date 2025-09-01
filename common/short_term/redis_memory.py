@@ -60,11 +60,89 @@ class RedisLangGraphMemory:
         
         # 문제 중심 스키마를 위한 네임스페이스
         self.question_ns = f"{user_id}:{service}:{chat_id}:questions"
+        
+        # LangGraph checkpointer를 위한 버전 관리
+        self._version_key = f"{self.user_id}:{self.service}:{self.chat_id}:version"
 
     # ==================== 기존 LangGraph 메모리 기능 ====================
     
     def _k(self, suffix: str) -> str:
         return f"{self.user_id}:{self.service}:{self.chat_id}:{suffix}"
+    
+    # ---------- LangGraph Checkpointer 인터페이스 ----------
+    def get_next_version(self, thread_id: str, checkpoint_id: str) -> str:
+        """LangGraph checkpointer가 요구하는 다음 버전 ID 생성"""
+        # thread_id와 checkpoint_id를 포함한 버전 키 생성
+        version_key = f"{self._version_key}:{thread_id}:{checkpoint_id}"
+        current_version = self.redis.get(version_key) or "0"
+        next_version = str(int(current_version) + 1)
+        self.redis.set(version_key, next_version)
+        if self.ttl_seconds:
+            self.redis.expire(version_key, self.ttl_seconds)
+        return next_version
+    
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        """LangGraph checkpointer가 요구하는 get 메서드"""
+        try:
+            data = self.redis.get(key)
+            return json.loads(data) if data else None
+        except Exception:
+            return None
+    
+    def put(self, key: str, value: Dict[str, Any], *args, **kwargs) -> None:
+        """LangGraph checkpointer가 요구하는 put 메서드"""
+        try:
+            data = json.dumps(value, ensure_ascii=False)
+            self.redis.set(key, data)
+            if self.ttl_seconds:
+                self.redis.expire(key, self.ttl_seconds)
+        except Exception:
+            pass
+    
+    def put_writes(self, writes: List[Dict[str, Any]], *args, **kwargs) -> None:
+        """LangGraph checkpointer가 요구하는 put_writes 메서드"""
+        try:
+            for write in writes:
+                key = write.get("key")
+                value = write.get("value")
+                if key and value is not None:
+                    self.put(key, value)
+        except Exception:
+            pass
+    
+    def list_keys(self, prefix: str = "") -> List[str]:
+        """LangGraph checkpointer가 요구하는 list_keys 메서드"""
+        try:
+            pattern = f"{self.user_id}:{self.service}:{self.chat_id}:{prefix}*" if prefix else f"{self.user_id}:{self.service}:{self.chat_id}:*"
+            keys = []
+            for key in self.redis.scan_iter(match=pattern):
+                keys.append(key)
+            return keys
+        except Exception:
+            return []
+    
+    def get_tuple(self, key: str) -> Optional[tuple]:
+        """LangGraph checkpointer가 요구하는 get_tuple 메서드"""
+        try:
+            data = self.get(key)
+            if data and isinstance(data, dict):
+                # tuple 형태로 변환 (예: (config, checkpoint))
+                return (data.get("config", {}), data.get("checkpoint", {}))
+            return None
+        except Exception:
+            return None
+    
+    def put_tuple(self, key: str, value: tuple) -> None:
+        """LangGraph checkpointer가 요구하는 put_tuple 메서드"""
+        try:
+            if len(value) == 2:
+                data = {
+                    "config": value[0],
+                    "checkpoint": value[1]
+                }
+                self.put(key, data)
+        except Exception:
+            pass
 
     @property
     def k_shared(self) -> str:

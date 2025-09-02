@@ -199,8 +199,7 @@ class Farmer:
             "작물추천_agent": crop_recommend_run,
             "작물재배_agent": crop_cultivation_run,
             "재해_agent": disaster_run,
-            "판매처_agent": market_run,
-            "기타": self.etc_agent_run
+            "판매처_agent": market_run
         }
     
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
@@ -259,8 +258,6 @@ class Farmer:
                 }
             }
 
-
-
     # 에이전트 설명 정의
     agent_descriptions = {
         "작물추천_agent": (
@@ -278,8 +275,7 @@ class Farmer:
         "판매처_agent": (
             "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 실시간 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
-        ),
-        "기타": "농업과 전혀 관련 없는 질문일 경우 선택합니다."
+        )
     }
 
     @lru_cache(maxsize=128)
@@ -298,8 +294,6 @@ class Farmer:
         3) 재해_agent: {self.agent_descriptions["재해_agent"]}
         
         4) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
-        
-        5) 기타: {self.agent_descriptions["기타"]}
         
         질문: "{user_question}"
         
@@ -357,25 +351,25 @@ class Farmer:
                             "execution_order": parsed_result["execution_order"]
                         }
                 else:
-                    # 에이전트가 0개인 경우
+                    # 에이전트가 0개인 경우 - 작물추천_agent로 기본 설정
                     return {
-                        "selected_agents": ["기타"],
+                        "selected_agents": ["작물추천_agent"],
                         "question_parts": None,
-                        "execution_order": ["기타"]
+                        "execution_order": ["작물추천_agent"]
                     }
             else:
-                # JSON 파싱 실패 시 기본값
+                # JSON 파싱 실패 시 기본값 - 작물추천_agent로 설정
                 return {
-                    "selected_agents": ["기타"],
+                    "selected_agents": ["작물추천_agent"],
                     "question_parts": None,
-                    "execution_order": ["기타"]
+                    "execution_order": ["작물추천_agent"]
                 }
         except Exception as e:
             print(f"에이전트 선택 실패: {e}")
             return {
-                "selected_agents": ["기타"],
+                "selected_agents": ["작물추천_agent"],
                 "question_parts": None,
-                "execution_order": ["기타"]
+                "execution_order": ["작물추천_agent"]
             }
 
     async def execute_agents_parallel(self, agents: List[str], state: RouterState) -> RouterState:
@@ -454,64 +448,7 @@ class Farmer:
         except Exception as e:
             return f"에이전트 실행 중 오류: {e}"
 
-    def web_search_with_tavily(self, query: str, api_key: str = None):
-        """
-        Tavily를 이용한 웹 검색
-        """
-        try:
-            # API 키 설정
-            if not api_key:
-                api_key = os.getenv("TAVILY_API_KEY")
-            
-            if not api_key:
-                return "Tavily API 키가 설정되지 않았습니다."
-            
-            ***REMOVED*** 클라이언트 생성
-            client = TavilyClient(api_key=api_key)
-            
-            # 웹 검색 실행
-            search_result = client.search(
-                query=query,
-                search_depth="basic",
-                max_results=5
-            )
-            
-            # 결과 정리
-            if search_result and 'results' in search_result:
-                formatted_results = "=== 웹 검색 결과 ===\n\n"
-                for i, result in enumerate(search_result['results'][:5], 1):
-                    formatted_results += f"{i}. {result.get('title', '제목 없음')}\n"
-                    formatted_results += f"   URL: {result.get('url', 'URL 없음')}\n"
-                    formatted_results += f"   내용: {result.get('content', '내용 없음')[:200]}...\n\n"
-                return formatted_results
-            else:
-                return "웹 검색 결과를 찾을 수 없습니다."
-                
-        except ImportError:
-            return "Tavily 라이브러리가 설치되지 않았습니다. 'pip install tavily-python'으로 설치해주세요."
-        except Exception as e:
-            return f"웹 검색 중 오류가 발생했습니다: {e}"
 
-    def etc_agent_run(self, state: dict) -> dict:
-        """
-        기타 에이전트 - 웹 검색을 통한 답변
-        """
-        query = state.get("query", "")
-        
-        # 웹 검색 실행
-        print(f"[기타_agent] 웹 검색 시작: {query}")
-        web_result = self.web_search_with_tavily(query)
-        
-        # 결과 정리
-        if "오류" in web_result or "설정되지 않음" in web_result:
-            final_answer = f"질문: {query}\n\n{web_result}"
-        else:
-            final_answer = f"질문: {query}\n\n{web_result}\n\n※ 위 정보는 웹 검색을 통해 제공되었습니다."
-        
-        return {
-            "agent_answer": final_answer,
-            "source": "web_search"
-        }
 
 
 
@@ -737,29 +674,7 @@ class Farmer:
         print(f"[✅ 판매처_agent 병렬 실행 완료]")
         print(f"[📤 응답 원본] {answer[:200]}...")
         return state
-
-    @traceable(name="node_etc")
-    def node_etc(self, state: RouterState) -> RouterState:
-        """기타 에이전트 전용 노드"""
-        if "기타" not in state.get("selected_agents", []):
-            return state
         
-        print(f"\n=== �� 기타_agent 웹검색 실행 ===")
-        
-        # 원본 질문 사용
-        question_part = state["query"][0] if state["query"] else ""
-        print(f"[📝 담당 질문] {question_part}")
-        
-        # 에이전트 실행
-        answer = self.execute_agent_with_boundaries("기타", question_part)
-        
-        # 전용 키에 답변 저장
-        state["agent_results"]["기타"] = answer
-        
-        print(f"[✅ 기타_agent 웹검색 실행 완료]")
-        print(f"[📤 응답 원본] {answer[:200]}...")
-        return state
-
     # 병렬 처리 노드 (개선된 비동기 처리)
     @traceable(name="node_parallel_agents")
     def node_parallel_agents(self, state: RouterState) -> RouterState:
@@ -900,7 +815,7 @@ class Farmer:
         workflow.add_node("crop_grow_agent", self.node_crop_grow_agent)
         workflow.add_node("disaster_agent", self.node_disaster_agent)
         workflow.add_node("sales_agent", self.node_sales_agent)
-        workflow.add_node("etc", self.node_etc)
+
         workflow.add_node("merge_output", self.node_merge_output)
         
         # 기본 엣지 (메모리 시스템 포함)
@@ -923,14 +838,13 @@ class Farmer:
                     return "disaster_agent"
                 elif agent == "판매처_agent":
                     return "sales_agent"
-                elif agent == "기타":
-                    return "etc"
+
             # 여러 에이전트가 선택된 경우
             elif len([agent for agent in selected_agents if agent != "작물추천_agent"]) > 0:
                 return "parallel_execution"
-            # 아무것도 선택되지 않은 경우
+            # 아무것도 선택되지 않은 경우 - 작물추천으로 기본 설정
             else:
-                return "etc"
+                return "crop_recommend"
 
         workflow.add_conditional_edges(
             "agent_select",
@@ -941,7 +855,7 @@ class Farmer:
                 "disaster_agent": "disaster_agent", 
                 "sales_agent": "sales_agent",
                 "parallel_execution": "parallel_execution",
-                "etc": "etc"
+
             }
         )
         
@@ -964,7 +878,7 @@ class Farmer:
         workflow.add_edge("crop_grow_agent", "merge_output")
         workflow.add_edge("disaster_agent", "merge_output")
         workflow.add_edge("sales_agent", "merge_output")
-        workflow.add_edge("etc", "merge_output")
+
         
         # 병합 노드에서 메모리 저장 후 종료
         workflow.add_edge("merge_output", "persist_state")
@@ -976,13 +890,13 @@ class Farmer:
 
     def run_orchestrator_langgraph(self):
         graph = self.create_workflow()
-        # try:
-        #     graph_image_path = "ochestrator_workflow.png"
-        #     with open(graph_image_path, "wb") as f:
-        #         f.write(graph.get_graph().draw_mermaid_png())
-        #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        # except Exception as e:
-        #     print(f"그래프 시각화 중 오류 발생: {e}")
+        try:
+            graph_image_path = "ochestrator_workflow.png"
+            with open(graph_image_path, "wb") as f:
+                f.write(graph.get_graph().draw_mermaid_png())
+            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+        except Exception as e:
+            print(f"그래프 시각화 중 오류 발생: {e}")
 
         while True:
             try:

@@ -88,6 +88,9 @@ WHEATHER_API_KEY_HUB = os.getenv("WHEATHER_API_KEY_HUB")
 USE_KMA_LIVE = os.getenv("USE_KMA_LIVE", "true").lower() in ("1", "true", "yes")
 FORCE_DISABLE_KMA_LIVE = False
 
+# 통합 지역코드 CSV 설정
+UNIFIED_REGIONS_CSV = os.getenv("UNIFIED_REGIONS_CSV", "all_regions_combined.csv")
+
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
 
@@ -218,18 +221,44 @@ def _read_map_csv(path: Optional[str]) -> List[tuple]:
         pairs.append((code, name))
     return pairs
 
-def _load_region_maps_from_two_csvs():
+def _load_unified_region_map():
+    """통합 CSV에서 지역코드 매핑 로드"""
     REGION_MAP.clear()
     REGION_NAME_INDEX.clear()
-    paths = [os.getenv("KMA_ADVISORY_MAP_CSV"), os.getenv("KMA_FCT_MAP_CSV")]
-    for p in paths:
-        for code, name in _read_map_csv(p):
-            REGION_MAP[code] = name
-            REGION_NAME_INDEX.setdefault(_norm_name(name), []).append(code)
-    used = ", ".join([p for p in paths if p]) or "N/A"
-    print(f"✅ 지역코드 매핑 로드: {len(REGION_MAP)}개 (from: {used})")
+    
+    if not os.path.exists(UNIFIED_REGIONS_CSV):
+        print(f"⚠️ 통합 CSV 파일이 없습니다: {UNIFIED_REGIONS_CSV}")
+        return
+    
+    try:
+        # pandas로 읽기 (더 안정적)
+        df = pd.read_csv(UNIFIED_REGIONS_CSV, encoding='utf-8-sig')
+        
+        # 컬럼 자동 감지
+        code_col, name_col = _pick_cols(df)
+        
+        if not code_col or not name_col:
+            print("❌ CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
+            return
+        
+        print(f"✅ CSV 컬럼 감지: 코드={code_col}, 이름={name_col}")
+        
+        # 데이터 로드
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip()
+            name = str(row[name_col]).strip()
+            
+            if code and name and code.lower() != "nan" and name.lower() != "nan":
+                REGION_MAP[code] = name
+                REGION_NAME_INDEX.setdefault(_norm_name(name), []).append(code)
+        
+        print(f"✅ 통합 지역코드 매핑 로드: {len(REGION_MAP)}개 (파일: {UNIFIED_REGIONS_CSV})")
+        
+    except Exception as e:
+        print(f"❌ CSV 로드 오류: {e}")
 
-_load_region_maps_from_two_csvs()
+# 기존 함수 호출을 통합 함수로 교체
+_load_unified_region_map()
 
 def resolve_region(token: str) -> str:
     if not token: return "N/A"
@@ -851,7 +880,7 @@ def _format_for_llm(src: str, payload_json: str, human: str) -> str:
     return f"[{src}] {human}"
 
 # =========[ 중기예보(wl) 전용: CSV 권역/질의 해석 ]=========
-MID_REGIONS_CSV = os.getenv("MID_REGIONS_CSV", "mid_regions.csv")
+MID_REGIONS_CSV = UNIFIED_REGIONS_CSV  # 통합 CSV 사용
 MAX_RETRIES = 3
 BACKOFF = 1.5
 MERGE_BY_DAY = (os.getenv("MERGE_BY_DAY", "true").lower() in ("1", "true", "yes"))
@@ -924,21 +953,40 @@ def normalize_spaces(s: str) -> str:
 
 # --- CSV 로딩 ---
 def MID_load_all_from_csv(path: str) -> Dict[str, str]:
+    """통합 CSV에서 중기예보용 권역 정보 로드"""
     if not os.path.exists(path):
         raise FileNotFoundError(f"권역 CSV를 찾을 수 없습니다: {path}")
-    mapping: Dict[str, str] = {}
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rid = (row.get("reg_id") or "").strip()
-            rname = (row.get("reg_name") or "").strip()
-            if rid and rname and rid not in mapping:
+    
+    try:
+        # pandas로 읽기 (더 안정적)
+        df = pd.read_csv(path, encoding='utf-8-sig')
+        
+        # 컬럼 자동 감지
+        code_col, name_col = _pick_cols(df)
+        
+        if not code_col or not name_col:
+            raise ValueError(f"CSV에서 코드/이름 컬럼을 찾을 수 없습니다. 현재 컬럼: {list(df.columns)}")
+        
+        mapping: Dict[str, str] = {}
+        
+        # 데이터 로드
+        for _, row in df.iterrows():
+            rid = str(row[code_col]).strip()
+            rname = str(row[name_col]).strip()
+            
+            if rid and rname and rid.lower() != "nan" and rname.lower() != "nan":
                 mapping[rid] = rname
-    if not mapping:
-        raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
-    return mapping
+        
+        if not mapping:
+            raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
+        
+        return mapping
+        
+    except Exception as e:
+        raise RuntimeError(f"CSV 파싱 오류: {e}")
 
-MID_REGION_CODE_RE = re.compile(r"^11[A-Z](\d)?0{4,5}$")
+# 통합 CSV의 다양한 지역코드 형식 지원
+MID_REGION_CODE_RE = re.compile(r"^(11[A-Z](\d)?0{4,5}|L\d{7}|S\d{7})$")
 def MID_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
     region_map = {rid: nm for rid, nm in all_map.items() if MID_REGION_CODE_RE.match(rid)}
     if not region_map:
@@ -978,18 +1026,47 @@ else:
     print("⚠️ 중기 CSV 파일이 없어 중기 권역 매핑을 건너뜁니다. (MID_REGIONS_CSV)")
 
 MID_FAMILY_RULES = [
+    # 기존 11X 형식
     (r"^11B",  "11B00000"), (r"^11D1", "11D10000"), (r"^11D2", "11D20000"),
     (r"^11C1", "11C10000"), (r"^11C2", "11C20000"), (r"^11F1", "11F10000"),
     (r"^11F2", "11F20000"), (r"^11H1", "11H10000"), (r"^11H2", "11H20000"),
     (r"^11G",  "11G00000"),
+    # 통합 CSV의 L, S 형식 추가
+    (r"^L100", "L1000000"), (r"^L101", "L1010000"), (r"^L102", "L1020000"),
+    (r"^L103", "L1030000"), (r"^L104", "L1040000"), (r"^L105", "L1050000"),
+    (r"^L106", "L1060000"), (r"^L107", "L1070000"), (r"^L108", "L1080000"),
+    (r"^L109", "L1090000"), (r"^L110", "L1100000"), (r"^L111", "L1110000"),
+    (r"^L112", "L1120000"), (r"^L113", "L1130000"), (r"^L114", "L1140000"),
+    (r"^L115", "L1150000"), (r"^L116", "L1160000"), (r"^L117", "L1170000"),
+    (r"^S100", "S1000000"), (r"^S110", "S1100000"), (r"^S113", "S1130000"),
+    (r"^S115", "S1150000"), (r"^S120", "S1200000"), (r"^S123", "S1230000"),
+    (r"^S125", "S1250000"), (r"^S130", "S1300000"), (r"^S131", "S1310000"),
+    (r"^S132", "S1320000"), (r"^S133", "S1330000"), (r"^S200", "S2000000"),
 ]
 
 def MID_normalize_mid_reg_code(code_like: str) -> Optional[str]:
     c = (code_like or "").strip()
     if not c: return None
+    
+    # 직접 매칭
     if c in MID_LAND_MAP: return c
+    
+    # 패턴 매칭
     for pat, target in MID_FAMILY_RULES:
-        if re.match(pat, c): return target if target in MID_LAND_MAP else target
+        if re.match(pat, c): 
+            return target if target in MID_LAND_MAP else target
+    
+    # 통합 CSV의 다양한 형식 지원
+    # L 형식: L1000000 -> L1000000, L1010200 -> L1010000
+    if c.startswith('L') and len(c) >= 6:
+        base_code = c[:4] + '0000'
+        if base_code in MID_LAND_MAP: return base_code
+    
+    # S 형식: S1000000 -> S1000000, S1100000 -> S1100000
+    if c.startswith('S') and len(c) >= 6:
+        base_code = c[:4] + '0000'
+        if base_code in MID_LAND_MAP: return base_code
+    
     return None
 
 def MID_extract_datetime_from_question(q: str) -> Optional[datetime]:
@@ -1025,17 +1102,34 @@ def MID_is_mid_term_date(date: Optional[datetime]) -> Tuple[bool, Optional[int]]
 
 def MID_extract_region_from_question(q: str) -> str:
     qn = normalize_spaces(q)
-    m = re.search(r"(11[A-Z]\d{5,})", qn)
-    if m:
-        cand = MID_normalize_mid_reg_code(m.group(1))
-        if cand: return MID_LAND_MAP.get(cand, cand)
+    
+    # 통합 CSV의 다양한 지역코드 패턴 지원
+    patterns = [
+        r"(11[A-Z]\d{5,})",  # 기존 11X 형식
+        r"(L\d{6,})",        # L 형식 (육상)
+        r"(S\d{6,})",        # S 형식 (해상)
+    ]
+    
+    for pattern in patterns:
+        m = re.search(pattern, qn)
+        if m:
+            cand = MID_normalize_mid_reg_code(m.group(1))
+            if cand: return MID_LAND_MAP.get(cand, cand)
+    
+    # 지역명으로 검색
     for _code, name in MID_LAND_MAP.items():
         if normalize_spaces(name) in qn: return name
+    
+    # 별칭으로 검색
     for alias, full in REGION_ALIASES.items():
         if alias in qn: return full
+    
+    # 특수 지역 매칭
     for code, name in MID_LAND_MAP.items():
         if "서울" in name and "인천" in name and ("경기" in name or "경기도" in name):
             return name
+    
+    # 기본값
     first_code = next(iter(MID_LAND_MAP.keys())) if MID_LAND_MAP else None
     return MID_LAND_MAP.get(first_code, "수도권") if first_code else "수도권"
 

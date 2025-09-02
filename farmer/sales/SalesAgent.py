@@ -907,7 +907,7 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import
-        from sales.SalesRAGAS import SalesRAGASEvaluator
+        from .SalesRAGAS import SalesRAGASEvaluator
         
         # 평가기 초기화
         evaluator = SalesRAGASEvaluator()

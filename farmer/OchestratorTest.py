@@ -14,7 +14,7 @@ from tavily import TavilyClient
 import operator
 from langsmith import traceable
 from dotenv import load_dotenv
-import os
+import os, sys
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache

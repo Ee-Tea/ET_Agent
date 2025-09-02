@@ -1264,8 +1264,8 @@ class SolutionAgent(BaseAgent):
             f_sc, r_sc = self._extract_scores(res)
 
         # ✅ 임계값: 먼저 정의
-        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.7"))
-        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.7"))
+        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.6"))
+        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.6"))
 
         pass_f = (f_sc >= thr_f)
         pass_r = (r_sc >= thr_r)
@@ -1275,14 +1275,6 @@ class SolutionAgent(BaseAgent):
             state.pop("pass_f", None)  # 재사용 방지 (중요)
 
         state["validated"] = bool(pass_f and pass_r)
-        # 이하 retry_retrieve / retry_gen 증가 로직은 그대로:
-        if not pass_f:
-            state["retry_retrieve"] = int(state.get("retry_retrieve", 0) or 0) + 1
-        elif not pass_r:
-            state["retry_gen"] = int(state.get("retry_gen", 0) or 0) + 1
-        else:
-            state["retry_retrieve"] = 0
-            state["retry_gen"] = 0
 
         # ✅ 최신 점수/메타를 항상 기록 (validated 여부 무관)
         ts = datetime.now().isoformat(timespec="seconds")
@@ -1306,26 +1298,21 @@ class SolutionAgent(BaseAgent):
         # ✅ 실패 유형별로 카운터 분리 증가 (둘 다 실패면 검색 우선)
         if not pass_f:
             state["retry_retrieve"] = int(state.get("retry_retrieve", 0)) + 1
-
             print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | "
-            f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
-            f"pass_f={pass_f} pass_r={pass_r} | "
-            f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
+                f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
+                f"pass_f={pass_f} pass_r={pass_r} | "
+                f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
         elif not pass_r:
             state["retry_gen"] = int(state.get("retry_gen", 0)) + 1
-
             print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | "
-            f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
-            f"pass_f={pass_f} pass_r={pass_r} | "
-            f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
+                f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
+                f"pass_f={pass_f} pass_r={pass_r} | "
+                f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
         else:
-
             print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | "
-            f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
-            f"pass_f={pass_f} pass_r={pass_r} | "
-            f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
-
-            # 성공 시 리셋(선택)
+                f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
+                f"pass_f={pass_f} pass_r={pass_r} | "
+                f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
             state["retry_retrieve"] = 0
             state["retry_gen"] = 0
 
@@ -1504,8 +1491,8 @@ class SolutionAgent(BaseAgent):
                     "faithfulness": last.get("faithfulness", 0.0),
                     "answer_relevancy": last.get("answer_relevancy", 0.0),
                     "thresholds": {
-                        "faithfulness": float(os.getenv("RAGAS_THR_FAITH", "0.7")),
-                        "answer_relevancy": float(os.getenv("RAGAS_THR_RELEVANCY", "0.7")),
+                        "faithfulness": float(os.getenv("RAGAS_THR_FAITH", "0.6")),
+                        "answer_relevancy": float(os.getenv("RAGAS_THR_RELEVANCY", "0.6")),
                     },
                     "n_contexts": last.get("n_contexts", 0),
                     "timestamp": last.get("timestamp", ""),
@@ -1626,7 +1613,7 @@ if __name__ == "__main__":
     CONCEPT_COLL    = os.getenv("CONCEPT_COLL", "concepts")
     INSTRUCTION     = os.getenv("AGENT_INSTRUCTION", "이 문제의 정답 번호와 풀이, 그리고 과목을 알려줘.")  # ← input() 제거
     RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "200"))
-    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "0"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
+    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "10"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
 
     # --- app.py 참고한 벡터 연결 함수 ---
     def init_vectorstore(host: str, port: str, coll: str,
@@ -1745,7 +1732,8 @@ if __name__ == "__main__":
         CSV_FIELDS = [
             "timestamp", "file", "index",
             "question", "options",
-            "answer_pred", "subject_pred", "validated", "retry_count",
+            "answer_pred", "subject_pred", "validated", 
+            "retry_count", "retry_retrieve", "retry_gen",
             "faithfulness", "answer_relevancy", "thr_f", "thr_r", "n_contexts",
             "answer_explanation",  # ← 설명 컬럼도 저장하고 싶다면 유지, 아니면 제거
         ]
@@ -1778,8 +1766,9 @@ if __name__ == "__main__":
                 "answer_pred": r.get("generated_answer", ""),
                 "subject_pred": r.get("generated_subject", ""),
                 "validated": r.get("validated", False),
-                "retry_gen": r.get("retry_gen", 0),
-                "retry_retrieve": r.get("retry_retrieve", 0),
+                "retry_gen": int(r.get("retry_gen", 0) or 0),
+                "retry_retrieve": int(r.get("retry_retrieve", 0) or 0),
+                "retry_count": int(r.get("retry_gen", 0) or 0) + int(r.get("retry_retrieve", 0) or 0),
                 # RAGAS 메타
                 "faithfulness": r.get("ragas_faithfulness", ""),
                 "answer_relevancy": r.get("ragas_answer_relevancy", ""),

@@ -160,7 +160,7 @@ def _create_milvus_collection_if_not_exists(collection_name: str, embedding_dim:
             FieldSchema(name="type", dtype=DataType.VARCHAR, max_length=100),
             FieldSchema(name="regions", dtype=DataType.JSON),
         ]
-        schema = CollectionSchema(fields, "RAG 문서 메타데이터")
+        schema = CollectionSchema(fields, "재해 대응 데이터")
         collection = Collection(name=collection_name, schema=schema)
         
         index_params = {
@@ -228,7 +228,8 @@ def _get_embedding(
         )
     
     # 모델의 device를 명시적으로 설정
-    embed_model.client.to(device)
+    if hasattr(embed_model, '_client') and embed_model._client is not None:
+        embed_model._client.to(device)
     
     print(f"임베딩 계산 중 ({len(texts)}개 텍스트, 장치: {device})...")
     return np.array(embed_model.embed_documents(texts), dtype="float32")

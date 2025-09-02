@@ -3,16 +3,22 @@ import requests
 import re
 import json
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.runnables import RunnableLambda
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 from langchain_groq import ChatGroq
 # from langchain_openai import ChatOpenAI
-from typing import TypedDict, Annotated, List, Dict
+from typing import TypedDict, Annotated, List, Dict, Optional
 from tavily import TavilyClient
 import operator
 from langsmith import traceable
 from dotenv import load_dotenv
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+import traceback
 load_dotenv()
 
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
@@ -51,12 +57,21 @@ class RouterState(dict):
     selected_crop: Annotated[List[str], merge_lists_unique] = []
     agent_results: Annotated[Dict[str, str], merge_dicts] = {}
     output: Annotated[List[str], operator.add] = []
+    session: Annotated[Dict[str, any], merge_dicts] = {}
+    artifacts: Annotated[Dict[str, any], merge_dicts] = {}
+    routing: Annotated[Dict[str, any], merge_dicts] = {}
+    error_info: Annotated[Dict[str, str], merge_dicts] = {}
 
 class Farmer:
     """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
     
-    def __init__(self):
+    def __init__(self, user_id: str = "default_user", service: str = "farmer", chat_id: str = "default_chat"):
         """Farmer 클래스 초기화"""
+        # 사용자 식별자 설정
+        self.user_id = user_id
+        self.service = service
+        self.chat_id = chat_id
+        
         # LLM 설정
         self.llm = ChatGroq(model_name="meta-llama/llama-4-scout-17b-16e-instruct",
                            temperature=0.8,
@@ -64,14 +79,120 @@ class Farmer:
         # gpt-4o-mini 사용 시 주석 해제
         # self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY=REDACTED()
         
+        # 체크포인터 초기화
+        self.checkpointer = InMemorySaver()
+        
+        # 에이전트 함수들 로드
+        self._load_agent_functions()
+        
         # 워크플로우 그래프 생성
         self.graph = self.create_workflow()
+        
+        # 병렬 처리용 스레드 풀
+        self.thread_pool = ThreadPoolExecutor(max_workers=4)
+    
+    def _init_memory_system(self):
+        """메모리 시스템 초기화"""
+        try:
+            # Redis 메모리 시스템 시도
+            sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+            from common.short_term.redis_memory import RedisLangGraphMemory
+            
+            # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
+            os.environ['REDIS_PORT'] = '6380'
+            self.memory = RedisLangGraphMemory(user_id=self.user_id, service=self.service, chat_id=self.chat_id)
+            print("✅ Redis 메모리 시스템 초기화 완료")
+        except Exception as e:
+            print(f"⚠️ Redis 연결 실패: {e}")
+            print("📝 메모리 기반으로 실행합니다.")
+            # 간단한 메모리 기반 메모리 클래스
+            class SimpleMemory:
+                def load(self, state): 
+                    return state
+                def save(self, state, _): 
+                    return state
+            self.memory = SimpleMemory()
+    
+    def load_state(self, state: RouterState) -> RouterState:
+        """그래프 시작 시 메모리에서 상태를 불러와 state에 병합"""
+        if (state.get("session") or {}).get("loaded"):
+            return state
+        loaded = self.memory.load(state)
+        loaded.setdefault("session", {})
+        loaded["session"]["loaded"] = True
+        return loaded
+    
+    def persist_state(self, state: RouterState) -> RouterState:
+        """그래프 리프 종료 후 메모리에 반영"""
+        try:
+            self.memory.save(state, state)
+        except Exception as e:
+            print(f"⚠️ 상태 저장 실패: {e}")
+        return state
+    
+    def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> RouterState:
+        """워크플로우 재개 기능"""
+        if config is None:
+            config = {"configurable": {"thread_id": "default"}}
+        
+        try:
+            print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
+            
+            # LangGraph 버전에 따른 Command import 시도
+            try:
+                from langgraph.checkpoint.memory import Command
+            except ImportError:
+                try:
+                    from langgraph import Command
+                except ImportError:
+                    try:
+                        from langgraph.types import Command
+                    except ImportError:
+                        print("❌ Command를 import할 수 없습니다. LangGraph 버전을 확인해주세요.")
+                        raise ImportError("Command import 실패")
+            
+            # Command(resume)을 사용하여 중단된 지점부터 재개
+            resume_command = Command(resume=resume_data)
+            print(f"📤 Command(resume) 전송: {resume_command}")
+            
+            # 체크포인터가 설정된 그래프로 재개
+            result = self.graph.invoke(resume_command, config)
+            print("✅ 워크플로우 재개 완료")
+            return result
+        except Exception as e:
+            print(f"❌ 워크플로우 재개 실패: {e}")
+            print(f"🔍 오류 상세: {type(e).__name__}: {str(e)}")
+            raise
+    
+    def _handle_error(self, state: RouterState, error: Exception, context: str = "") -> RouterState:
+        """에러 처리 및 상태 복구"""
+        error_info = {
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "context": context,
+            "timestamp": str(os.time.time() if hasattr(os, 'time') else __import__('time').time())
+        }
+        
+        state["error_info"] = error_info
+        print(f"❌ 에러 발생 [{context}]: {error}")
+        print(f"🔍 에러 상세: {error_info}")
+        
+        # 에러 복구 시도
+        try:
+            # 기본 응답으로 복구
+            state["output"] = [f"죄송합니다. {context} 처리 중 오류가 발생했습니다. 다시 시도해주세요."]
+            print("🔄 기본 응답으로 복구 완료")
+        except Exception as recovery_error:
+            print(f"❌ 복구 실패: {recovery_error}")
+            state["output"] = ["시스템 오류가 발생했습니다. 관리자에게 문의해주세요."]
+        
+        return state
     
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
         from 작물추천.crop65pdfllm import run as crop_recommend_run
         from 재배방법.crop_overall import run as crop_cultivation_run
-        from 재해대응.verification_search import run as disaster_run
+        from 재해대응.DisasterAgent import run as disaster_run
         from sales.SalesAgent import run as market_run
         
         self.agent_functions = {
@@ -82,7 +203,7 @@ class Farmer:
             "기타": self.etc_agent_run
         }
     
-    def invoke(self, state: dict) -> dict:
+    def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
         """
         Supervisor에서 호출되는 메인 실행 함수
         
@@ -90,6 +211,7 @@ class Farmer:
             state: Supervisor에서 전달받은 상태 딕셔너리
                   - query: 사용자 질문 (필수)
                   - 기타 필요한 상태 정보들
+            config: LangGraph 설정 (선택사항)
         
         Returns:
             dict: 실행 결과
@@ -97,13 +219,16 @@ class Farmer:
                 - selected_agents: 선택된 에이전트들
                 - agent_results: 각 에이전트별 결과
         """
+        if config is None:
+            config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
+        
         try:
             # RouterState로 변환
             router_state = RouterState()
             router_state["query"] = [state.get("query", "")]
             
-            # 그래프 실행
-            result = self.graph.invoke(router_state)
+            # 체크포인터와 함께 그래프 실행
+            result = self.graph.invoke(router_state, config)
             
             # 결과 반환
             return {
@@ -112,10 +237,13 @@ class Farmer:
                 "agent_results": result.get("agent_results", {}),
                 "selected_crop": result.get("selected_crop", [""])[0] if result.get("selected_crop") else "",
                 "crop_info": result.get("crop_info", [""])[0] if result.get("crop_info") else "",
-                "status": "success"
+                "status": "success",
+                "error_info": result.get("error_info", {})
             }
             
         except Exception as e:
+            print(f"❌ Farmer 오케스트레이터 실행 중 오류: {e}")
+            traceback.print_exc()
             return {
                 "output": f"Farmer 오케스트레이터 실행 중 오류가 발생했습니다: {e}",
                 "selected_agents": [],
@@ -123,7 +251,12 @@ class Farmer:
                 "selected_crop": "",
                 "crop_info": "",
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
+                "error_info": {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "main_invoke"
+                }
             }
 
 
@@ -149,6 +282,7 @@ class Farmer:
         "기타": "농업과 전혀 관련 없는 질문일 경우 선택합니다."
     }
 
+    @lru_cache(maxsize=128)
     def simple_agent_selector(self, user_question):
         """
         사용자 질문을 분석하여 필요한 에이전트를 선택하는 함수
@@ -244,17 +378,77 @@ class Farmer:
                 "execution_order": ["기타"]
             }
 
+    async def execute_agents_parallel(self, agents: List[str], state: RouterState) -> RouterState:
+        """에이전트 병렬 실행"""
+        print(f"\n=== 🚀 병렬 에이전트 실행 시작: {agents} ===")
+        
+        async def run_agent(agent_name: str, question_part: str):
+            """개별 에이전트 실행"""
+            try:
+                return agent_name, self.execute_agent_with_boundaries(agent_name, question_part)
+            except Exception as e:
+                print(f"❌ {agent_name} 실행 실패: {e}")
+                return agent_name, f"{agent_name} 실행 중 오류가 발생했습니다: {e}"
+        
+        # 병렬 실행을 위한 태스크 생성
+        tasks = []
+        question_parts = state.get("question_parts", {})
+        
+        for agent in agents:
+            if agent == "작물추천_agent":
+                continue  # 작물추천은 이미 실행됨
+            
+            # 질문 부분 가져오기
+            if question_parts and agent in question_parts:
+                question_part = question_parts[agent]
+            else:
+                question_part = state["query"][0] if state["query"] else ""
+            
+            # 작물명 추가 처리
+            selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
+            if selected_crop and selected_crop not in question_part:
+                if agent == "작물재배_agent":
+                    question_part = f"{selected_crop} {question_part}"
+                elif agent == "재해_agent":
+                    question_part = f"{selected_crop} 재배 중, {question_part}"
+                elif agent == "판매처_agent":
+                    question_part = f"{selected_crop} {question_part}"
+            
+            # 태스크 추가
+            tasks.append(run_agent(agent, question_part))
+        
+        # 병렬 실행
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 결과 처리
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"❌ 병렬 실행 중 예외 발생: {result}")
+                    continue
+                
+                agent_name, answer = result
+                state["agent_results"][agent_name] = answer
+                print(f"✅ {agent_name} 병렬 실행 완료")
+        
+        except Exception as e:
+            print(f"❌ 병렬 실행 실패: {e}")
+            state = self._handle_error(state, e, "parallel_agent_execution")
+        
+        print(f"=== 🎯 병렬 에이전트 실행 완료 ===")
+        return state
+
     def execute_agent_with_boundaries(self, agent_name, question_part):
         agent_func = self.agent_functions.get(agent_name)
         if not agent_func:
             return f"{agent_name} 실행 함수가 연결되어 있지 않습니다."
 
-        agent_prompt = f"질문: {question_part}"
+        agent_prompt = f"{question_part}"
 
         try:
             agent_state = {"query": agent_prompt}
             agent_result = agent_func(agent_state)
-            answer = agent_result.get("pred_answer", "답변 생성 실패")
+            answer = agent_result.get("agent_answer", "답변 생성 실패")
             return answer
 
         except Exception as e:
@@ -315,7 +509,7 @@ class Farmer:
             final_answer = f"질문: {query}\n\n{web_result}\n\n※ 위 정보는 웹 검색을 통해 제공되었습니다."
         
         return {
-            "pred_answer": final_answer,
+            "agent_answer": final_answer,
             "source": "web_search"
         }
 
@@ -566,7 +760,7 @@ class Farmer:
         print(f"[📤 응답 원본] {answer[:200]}...")
         return state
 
-    # 병렬 처리 노드 (기존 로직 단순화)
+    # 병렬 처리 노드 (개선된 비동기 처리)
     @traceable(name="node_parallel_agents")
     def node_parallel_agents(self, state: RouterState) -> RouterState:
         """병렬 에이전트 실행을 조정하는 노드"""
@@ -577,11 +771,23 @@ class Farmer:
             print(f"\n=== 🎯 작물추천_agent만 선택됨 - 병렬 처리 건너뜀 ===")
             return state
         
-        # 여러 에이전트가 있는 경우 병렬 처리 준비
-        print(f"\n=== 🚀 병렬 에이전트 실행 준비 완료 ===")
-        print(f"[📋 실행될 에이전트] {[agent for agent in selected_agents if agent != '작물추천_agent']}")
+        # 여러 에이전트가 있는 경우 병렬 처리 실행
+        print(f"\n=== 🚀 병렬 에이전트 실행 시작 ===")
+        agents_to_run = [agent for agent in selected_agents if agent != "작물추천_agent"]
+        print(f"[📋 실행될 에이전트] {agents_to_run}")
         
-        return state
+        try:
+            # 비동기 병렬 실행
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result_state = loop.run_until_complete(
+                self.execute_agents_parallel(agents_to_run, state)
+            )
+            loop.close()
+            return result_state
+        except Exception as e:
+            print(f"❌ 병렬 처리 노드 실행 실패: {e}")
+            return self._handle_error(state, e, "node_parallel_agents")
 
     @traceable(name="node_merge_output")
     def node_merge_output(self, state: RouterState) -> RouterState:
@@ -685,6 +891,8 @@ class Farmer:
         workflow = StateGraph(RouterState)
         
         # 노드 추가
+        workflow.add_node("load_state", RunnableLambda(self.load_state))
+        workflow.add_node("persist_state", RunnableLambda(self.persist_state))
         workflow.add_node("input", self.node_input)
         workflow.add_node("agent_select", self.node_agent_select)
         workflow.add_node("crop_recommend", self.node_crop_recommend)
@@ -695,7 +903,8 @@ class Farmer:
         workflow.add_node("etc", self.node_etc)
         workflow.add_node("merge_output", self.node_merge_output)
         
-        # 기본 엣지
+        # 기본 엣지 (메모리 시스템 포함)
+        workflow.add_edge("load_state", "input")
         workflow.add_edge("input", "agent_select")
         
         # agent_select에서 조건부 분기 (etc 제거)
@@ -757,12 +966,13 @@ class Farmer:
         workflow.add_edge("sales_agent", "merge_output")
         workflow.add_edge("etc", "merge_output")
         
-        # 병합 노드에서 다시 입력으로
-        workflow.add_edge("merge_output", END)
+        # 병합 노드에서 메모리 저장 후 종료
+        workflow.add_edge("merge_output", "persist_state")
+        workflow.add_edge("persist_state", END)
         
-        workflow.set_entry_point("input")
+        workflow.set_entry_point("load_state")
         
-        return workflow.compile()
+        return workflow.compile(checkpointer=self.checkpointer)
 
     def run_orchestrator_langgraph(self):
         graph = self.create_workflow()
@@ -777,13 +987,15 @@ class Farmer:
         while True:
             try:
                 state = RouterState()
-                result = graph.invoke(state)
+                config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
+                result = graph.invoke(state, config)
                 
             except KeyboardInterrupt:
                 print("\n\n프로그램을 종료합니다.")
                 break
             except Exception as e:
                 print(f"\n오류가 발생했습니다: {e}")
+                traceback.print_exc()
                 continue
 
     
@@ -792,20 +1004,22 @@ class Farmer:
         while True:
             try:
                 state = RouterState()
-                result = self.graph.invoke(state)
+                config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
+                result = self.graph.invoke(state, config)
                 
             except KeyboardInterrupt:
                 print("\n\n프로그램을 종료합니다.")
                 break
             except Exception as e:
                 print(f"\n오류가 발생했습니다: {e}")
+                traceback.print_exc()
                 continue
 
 
 # 기존 실행 방식과의 호환성을 위한 전역 함수들
 def run_orchestrator_langgraph():
     """기존 실행 방식과의 호환성을 위한 함수"""
-    farmer = Farmer()
+    farmer = Farmer(user_id="default_user", service="farmer", chat_id="default_chat")
     farmer.run_standalone()
 
 if __name__ == "__main__":

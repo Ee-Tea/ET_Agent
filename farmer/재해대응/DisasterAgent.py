@@ -830,6 +830,46 @@ def build_graph():
         print(f"그래프 시각화 중 오류: {e}")
     return app
 
+# =========[ OchestratorTest.py 호환 함수 ]=========
+def run(state: dict) -> dict:
+    """
+    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - pred_answer: 최종 답변
+            - source: "disaster_agent"
+    """
+    try:
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 재해 관련 질문을 해주세요."}
+        
+        print(f"[재해_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 빌드 및 실행
+        app = build_graph()
+        
+        # 그래프 실행
+        result = app.invoke({"question": query})
+        
+        # 답변 추출
+        answer = result.get("answer", "답변을 생성할 수 없습니다.")
+        
+        print(f"[재해_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
+    except Exception as e:
+        error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[재해_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
+
 # =========[ 실행부 ]=========
 if __name__ == "__main__":
     parser = ArgumentParser(description="OpenAI 기반 RAG 테스트")

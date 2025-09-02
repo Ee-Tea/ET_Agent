@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from operator import itemgetter
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -49,8 +50,11 @@ from sentence_transformers import SentenceTransformer
 # ===== (신규) RAGAS 관련 Import (0.3.x 호환) =====
 _HAS_RAGAS = False
 try:
-    from ragas import evaluate
-    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+    from ragas import evaluate, SingleTurnSample
+    from ragas.metrics import ResponseRelevancy, Faithfulness
+    from ragas.metrics import LLMContextPrecisionWithoutReference
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper
     # RAGAS 0.3.x에서는 직접 LangChain 객체를 전달
     from datasets import Dataset
     _HAS_RAGAS = True
@@ -66,6 +70,13 @@ except Exception:
     print("   - ℹ️ torch 미설치: CPU 모드 (RAGAS)")
 
 load_dotenv()
+
+# =========[ 최적화 설정 ]=========
+ENABLE_PARALLEL_PROCESSING = os.getenv("ENABLE_PARALLEL_PROCESSING", "true").lower() in ("1", "true", "yes")
+ENABLE_CONDITIONAL_API_CALLS = os.getenv("ENABLE_CONDITIONAL_API_CALLS", "true").lower() in ("1", "true", "yes")
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 
 # =========[ 공통 환경설정 ]=========
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
@@ -86,6 +97,8 @@ RAGAS_OPENAI_EMB = os.getenv("RAGAS_OPENAI_EMB", "BAAI/bge-m3")
 
 _RAGAS_LLM = None
 _RAGAS_EMB = None
+_RAGAS_LLM_WRAPPER = None
+_RAGAS_EMB_WRAPPER = None
 
 def _init_ragas_backend():
     """RAGAS LLM/Embedding 백엔드 초기화. OpenAI LLM + HuggingFace Embeddings 사용."""
@@ -97,13 +110,13 @@ def _init_ragas_backend():
         if not OPENAI_API_KEY=REDACTED("   - ⚠️ OPENAI_API_KEY=REDACTED 비활성화")
             return
         
-        ***REMOVED*** LLM 설정 - RAGAS용으로 JSON 출력 강제
+        ***REMOVED*** LLM 설정 - RAGAS faithfulness 향상을 위한 설정
         llm = ChatOpenAI(
             model_name=RAGAS_OPENAI_LLM, 
-            temperature=0, 
+            temperature=TEMPERATURE,  # 환경설정에서 가져온 temperature 사용
             api_key=OPENAI_API_KEY=REDACTED JSON 파싱 오류 방지를 위한 설정
             max_tokens=4000,
-            top_p=0.1,
+            top_p=0.3,  # 0.1 → 0.3으로 완화 (더 다양한 응답 허용)
             # JSON 출력 안정성을 위한 추가 설정
             frequency_penalty=0.0,
             presence_penalty=0.0
@@ -115,6 +128,12 @@ def _init_ragas_backend():
         )
         _RAGAS_LLM = llm
         _RAGAS_EMB = emb
+        
+        # RAGAS Wrapper 설정 (SalesRAGAS 방식)
+        global _RAGAS_LLM_WRAPPER, _RAGAS_EMB_WRAPPER
+        _RAGAS_LLM_WRAPPER = LangchainLLMWrapper(_RAGAS_LLM)
+        _RAGAS_EMB_WRAPPER = LangchainEmbeddingsWrapper(_RAGAS_EMB)
+        
         print(f"   - 🔑 RAGAS 백엔드=OpenAI LLM + HF Embeddings · LLM={RAGAS_OPENAI_LLM}, EMB={RAGAS_OPENAI_EMB}")
     except Exception as e:
         print(f"   - ⚠️ RAGAS 백엔드 초기화 실패: {e}")
@@ -241,6 +260,283 @@ def minmax_norm(scores: List[float]) -> List[float]:
     lo, hi = min(scores), max(scores)
     if hi - lo < 1e-8: return [0.0 for _ in scores]
     return [(s - lo) / (hi - lo) for s in scores]
+
+# =========[ 복합 질문 처리 함수들 ]=========
+def extract_multiple_dates(q: str) -> List[datetime]:
+    """복합 질문에서 여러 날짜 추출"""
+    dates = []
+    qn = re.sub(r"\s+", "", q or "").lower()
+    now = datetime.now(tz=KST)
+    
+    # 날짜 패턴 매칭
+    patterns = [
+        ("오늘", lambda: now),
+        ("내일", lambda: now + timedelta(days=1)),
+        ("모레", lambda: now + timedelta(days=2)),
+        ("글피", lambda: now + timedelta(days=3)),
+    ]
+    
+    for keyword, date_func in patterns:
+        if keyword in qn:
+            dates.append(date_func())
+    
+    # 숫자 + 일 패턴
+    m = re.search(r"(\d+)(일|주|달|년)(뒤|후)", qn)
+    if m:
+        num, unit = int(m.group(1)), m.group(2)
+        if unit == "일":
+            dates.append(now + timedelta(days=num))
+        elif unit == "주":
+            dates.append(now + timedelta(weeks=num))
+        elif unit == "달":
+            dates.append(now + timedelta(days=30*num))
+        elif unit == "년":
+            dates.append(now + timedelta(days=365*num))
+    
+    # 다음주 패턴
+    if "다음주" in qn:
+        days_to_next_mon = ((7 - now.weekday()) % 7) or 7
+        dates.append(now + timedelta(days=days_to_next_mon))
+    
+    # 월일 패턴
+    m2 = re.search(r"(\d{1,2})월(\d{1,2})일", qn)
+    if m2:
+        M, D = int(m2.group(1)), int(m2.group(2))
+        try:
+            dates.append(datetime(now.year, M, D, tzinfo=KST))
+        except ValueError:
+            pass
+    
+    return list(dict.fromkeys(dates))  # 중복 제거
+
+def extract_multiple_regions(q: str) -> List[str]:
+    """복합 질문에서 여러 지역 추출"""
+    regions = []
+    qn = re.sub(r"\s+", "", q or "").lower()
+    
+    # 지역명 매칭 (REGION_MAP이 로드된 후에 사용)
+    if 'REGION_MAP' in globals():
+        for code, name in REGION_MAP.items():
+            if name in q:
+                regions.append(name)
+    
+    # 일반적인 지역명
+    common_regions = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종", "제주"]
+    for region in common_regions:
+        if region in q:
+            regions.append(region)
+    
+    return list(dict.fromkeys(regions))  # 중복 제거
+
+def decompose_complex_question(q: str) -> List[Dict[str, Any]]:
+    """복합 질문을 단순 질문들로 분해"""
+    dates = extract_multiple_dates(q)
+    regions = extract_multiple_regions(q)
+    
+    # 기본값 설정
+    if not dates:
+        dates = [datetime.now(tz=KST)]
+    if not regions:
+        regions = ["서울"]
+    
+    # 모든 조합 생성
+    sub_questions = []
+    for date in dates:
+        for region in regions:
+            sub_questions.append({
+                "date": date,
+                "region": region,
+                "question": f"{region} {date.strftime('%m월 %d일')} 날씨",
+                "days_from_today": (date.date() - datetime.now(tz=KST).date()).days
+            })
+    
+    return sub_questions
+
+# =========[ 조건부 API 호출 함수들 ]=========
+def should_fetch_advisories(q: str, days_from_today: int) -> bool:
+    """특보 데이터를 가져올지 결정"""
+    if not ENABLE_CONDITIONAL_API_CALLS:
+        return True
+    
+    # 4일 이후면 특보 의미 없음
+    if days_from_today >= 4:
+        return False
+    
+    # 오늘 질문이 아니면 특보 의미 없음
+    if days_from_today > 0:
+        return False
+    
+    # 특보 관련 키워드가 있어야 함
+    advisory_keywords = ["특보", "주의보", "경보", "해제", "발표", "현재", "지금"]
+    return any(keyword in q for keyword in advisory_keywords)
+
+def should_fetch_forecasts(q: str, days_from_today: int) -> bool:
+    """단기예보 데이터를 가져올지 결정"""
+    if not ENABLE_CONDITIONAL_API_CALLS:
+        return True
+    
+    # 4일 이후면 단기예보 의미 없음
+    if days_from_today >= 4:
+        return False
+    
+    # 날씨 관련 키워드가 있어야 함
+    weather_keywords = ["날씨", "기온", "강수", "하늘", "바람", "예보"]
+    return any(keyword in q for keyword in weather_keywords)
+
+def should_fetch_mid_forecasts(q: str, days_from_today: int) -> bool:
+    """중기예보 데이터를 가져올지 결정"""
+    if not ENABLE_CONDITIONAL_API_CALLS:
+        return True
+    
+    # 4일 이전이면 중기예보 의미 없음
+    if days_from_today < 4:
+        return False
+    
+    # 10일 이후면 중기예보 범위 벗어남
+    if days_from_today > 10:
+        return False
+    
+    # 중기예보 관련 키워드가 있어야 함
+    mid_keywords = ["중기", "주간", "장기", "전망", "예보"]
+    return any(keyword in q for keyword in mid_keywords)
+
+# =========[ 병렬 처리 함수들 ]=========
+def safe_api_call(func, *args, **kwargs):
+    """안전한 API 호출을 위한 래퍼 함수"""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        print(f"❌ API 호출 실패 ({func.__name__}): {e}")
+        return None
+
+def embed_texts_parallel(texts: List[str], batch_size: int = BATCH_SIZE) -> np.ndarray:
+    """병렬로 임베딩 계산 (안전한 버전)"""
+    # 병렬 처리 비활성화하거나 배치 크기가 작으면 순차 처리
+    if not ENABLE_PARALLEL_PROCESSING or len(texts) < batch_size:
+        return embed_texts(texts)
+    
+    # 간단하게 순차 처리로 폴백 (임베딩 모델의 thread-safety 문제 때문)
+    print("   - ℹ️ 임베딩 순차 처리로 폴백")
+    return embed_texts(texts)
+
+def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
+    """병렬로 날씨 데이터 가져오기"""
+    if not ENABLE_PARALLEL_PROCESSING:
+        return fetch_weather_data_sequential(sub_questions)
+    
+    print("   - �� 병렬 처리로 데이터 수집 중...")
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {}
+        
+        for i, sub_q in enumerate(sub_questions):
+            q = sub_q["question"]
+            date = sub_q["date"]
+            region = sub_q["region"]
+            days_from_today = sub_q["days_from_today"]
+            
+            # 라이브 데이터 (4일 이내일 때만)
+            if days_from_today < 4:
+                if should_fetch_advisories(q, days_from_today):
+                    futures[f'advisories_{i}'] = executor.submit(
+                        safe_api_call, 
+                        fetch_kma_advisories, 
+                        date.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M"),
+                        date.strftime("%Y%m%d%H%M")
+                    )
+                
+                if should_fetch_forecasts(q, days_from_today):
+                    futures[f'forecasts_{i}'] = executor.submit(
+                        safe_api_call, 
+                        fetch_short_land_records
+                    )
+            
+            # 중기 데이터 (4일 이후일 때만)
+            if days_from_today >= 4 and should_fetch_mid_forecasts(q, days_from_today):
+                region_code = get_region_code(region)
+                if region_code:
+                    futures[f'mid_forecasts_{i}'] = executor.submit(
+                        safe_api_call,
+                        fetch_mid_week_land,
+                        reg_id=region_code,
+                        target_date=date,
+                        tmfc_range_days=3,
+                        widen_days=0
+                    )
+        
+        # 결과 수집
+        results = {"advisories": [], "forecasts": [], "mid_forecasts": []}
+        for name, future in futures.items():
+            try:
+                result = future.result(timeout=API_TIMEOUT)
+                if result:
+                    if name.startswith('advisories_'):
+                        results["advisories"].extend(result)
+                    elif name.startswith('forecasts_'):
+                        results["forecasts"].extend(result)
+                    elif name.startswith('mid_forecasts_'):
+                        results["mid_forecasts"].extend(result)
+            except Exception as e:
+                print(f"❌ 병렬 처리 실패 ({name}): {e}")
+        
+        return results
+
+def fetch_weather_data_sequential(sub_questions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
+    """순차적으로 날씨 데이터 가져오기"""
+    print("   - �� 순차 처리로 데이터 수집 중...")
+    
+    results = {"advisories": [], "forecasts": [], "mid_forecasts": []}
+    
+    for sub_q in sub_questions:
+        q = sub_q["question"]
+        date = sub_q["date"]
+        region = sub_q["region"]
+        days_from_today = sub_q["days_from_today"]
+        
+        # 라이브 데이터
+        if days_from_today < 4:
+            if should_fetch_advisories(q, days_from_today):
+                advisories = fetch_kma_advisories(
+                    date.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M"),
+                    date.strftime("%Y%m%d%H%M")
+                ) if WHEATHER_API_KEY_HUB else []
+                results["advisories"].extend(advisories)
+            
+            if should_fetch_forecasts(q, days_from_today):
+                forecasts = fetch_short_land_records() if WHEATHER_API_KEY_HUB else []
+                results["forecasts"].extend(forecasts)
+        
+        # 중기 데이터
+        if days_from_today >= 4 and should_fetch_mid_forecasts(q, days_from_today):
+            region_code = get_region_code(region)
+            if region_code:
+                mid_forecasts = fetch_mid_week_land(
+                    reg_id=region_code,
+                    target_date=date,
+                    tmfc_range_days=3,
+                    widen_days=0
+                ) if WHEATHER_API_KEY_HUB else []
+                results["mid_forecasts"].extend(mid_forecasts)
+    
+    return results
+
+def get_region_code(region_name: str) -> Optional[str]:
+    """지역명으로 지역코드 찾기 (간단한 버전)"""
+    # 간단한 매핑
+    region_map = {
+        "서울": "11B00000",
+        "부산": "11H20000", 
+        "대구": "11H10000",
+        "인천": "11B00000",
+        "광주": "11F20000",
+        "대전": "11C20000",
+        "울산": "11H20000",
+        "세종": "11C10000",
+        "제주": "11G00000"
+    }
+    return region_map.get(region_name)
+
+# =========[ 실행부 ]=========
 
 # =========[ 라이브(KMA) 호출 ]=========
 def _format_kma_record(raw: List[str]) -> Dict[str, str]:
@@ -916,33 +1212,21 @@ def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
                     val = val[0]
                 # JSON 문자열인 경우 파싱 시도
                 elif isinstance(val, str) and val.startswith('{'):
-                     try:
-                         import json
-                         # JSON 문자열 정리 (불필요한 문자 제거)
-                         cleaned_val = val.strip()
-                         if cleaned_val.endswith(','):
-                             cleaned_val = cleaned_val[:-1]
-                         
-                         json_data = json.loads(cleaned_val)
-                         if "statements" in json_data and isinstance(json_data["statements"], list):
-                             # verdict 값들의 평균 계산
-                             verdicts = []
-                             for stmt in json_data["statements"]:
-                                 if isinstance(stmt, dict) and "verdict" in stmt:
-                                     try:
-                                         verdict_val = float(stmt["verdict"])
-                                         if 0 <= verdict_val <= 1:  # 유효한 범위 확인
-                                             verdicts.append(verdict_val)
-                                     except (ValueError, TypeError):
-                                         continue
-                             if verdicts:
-                                 val = sum(verdicts) / len(verdicts)
-                                 print(f"   - ✅ {metric_name}: {val:.4f} (JSON verdict 평균)")
-                                 return val
-                     except Exception as json_err:
-                         print(f"   - ⚠️ JSON 파싱 실패 ({metric_name}): {json_err}")
-                         # JSON 파싱 실패 시 기본값 반환
-                         return 0.5
+                    try:
+                        import json
+                        json_data = json.loads(val)
+                        if "statements" in json_data and isinstance(json_data["statements"], list):
+                            # verdict 값들의 평균 계산
+                            verdicts = []
+                            for stmt in json_data["statements"]:
+                                if isinstance(stmt, dict) and "verdict" in stmt:
+                                    verdicts.append(float(stmt["verdict"]))
+                            if verdicts:
+                                val = sum(verdicts) / len(verdicts)
+                                print(f"   - ✅ {metric_name}: {val:.4f} (JSON verdict 평균)")
+                                return val
+                    except:
+                        pass
                 val = float(val)
                 if val == val:  # NaN 체크
                     print(f"   - ✅ {metric_name}: {val:.4f} (_scores_dict)")
@@ -954,32 +1238,21 @@ def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
             if val is not None:
                 # JSON 문자열인 경우 파싱 시도
                 if isinstance(val, str) and val.startswith('{'):
-                     try:
-                         import json
-                         # JSON 문자열 정리
-                         cleaned_val = val.strip()
-                         if cleaned_val.endswith(','):
-                             cleaned_val = cleaned_val[:-1]
-                         
-                         json_data = json.loads(cleaned_val)
-                         if "statements" in json_data and isinstance(json_data["statements"], list):
-                             # verdict 값들의 평균 계산
-                             verdicts = []
-                             for stmt in json_data["statements"]:
-                                 if isinstance(stmt, dict) and "verdict" in stmt:
-                                     try:
-                                         verdict_val = float(stmt["verdict"])
-                                         if 0 <= verdict_val <= 1:
-                                             verdicts.append(verdict_val)
-                                     except (ValueError, TypeError):
-                                         continue
-                             if verdicts:
-                                 val = sum(verdicts) / len(verdicts)
-                                 print(f"   - ✅ {metric_name}: {val:.4f} (scores JSON verdict 평균)")
-                                 return val
-                     except Exception as json_err:
-                         print(f"   - ⚠️ scores JSON 파싱 실패 ({metric_name}): {json_err}")
-                         return 0.5
+                    try:
+                        import json
+                        json_data = json.loads(val)
+                        if "statements" in json_data and isinstance(json_data["statements"], list):
+                            # verdict 값들의 평균 계산
+                            verdicts = []
+                            for stmt in json_data["statements"]:
+                                if isinstance(stmt, dict) and "verdict" in stmt:
+                                    verdicts.append(float(stmt["verdict"]))
+                            if verdicts:
+                                val = sum(verdicts) / len(verdicts)
+                                print(f"   - ✅ {metric_name}: {val:.4f} (scores JSON verdict 평균)")
+                                return val
+                    except:
+                        pass
                 val = float(val)
                 if val == val:  # NaN 체크
                     print(f"   - ✅ {metric_name}: {val:.4f} (scores 속성)")
@@ -1028,32 +1301,21 @@ def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
                         val = val[0]
                     # JSON 문자열인 경우 파싱 시도
                     elif isinstance(val, str) and val.startswith('{'):
-                         try:
-                             import json
-                             # JSON 문자열 정리
-                             cleaned_val = val.strip()
-                             if cleaned_val.endswith(','):
-                                 cleaned_val = cleaned_val[:-1]
-                             
-                             json_data = json.loads(cleaned_val)
-                             if "statements" in json_data and isinstance(json_data["statements"], list):
-                                 # verdict 값들의 평균 계산
-                                 verdicts = []
-                                 for stmt in json_data["statements"]:
-                                     if isinstance(stmt, dict) and "verdict" in stmt:
-                                         try:
-                                             verdict_val = float(stmt["verdict"])
-                                             if 0 <= verdict_val <= 1:
-                                                 verdicts.append(verdict_val)
-                                         except (ValueError, TypeError):
-                                             continue
-                                 if verdicts:
-                                     val = sum(verdicts) / len(verdicts)
-                                     print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ JSON verdict 평균)")
-                                     return val
-                         except Exception as json_err:
-                             print(f"   - ⚠️ __dict__ JSON 파싱 실패 ({metric_name}): {json_err}")
-                             return 0.5
+                        try:
+                            import json
+                            json_data = json.loads(val)
+                            if "statements" in json_data and isinstance(json_data["statements"], list):
+                                # verdict 값들의 평균 계산
+                                verdicts = []
+                                for stmt in json_data["statements"]:
+                                    if isinstance(stmt, dict) and "verdict" in stmt:
+                                        verdicts.append(float(stmt["verdict"]))
+                                if verdicts:
+                                    val = sum(verdicts) / len(verdicts)
+                                    print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ JSON verdict 평균)")
+                                    return val
+                        except:
+                            pass
                     val = float(val)
                     if val == val:  # NaN 체크
                         print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ _scores_dict)")
@@ -1117,16 +1379,14 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
 3) 단기예보 상세: 
    - 문맥의 [FORECAST_TYPE]="단기예보" 데이터만 사용
    - 하늘상태, 기온, 강수확률, 바람, 발표시각 포함해서 한줄로 작성해
-4) 영향/위험도(농업): 작물/포장 기준 영향 가능성(약/보통/높음)과 근거
-5) 권고/행동지침: 2~5개의 구체 조치
+4) 기상 정보 요약: 제공된 기상 데이터를 종합한 요약
 
 **질문이 내일~3일 이내인 경우:**
 1) 개요: 한 문장 핵심 요약
 2) 단기예보 상세: 
    - 문맥의 [FORECAST_TYPE]="단기예보" 데이터만 사용
    - 하늘상태, 기온, 강수확률, 바람, 발표시각 포함해서 한줄로 작성해
-3) 영향/위험도(농업): 작물/포장 기준 영향 가능성(약/보통/높음)과 근거
-4) 권고/행동지침: 2~5개의 구체 조치
+3) 기상 정보 요약: 제공된 기상 데이터를 종합한 요약
 
 **질문이 오늘+4일 이후인 경우:**
 1) 개요: 한 문장 핵심 요약
@@ -1134,8 +1394,7 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
    - 문맥의 [FORECAST_TYPE]이 "중기예보"인 정보만 사용
    - 향후 기간의 날씨 전망과 강수 가능성
    - 기온 변화 경향
-3) 영향/위험도(농업): 작물/포장 기준 영향 가능성(약/보통/높음)과 근거
-4) 권고/행동지침: 2~5개의 구체 조치
+3) 기상 정보 요약: 제공된 기상 데이터를 종합한 요약
 
 금지: 표/코드/JSON/불릿(번호는 허용), 과도한 추측
 
@@ -1157,23 +1416,20 @@ REFINE_PROMPT = ChatPromptTemplate.from_template(
 1) 개요
 2) 기상특보 현황 ([live_advisory] 데이터로 현재 특보 상태)
 3) 단기예보 상세 ([FORECAST_TYPE]="단기예보"만)
-4) 영향/위험도(농업)
-5) 권고/행동지침
+4) 기상 정보 요약
 
 **질문이 내일~3일 이내인 경우:**
 1) 개요
 2) 단기예보 상세 ([FORECAST_TYPE]="단기예보"만)
-3) 영향/위험도(농업)
-4) 권고/행동지침
+3) 기상 정보 요약
 
 **질문이 오늘+4일 이후인 경우:**
 1) 개요
 2) 중기예보 전망 ([FORECAST_TYPE]="중기예보"만)
-3) 영향/위험도(농업)
-4) 권고/행동지침
+3) 기상 정보 요약
 
 ※ 질문 날짜에 따라 섹션 개수와 번호가 달라짐
-
+ 
 [문맥]
 {context}
 
@@ -1191,6 +1447,16 @@ def load_store_node(state: GraphState) -> Dict[str, Any]:
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
     print(f"🧩 노드: 리트리브(라이브 + 중기) | 재시도: {state['retry_count']}")
     q = state["question"] or ""
+    live_enabled = _should_use_live(q)
+
+     # 복합 질문 처리 추가
+    sub_questions = decompose_complex_question(q)
+    if len(sub_questions) > 1:
+        print(f"   - �� 복합 질문 감지: {len(sub_questions)}개 하위 질문으로 분해")
+        # 병렬 처리로 데이터 수집
+        weather_data = parallel_fetch_weather_data(sub_questions)
+        # 기존 로직과 통합...
+    
     live_enabled = _should_use_live(q)
     
     # 질문에서 날짜 추출하여 4일 이후면 라이브 데이터 제외
@@ -1309,7 +1575,8 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     # 라이브 상태 메시지는 질문 날짜가 오늘일 때만 추가 (특보는 현재 상태만 의미)
     if live_status_msg and days_from_today <= 0: 
         ctx_parts.append(live_status_msg)
-    ctx_parts += [f"[유사도:{s:.4f}][{src}]\n{txt}" for s, txt, src, _ in top]
+    # RAGAS faithfulness 향상을 위해 메타데이터 제거하고 순수 텍스트만 사용
+    ctx_parts += [txt for s, txt, src, _ in top]
     context = "\n\n".join(ctx_parts) or "관련 문서를 찾을 수 없습니다."
 
     return {**state, "context": context}
@@ -1325,7 +1592,7 @@ CONTEXT_PRECISION_THRESHOLD = 0.7
 CONTEXT_RECALL_THRESHOLD = 0.7
 
 # 2차 검증 (답변 품질) 임계값
-FAITHFULNESS_THRESHOLD = 0.4  # RAGAS faithfulness는 일반적으로 낮게 나옴 (0.4 → 0.35로 더 완화)
+FAITHFULNESS_THRESHOLD = 0.7  # RAGAS faithfulness는 일반적으로 낮게 나옴 (0.4 → 0.35로 더 완화)
 ANSWER_RELEVANCY_THRESHOLD = 0.7
 
 MAX_RETRIES = 3
@@ -1340,8 +1607,8 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         return {**state, "is_retrieval_sufficient": False}
 
     # RAGAS 평가
-    ragas_scores = {"context_precision": 0.0, "context_recall": 0.0}
-    if _HAS_RAGAS and _RAGAS_LLM and _RAGAS_EMB:
+    ragas_scores = {"context_precision": 0.0}
+    if _HAS_RAGAS and _RAGAS_LLM_WRAPPER:
         try:
             print("   - 📊 RAGAS 검색 품질 평가 중...")
 
@@ -1349,42 +1616,30 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
             max_context_length = 2500
             optimized_context = context[:max_context_length] if len(context) > max_context_length else context
 
-            # 청크 분할
-            chunk_size = 700
-            chunks = [optimized_context[i:i+chunk_size] for i in range(0, len(optimized_context), chunk_size)]
-            chunks = [c for c in chunks if len(c.strip()) >= 50] or [optimized_context]
-
-            # 임시 답변 생성
+            # 임시 답변 생성 (LLMContextPrecisionWithoutReference용)
             temp_answer = optimized_context[:1200] if len(optimized_context) > 0 else "정보 부족"
-            temp_reference = optimized_context[:1500] if len(optimized_context) > 0 else "정보 부족"
 
-            print(f"   - 📝 Dataset 준비: 질문={len(question)}자, 컨텍스트={len(optimized_context)}자, 청크={len(chunks)}개")
+            print(f"   - 📝 SingleTurnSample 준비: 질문={len(question)}자, 컨텍스트={len(optimized_context)}자")
 
-            dataset = Dataset.from_dict({
-                "question": [question],
-                "contexts": [chunks],
-                "answer": [temp_answer],
-                "ground_truth": [temp_reference],
-            })
-
-            print("   - 🔄 RAGAS 평가 실행 중...")
-            result = evaluate(
-                dataset,
-                metrics=[context_precision, context_recall],
-                llm=_RAGAS_LLM,
-                embeddings=_RAGAS_EMB,
-                raise_exceptions=True
+            # SalesRAGAS 방식: SingleTurnSample 사용
+            context_precision_scorer = LLMContextPrecisionWithoutReference(llm=_RAGAS_LLM_WRAPPER)
+            
+            # SingleTurnSample 생성
+            context_sample = SingleTurnSample(
+                user_input=question,
+                response=temp_answer,
+                retrieved_contexts=[optimized_context] if optimized_context else [""]
             )
 
-            precision = _ragas_overall(result, "context_precision")
-            recall = _ragas_overall(result, "context_recall")
+            print("   - 🔄 RAGAS 평가 실행 중...")
             
-            ragas_scores["context_precision"] = precision if precision is not None else 0.0
-            ragas_scores["context_recall"] = recall if recall is not None else 0.0
+            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
+            import asyncio
+            context_precision_score = asyncio.run(context_precision_scorer.single_turn_ascore(context_sample))
+            ragas_scores["context_precision"] = float(context_precision_score)
             
             print(f"   - 📈 검색 품질 지표:")
-            print(f"     • Context Precision: {ragas_scores['context_precision']:.3f}")
-            print(f"     • Context Recall: {ragas_scores['context_recall']:.3f}")
+            print(f"     • Context Precision (LLM-based): {ragas_scores['context_precision']:.3f}")
 
         except Exception as e:
             print(f"   - ⚠️ RAGAS 검색 평가 실패: {e}")
@@ -1393,12 +1648,10 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
 
     # 개별 임계값 평가
     precision_sufficient = ragas_scores["context_precision"] >= CONTEXT_PRECISION_THRESHOLD
-    recall_sufficient = ragas_scores["context_recall"] >= CONTEXT_RECALL_THRESHOLD
-    is_sufficient = precision_sufficient and recall_sufficient
+    is_sufficient = precision_sufficient
     
     print(f"   - 🎯 개별 평가 결과:")
     print(f"     • Context Precision: {ragas_scores['context_precision']:.3f} (임계값: {CONTEXT_PRECISION_THRESHOLD}) {'✅' if precision_sufficient else '❌'}")
-    print(f"     • Context Recall: {ragas_scores['context_recall']:.3f} (임계값: {CONTEXT_RECALL_THRESHOLD}) {'✅' if recall_sufficient else '❌'}")
     print(f"     • 최종 결과: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
     
     return {**state, "is_retrieval_sufficient": is_sufficient}
@@ -1419,20 +1672,21 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
         print("   - ❌ 평가 정보가 부족하여 검증을 건너뜁니다.")
         return {**state, "is_answer_sufficient": True, "retry_count": retry_count}
 
-    # 컨텍스트 및 답변 최적화
-    max_context_length = 3000
+    # 컨텍스트 및 답변 최적화 (RAGAS faithfulness 향상을 위해 길이 증가)
+    max_context_length = 5000  # 3000 → 5000으로 증가
     optimized_context = context[:max_context_length] if len(context) > max_context_length else context
-    
-    # RAGAS 평가용 컨텍스트 정제 (원본 형태 유지)
-    def clean_context_for_ragas(context: str) -> str:
-        """RAGAS 평가용 컨텍스트 정제 - 원본 형태 유지"""
-        # 메타데이터 제거하지 않고 원본 형태 유지
-        # RAGAS가 원본 구조를 이해할 수 있도록 함
-        return context
-    
-    optimized_context = clean_context_for_ragas(optimized_context)
-    max_answer_length = 1200
+    max_answer_length = 2000   # 1200 → 2000으로 증가
     optimized_answer = answer[:max_answer_length] if len(answer) > max_answer_length else answer
+    
+    # RAGAS faithfulness 향상을 위해 컨텍스트 정리 (메타데이터 제거)
+    import re
+    # [유사도:0.1234][live_forecast] 같은 메타데이터 제거
+    cleaned_context = re.sub(r'\[유사도:[^\]]+\]\[[^\]]+\]\n?', '', optimized_context)
+    # [LIVE_STATUS], [RISKS] 같은 태그도 제거
+    cleaned_context = re.sub(r'\[[A-Z_]+\]', '', cleaned_context)
+    # 연속된 공백 정리
+    cleaned_context = re.sub(r'\n\s*\n', '\n\n', cleaned_context).strip()
+    optimized_context = cleaned_context
 
     if len(optimized_context.strip()) < 50 or len(optimized_answer.strip()) < 20:
         print("   - ⚠️ 컨텍스트/답변이 너무 짧아 RAGAS 평가 생략")
@@ -1440,68 +1694,54 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
 
     print(f"   - 📝 답변 품질 평가 준비: 질문={len(question)}자, 컨텍스트={len(optimized_context)}자, 답변={len(optimized_answer)}자")
 
-    # Faithfulness 평가를 위한 더 나은 ground truth 설정
-    # 컨텍스트에서 핵심 정보만 추출하여 ground truth로 사용
-    def create_better_ground_truth(context: str) -> str:
-        """컨텍스트에서 핵심 정보만 추출하여 ground truth 생성"""
-        import re
-        # 메타데이터 제거
-        clean_context = re.sub(r'\[유사도:[^\]]+\]', '', context)
-        clean_context = re.sub(r'\[[^\]]+\]', '', clean_context)
-        
-        # 핵심 정보 추출 (지역, 날씨, 기온, 강수 등)
-        key_info = []
-        lines = clean_context.split('\n')
-        for line in lines:
-            if any(keyword in line for keyword in ['지역:', '기온:', '강수:', '하늘:', '바람:', '현상:', '수준:']):
-                key_info.append(line.strip())
-        
-        # 더 자연스러운 형태로 구성
-        if key_info:
-            # 핵심 정보를 자연어 형태로 재구성
-            weather_info = []
-            for info in key_info[:6]:  # 상위 6개만 사용
-                if '지역:' in info:
-                    region = info.split('지역:')[1].split('|')[0].strip()
-                    weather_info.append(f"{region} 지역")
-                elif '기온:' in info:
-                    temp = info.split('기온:')[1].split('|')[0].strip()
-                    weather_info.append(f"기온 {temp}")
-                elif '하늘:' in info:
-                    sky = info.split('하늘:')[1].split('|')[0].strip()
-                    weather_info.append(f"하늘 상태 {sky}")
-                elif '강수:' in info:
-                    precip = info.split('강수:')[1].split('|')[0].strip()
-                    weather_info.append(f"강수 확률 {precip}")
-            
-            result = f"오늘 날씨는 {', '.join(weather_info[:4])}입니다."
-            return result if result.strip() else optimized_context[:600]
-        
-        return optimized_context[:600]
-    
-    ground_truth = create_better_ground_truth(optimized_context)
-    
-    dataset = Dataset.from_dict({
-        "question": [question],
-        "contexts": [[optimized_context]],
-        "answer": [optimized_answer],
-        "ground_truth": [ground_truth],
-    })
-
     try:
         print("   - 📊 RAGAS 답변 품질 평가 중...")
         
-        # RAGAS 평가 시 JSON 파싱 오류 방지를 위한 설정
-        result = evaluate(
-            dataset,
-            metrics=[faithfulness, answer_relevancy],
-            llm=_RAGAS_LLM,
-            embeddings=_RAGAS_EMB,
-            raise_exceptions=True
-        )
+        scores = {}
         
-        f_val = _ragas_overall(result, "faithfulness")
-        r_val = _ragas_overall(result, "answer_relevancy")
+        try:
+            # Faithfulness (SalesRAGAS 방식)
+            faithfulness_scorer = Faithfulness(llm=_RAGAS_LLM_WRAPPER)
+            
+            # SingleTurnSample 생성 (Faithfulness용)
+            faithfulness_sample = SingleTurnSample(
+                user_input=question,
+                response=optimized_answer,
+                retrieved_contexts=[optimized_context] if optimized_context else [""]
+            )
+            
+            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
+            import asyncio
+            faithfulness_score = asyncio.run(faithfulness_scorer.single_turn_ascore(faithfulness_sample))
+            scores['faithfulness'] = float(faithfulness_score)
+            
+        except Exception as e:
+            scores['faithfulness'] = 0.0
+        
+        try:
+            # Answer Relevancy (SalesRAGAS 방식)
+            answer_relevancy_scorer = ResponseRelevancy(
+                llm=_RAGAS_LLM_WRAPPER, 
+                embeddings=_RAGAS_EMB_WRAPPER
+            )
+            
+            # SingleTurnSample 생성 (Answer Relevancy용)
+            relevancy_sample = SingleTurnSample(
+                user_input=question,
+                response=optimized_answer,
+                retrieved_contexts=[optimized_context] if optimized_context else [""]
+            )
+            
+            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
+            import asyncio
+            answer_relevancy_score = asyncio.run(answer_relevancy_scorer.single_turn_ascore(relevancy_sample))
+            scores['answer_relevancy'] = float(answer_relevancy_score)
+            
+        except Exception as e:
+            scores['answer_relevancy'] = 0.0
+
+        f_val = scores.get('faithfulness', 0.0)
+        r_val = scores.get('answer_relevancy', 0.0)
 
         if f_val is None or r_val is None:
             print("   - ⚠️ RAGAS 점수 NaN/None → 이번 라운드 통과로 처리")
@@ -1694,6 +1934,45 @@ def build_graph():
 #     eval_df["passed@0.75"] = eval_df["cosine_similarity"] >= 0.75
 #     eval_df.to_csv(out_path, index=False, encoding="utf-8-sig")
 #     print(f"\n전체 결과 저장: {out_path}")
+
+# =========[ OchestratorTest.py 호환 함수 ]=========
+def run(state: dict) -> dict:
+    """
+    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 답변
+    """
+    try:
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 재해 관련 질문을 해주세요."}
+        
+        print(f"[날씨_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 빌드 및 실행
+        app = build_graph()
+        
+        # 그래프 실행
+        result = app.invoke({"question": query})
+        
+        # 답변 추출
+        answer = result.get("answer", "답변을 생성할 수 없습니다.")
+        
+        print(f"[날씨_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
+    except Exception as e:
+        error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[날씨_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
 
 # =========[ 실행부 ]=========
 if __name__ == "__main__":

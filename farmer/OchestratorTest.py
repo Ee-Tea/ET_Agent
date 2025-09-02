@@ -193,12 +193,14 @@ class Farmer:
         from 작물추천.crop65pdfllm import run as crop_recommend_run
         from 재배방법.crop_overall import run as crop_cultivation_run
         from 재해대응.DisasterAgent import run as disaster_run
+        from 재해대응.longpluslg_complete_optimized import run as weather_run
         from sales.SalesAgent import run as market_run
         
         self.agent_functions = {
             "작물추천_agent": crop_recommend_run,
             "작물재배_agent": crop_cultivation_run,
             "재해_agent": disaster_run,
+            "날씨_agent": weather_run,
             "판매처_agent": market_run
         }
     
@@ -272,6 +274,10 @@ class Farmer:
             "폭염, 한파, 가뭄, 집중호우, 홍수 등 자연재해 및 이상기후로 인한 피해를 예방하고 대응하는 방법을 안내합니다. 재해 발생 전 대비, 재해 발생 중의 조치, 재해 후 작물 복구 및 피해 최소화 방안을 다룹니다."
             "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
         ),
+        "날씨_agent": (
+            "현재 날씨, 단기예보, 중기예보, 기상특보 등 실시간 기상 정보를 제공합니다. 기상청 API를 통해 정확한 날씨 데이터를 바탕으로 농업에 필요한 기상 정보를 안내합니다."
+            "※ 핵심 키워드: '날씨', '기온', '강수', '예보', '하늘상태', '바람', '습도', '오늘 날씨', '내일 날씨'"
+        ),
         "판매처_agent": (
             "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 실시간 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
@@ -293,7 +299,9 @@ class Farmer:
         
         3) 재해_agent: {self.agent_descriptions["재해_agent"]}
         
-        4) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
+        4) 날씨_agent: {self.agent_descriptions["날씨_agent"]}
+        
+        5) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
         
         질문: "{user_question}"
         
@@ -447,11 +455,6 @@ class Farmer:
 
         except Exception as e:
             return f"에이전트 실행 중 오류: {e}"
-
-
-
-
-
 
     def select_single_crop_from_recommendations(self, crop_recommendations):
         """
@@ -674,6 +677,36 @@ class Farmer:
         print(f"[✅ 판매처_agent 병렬 실행 완료]")
         print(f"[📤 응답 원본] {answer[:200]}...")
         return state
+
+    @traceable(name="node_weather_agent")
+    def node_weather_agent(self, state: RouterState) -> RouterState:
+        """날씨_agent 전용 노드"""
+        if "날씨_agent" not in state.get("selected_agents", []):
+            return state
+        
+        print(f"\n=== 🌤️ 날씨_agent 병렬 실행 ===")
+        
+        # 질문 부분 가져오기
+        question_parts = state.get("question_parts", {})
+        if question_parts and "날씨_agent" in question_parts:
+            question_part = question_parts["날씨_agent"]
+        else:
+            question_part = state["query"][0] if state["query"] else ""
+        
+        print(f"[📝 담당 질문] {question_part}")
+        
+        # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
+        # (날씨는 지역과 시간이 중요하므로)
+        
+        # 에이전트 실행
+        answer = self.execute_agent_with_boundaries("날씨_agent", question_part)
+        
+        # 전용 키에 답변 저장
+        state["agent_results"]["날씨_agent"] = answer
+        
+        print(f"[✅ 날씨_agent 병렬 실행 완료]")
+        print(f"[📤 응답 원본] {answer[:200]}...")
+        return state
         
     # 병렬 처리 노드 (개선된 비동기 처리)
     @traceable(name="node_parallel_agents")
@@ -814,6 +847,7 @@ class Farmer:
         workflow.add_node("parallel_execution", self.node_parallel_agents)
         workflow.add_node("crop_grow_agent", self.node_crop_grow_agent)
         workflow.add_node("disaster_agent", self.node_disaster_agent)
+        workflow.add_node("weather_agent", self.node_weather_agent)
         workflow.add_node("sales_agent", self.node_sales_agent)
 
         workflow.add_node("merge_output", self.node_merge_output)
@@ -836,6 +870,8 @@ class Farmer:
                     return "crop_grow_agent"
                 elif agent == "재해_agent":
                     return "disaster_agent"
+                elif agent == "날씨_agent":
+                    return "weather_agent"
                 elif agent == "판매처_agent":
                     return "sales_agent"
 
@@ -853,6 +889,7 @@ class Farmer:
                 "crop_recommend": "crop_recommend",
                 "crop_grow_agent": "crop_grow_agent",
                 "disaster_agent": "disaster_agent", 
+                "weather_agent": "weather_agent",
                 "sales_agent": "sales_agent",
                 "parallel_execution": "parallel_execution",
 
@@ -872,11 +909,13 @@ class Farmer:
         # 병렬 에이전트 실행
         workflow.add_edge("parallel_execution", "crop_grow_agent")
         workflow.add_edge("parallel_execution", "disaster_agent")
+        workflow.add_edge("parallel_execution", "weather_agent")
         workflow.add_edge("parallel_execution", "sales_agent")
         
         # 모든 에이전트 노드에서 병합 노드로
         workflow.add_edge("crop_grow_agent", "merge_output")
         workflow.add_edge("disaster_agent", "merge_output")
+        workflow.add_edge("weather_agent", "merge_output")
         workflow.add_edge("sales_agent", "merge_output")
 
         
@@ -890,13 +929,6 @@ class Farmer:
 
     def run_orchestrator_langgraph(self):
         graph = self.create_workflow()
-        try:
-            graph_image_path = "ochestrator_workflow.png"
-            with open(graph_image_path, "wb") as f:
-                f.write(graph.get_graph().draw_mermaid_png())
-            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        except Exception as e:
-            print(f"그래프 시각화 중 오류 발생: {e}")
 
         while True:
             try:
@@ -934,6 +966,14 @@ class Farmer:
 def run_orchestrator_langgraph():
     """기존 실행 방식과의 호환성을 위한 함수"""
     farmer = Farmer(user_id="default_user", service="farmer", chat_id="default_chat")
+    # graph = farmer.create_workflow()
+    # try:
+    #     graph_image_path = "ochestrator_workflow.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(graph.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류 발생: {e}")
     farmer.run_standalone()
 
 if __name__ == "__main__":

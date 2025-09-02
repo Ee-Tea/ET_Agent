@@ -105,6 +105,11 @@ class MainOrchestrator:
         """
         self.user_id = user_id
         self.chat_id = chat_id
+        self._last_user_query: str = ""
+        self._resume_to_teacher: bool = False
+        # 체크포인터 식별자 고정 (run/resume 간 일관성)
+        self.thread_id = f"{self.user_id}_{self.chat_id}"
+        self.checkpoint_id = "main_orchestrator"
         
         # 메모리 초기화
         try:
@@ -125,7 +130,8 @@ class MainOrchestrator:
             user_id=user_id,
             service="teacher",
             chat_id=chat_id,
-            init_agents=True
+            init_agents=True,
+            checkpointer=self.memory,
         )
 
         # LLM for classification
@@ -140,8 +146,15 @@ class MainOrchestrator:
         """
         숏텀 메모리에서 데이터를 로드하는 노드
         """
-        user_id = state["user_id"]
-        chat_id = state["chat_id"]
+        # 재개 시 최소 상태로 들어오는 경우를 대비하여 기본 필드 보정
+        new_state = {**state}
+        user_id = new_state.get("user_id", self.user_id)
+        chat_id = new_state.get("chat_id", self.chat_id)
+        new_state["user_id"] = user_id
+        new_state["chat_id"] = chat_id
+        if not new_state.get("user_query"):
+            if getattr(self, "_last_user_query", ""):
+                new_state["user_query"] = self._last_user_query
         
         try:
             print(f"📥 메모리 데이터 로드 중... user_id={user_id}, chat_id={chat_id}")
@@ -169,8 +182,12 @@ class MainOrchestrator:
             
             print(f"✅ 메모리 로드 완료: 히스토리={len(chat_history)}개, 세션={bool(session_data)}, 데이터={len(loaded_data)}개")
             
+            # 최신 질의 캐시
+            if new_state.get("user_query"):
+                self._last_user_query = new_state["user_query"]
+
             return {
-                **state,
+                **new_state,
                 "session_data": session_data,
                 "chat_history": chat_history,
                 "loaded_memory_data": loaded_data,
@@ -180,7 +197,7 @@ class MainOrchestrator:
         except Exception as e:
             print(f"❌ 메모리 로드 중 오류: {e}")
             return {
-                **state,
+                **new_state,
                 "session_data": {},
                 "chat_history": [],
                 "loaded_memory_data": {},
@@ -192,16 +209,25 @@ class MainOrchestrator:
         """
         상태를 숏텀 메모리에 저장하는 노드
         """
-        user_id = state["user_id"]
-        chat_id = state["chat_id"]
+        user_id = state.get("user_id", self.user_id)
+        chat_id = state.get("chat_id", self.chat_id)
         
         try:
             print(f"💾 메모리 데이터 저장 중... user_id={user_id}, chat_id={chat_id}")
+            teacher_state = state.get("teacher_state")
+            # teacher_state가 없으면 top-level에서 추출 (서브그래프를 raw로 등록한 경우 대비)
+            if not teacher_state:
+                candidate_keys = ("shared", "artifacts", "final_response", "routing", "score")
+                teacher_state = {k: state.get(k) for k in candidate_keys if k in state}
+
+            if teacher_state:
+                shared = teacher_state.get("shared", {})
+                artifacts = teacher_state.get("artifacts", {})
             
             # 현재 대화를 채팅 히스토리에 추가
             current_interaction = {
                 "timestamp": time.time(),
-                "user_query": state["user_query"],
+                "user_query": state.get("user_query", self._last_user_query),
                 "service_classification": state.get("service_classification", ""),
                 "final_response": state.get("final_response", ""),
                 "is_relevant": state.get("is_relevant", True),
@@ -250,7 +276,7 @@ class MainOrchestrator:
         """
         질문이 농사 자격증과 관련이 있는지 확인하는 노드
         """
-        user_query = state["user_query"]
+        user_query = state.get("user_query") or self._last_user_query
         
         try:
             # LLM을 사용한 관련성 체크
@@ -344,7 +370,7 @@ class MainOrchestrator:
         """
         사용자 입력을 분석하여 서비스를 분류하는 노드
         """
-        user_query = state["user_query"]
+        user_query = state.get("user_query") or self._last_user_query
 
         # 이전 서비스/첫 질문 유도 플래그를 여기서 계산하여 단일 체크로 간소화
         session_data = state.get("session_data", {})
@@ -375,16 +401,16 @@ class MainOrchestrator:
             
             # LLM을 사용한 서비스 분류
             classification_prompt = f"""
-사용자의 질문을 분석하여 어떤 서비스가 필요한지 분류해주세요.
+            사용자의 질문을 분석하여 어떤 서비스가 필요한지 분류해주세요.
 
-질문: {user_query}
+            질문: {user_query}
 
-다음 중 하나로만 답변해주세요:
-- "farmer": 농업, 재배, 작물, 농사, 농업기술, 작물관리 관련 질문
-- "teacher": 자격증, 시험, 학습, 교육, 문제풀이, 시험준비 관련 질문
+            다음 중 하나로만 답변해주세요:
+            - "farmer": 농업, 재배, 작물, 농사, 농업기술, 작물관리 관련 질문
+            - "teacher": 자격증, 시험, 학습, 교육, 문제풀이, 시험준비 관련 질문
 
-답변:
-"""
+            답변:
+            """
             
             response = self.llm.invoke(classification_prompt)
             service_classification = response.content.strip().lower()
@@ -424,23 +450,23 @@ class MainOrchestrator:
         """
         농사 자격증과 무관한 질문에 대한 안내 응답을 생성하는 노드
         """
-        user_query = state["user_query"]
+        user_query = state.get("user_query") or self._last_user_query
         
         try:
             # LLM을 사용한 친절한 안내 응답 생성
             response_prompt = f"""
-사용자가 농사 자격증과 관련 없는 질문을 했습니다. 친절하고 도움이 되는 안내 메시지를 작성해주세요.
+            사용자가 농사 또는 정보처리기사 자격증과 관련 없는 질문을 했습니다. 친절하고 도움이 되는 안내 메시지를 작성해주세요.
 
-사용자 질문: {user_query}
+            사용자 질문: {user_query}
 
-다음 내용을 포함하여 응답해주세요:
-1. 질문에 대한 간단한 답변 (가능한 경우)
-2. 이 시스템은 농사 자격증(농산업기사, 종자산업기사 등) 관련 질문에 특화되어 있다는 안내
-3. 농사 자격증 관련 질문을 입력해달라는 요청
-4. 친근하고 도움이 되는 톤
+            다음 내용을 포함하여 응답해주세요:
+            1. 질문에 대한 간단한 답변 (가능한 경우)
+            2. 이 시스템은 농사 또는 정보처리기사 자격증 관련 질문에 특화되어 있다는 안내
+            3. 농사 또는 정보처리기사사 자격증 관련 질문을 입력해달라는 요청
+            4. 친근하고 도움이 되는 톤
 
-한국어로 200자 이내로 작성해주세요.
-"""
+            한국어로 200자 이내로 작성해주세요.
+            """
             
             # LLM 모델 설정을 더 관대하게 변경
             client_for_response = OpenAI(base_url=llm_base_url, api_key=llm_api_key)
@@ -535,6 +561,10 @@ class MainOrchestrator:
         """
         관련성 체크 후 라우팅 결정
         """
+        # 재개 플래그가 켜져 있으면 teacher로 바로 진입 (중간 분기 우회)
+        if getattr(self, "_resume_to_teacher", False):
+            self._resume_to_teacher = False
+            return "teacher_app"
         is_relevant = state.get("is_relevant", True)
         
         if not is_relevant:
@@ -807,24 +837,21 @@ class MainOrchestrator:
         """
         print("🔄 Teacher 결과 병합 중...")
         
-        teacher_state = state.get("teacher_state", {})
-        
-        # Teacher 결과를 메인 상태에 병합
-        if teacher_state:
-            # Teacher의 최종 응답을 메인 상태에 저장
-            if "final_response" in teacher_state:
-                state["final_response"] = teacher_state["final_response"]
-            
-            # Teacher의 아티팩트들을 메인 상태에 저장
-            if "artifacts" in teacher_state:
-                state["artifacts"] = teacher_state["artifacts"]
-            
-            # Teacher의 라우팅 정보를 메인 상태에 저장
-            if "routing" in teacher_state:
-                state["routing"] = teacher_state["routing"]
-        
+        ts = state.get("teacher_state")
+
+        # teacher_state가 없으면 top-level을 teacher 상태로 간주 (raw 서브그래프 대비)
+        if not ts and any(k in state for k in ("final_response", "artifacts", "routing", "shared", "score")):
+            ts = {k: state.get(k) for k in ("final_response", "artifacts", "routing", "shared", "score") if k in state}
+
+        if not ts:
+            return state
+
+        # 복사 대상 키 확장: shared/score 추가
+        for key in ("final_response", "artifacts", "routing", "shared", "score"):
+            if key in ts:
+                state[key] = ts[key]
         return state
-    
+        
     def process_hitl_response(self, state: MainState, hitl_response: str) -> MainState:
         """
         HITL 응답을 처리하는 노드
@@ -878,9 +905,9 @@ class MainOrchestrator:
         # 세션 데이터 업데이트
         session_data = state.get("session_data", {})
         session_data.update({
-            "last_query": state["user_query"],
-            "last_service": state["service_classification"],
-            "last_response": state["final_response"],
+            "last_query": state.get("user_query", self._last_user_query),
+            "last_service": state.get("service_classification", ""),
+            "last_response": state.get("final_response", ""),
             "timestamp": str(int(time.time()))
         })
         
@@ -934,7 +961,7 @@ class MainOrchestrator:
         # 기존 노드들
         builder.add_node("hitl_confirmation", self.hitl_confirmation)
         # Teacher 서브그래프를 그대로 노드로 등록하여 interrupt가 버블업되도록 구성
-        builder.add_node("teacher_app", self.teacher.graph)
+        builder.add_node("teacher_app", self.teacher.graph | (lambda ts: {"teacher_state": ts}))
         builder.add_node("merge_teacher_result", self.merge_teacher_result)
         builder.add_node("execute_farmer", self.execute_farmer)
         builder.add_node("finalize_response", self.finalize_response)
@@ -952,6 +979,8 @@ class MainOrchestrator:
                 "handle_irrelevant_question": "handle_irrelevant_question",
                 # 간소화: 바로 classify_service로 이동
                 "classify_service": "classify_service",
+                # 재개 시에는 teacher로 바로 진입
+                "teacher_app": "teacher_app",
             }
         )
         
@@ -1029,13 +1058,15 @@ class MainOrchestrator:
             "session_data": {}
         }
         
-        # checkpointer 설정
+        # checkpointer 설정 (LangGraph 규격: configurable로 전달)
         if config is None:
             config = {}
-        config.update({
-            "thread_id": f"{self.user_id}_{self.chat_id}",
-            "checkpoint_id": f"main_orchestrator_{int(time.time())}"
+        cfg = config.get("configurable", {})
+        cfg.update({
+            "thread_id": self.thread_id,
+            "checkpoint_id": self.checkpoint_id,
         })
+        config["configurable"] = cfg
         
         try:
             # 그래프 실행
@@ -1070,16 +1101,44 @@ class MainOrchestrator:
             except Exception:
                 from langgraph import Command  # 최후 시도
         try:
-            thread_id = f"{self.user_id}_{self.chat_id}"
             if config is None:
                 config = {}
-            config.update({
-                "thread_id": thread_id,
-                "checkpoint_id": f"main_orchestrator"
+            cfg = config.get("configurable", {})
+            cfg.update({
+                "thread_id": self.thread_id,
+                "checkpoint_id": self.checkpoint_id,
             })
+            config["configurable"] = cfg
+            # 재개 시에도 user_id/chat_id 기본 보전 + Teacher 재개 힌트 주입
+            # 문자열 'form' 재개인 경우 Teacher에 힌트 저장
+            try:
+                if isinstance(hitl_response, str) and hitl_response.lower() in ("pdf", "form"):
+                    setattr(self.teacher, "_pending_output_mode", hitl_response.lower())
+                    # 다음 턴은 teacher로 바로 진입
+                    self._resume_to_teacher = True
+                if isinstance(hitl_response, dict) and "user_answer" in hitl_response:
+                    setattr(self.teacher, "_pending_form_answers", list(hitl_response["user_answer"]))
+                    # 폼 답안 재개 시 출력 모드는 반드시 form 이어야 함
+                    setattr(self.teacher, "_pending_output_mode", "form")
+                    # 다음 턴은 teacher로 바로 진입
+                    self._resume_to_teacher = True
+                if isinstance(hitl_response, dict) and "user_feedback" in hitl_response:
+                    setattr(self.teacher, "_pending_user_feedback", str(hitl_response["user_feedback"]))
+                    self._resume_to_teacher = True
+            except Exception:
+                pass
             resume_cmd = Command(resume=hitl_response)
+            # 메인 그래프에서 생성된 인터럽트는 메인 체크포인터에 저장됨 → 메인으로 재개해야 정확히 이어집니다.
             result = self.app.invoke(resume_cmd, config=config)
-            return dict(result)
+            res = dict(result)
+            # 보강: teacher_state가 있고 상위 키가 비어있으면 병합 노출
+            if "shared" not in res or "artifacts" not in res:
+                ts = res.get("teacher_state")
+                if isinstance(ts, dict):
+                    for key in ("final_response", "artifacts", "routing", "shared", "score"):
+                        if key in ts and key not in res:
+                            res[key] = ts[key]
+            return res
         except Exception as e:
             print(f"❌ 워크플로우 재개 중 오류: {e}")
             return {"error": str(e), "hitl_response": hitl_response}
@@ -1153,66 +1212,111 @@ def visualize_teacher_graph():
         return None
 
 def main():
+    """인터랙티브 챗봇 실행 함수"""
+    print("🚀 ET-Agent 메인 오케스트레이터 시작 (대화형 모드)")
 
-    """메인 실행 함수"""
-    print("🚀 ET-Agent 메인 오케스트레이터 시작")
-    
-    # 그래프 시각화 생성
-    print("\n📊 그래프 시각화 생성 중...")
-    
-    print("🔧 메인 그래프 시각화 시도...")
-    main_graph_path = visualize_main_graph()
-    print(f"메인 그래프 결과: {main_graph_path}")
-    
-    print("🔧 Teacher 그래프 시각화 시도...")
-    teacher_graph_path = visualize_teacher_graph()
-    print(f"Teacher 그래프 결과: {teacher_graph_path}")
-    
-    if main_graph_path:
-        print(f"✅ 메인 오케스트레이터 그래프: {main_graph_path}")
-    if teacher_graph_path:
-        print(f"✅ Teacher 에이전트 그래프: {teacher_graph_path}")
-    
-    print("📊 그래프 시각화 완료")
-    
-    # 오케스트레이터 생성
-    orchestrator = MainOrchestrator(
-        user_id="demo_user",
-        chat_id="demo_chat"
-    )
-    
-    # 예제 실행
-    test_queries = [
-        # "토마토 재배 방법을 알려줘",
-        # "소프트웨어 설계 문제 3개 만들어줘",
-        """
-        문제 6. 데이터베이스 성능에 많은 영향을 주는 DBMS의 구성 요소로, 독립적인 저장 공간을 보유하며
-        데이터베이스에 저장된 자료를 더욱 빠르게 조회하기 위해 사용되는 것은?
-        1) 인덱스
-        2) 테이블
-        3) 뷰
-        4) 트리거   이거 풀어줘
-        """
-    ]
-    
-    for i, query in enumerate(test_queries, 1):
-        print(f"\n=== 테스트 {i}: {query} ===")
-        
-        # 테스트 실행 전 숏텀 메모리 초기화
-        orchestrator.clear_short_term_memory()
-        
-        result = orchestrator.run(query)
-        
-        if "error" in result:
-            print(f"❌ 오류: {result['error']}")
-        else:
-            service = result.get("service_classification", "N/A")
-            confidence = result.get("classification_confidence", 0.0)
-            response = result.get("final_response", "응답 없음")
-            
-            print(f"분류된 서비스: {service}")
-            print(f"신뢰도: {confidence:.2f}")
-            print(f"응답: {response[:100]}...")
+    # 오케스트레이터 생성 (세션 유지)
+    orchestrator = MainOrchestrator(user_id="cli_user", chat_id="cli_chat")
+
+    print("명령: /exit 종료, /clear 메모리 초기화")
+    while True:
+        try:
+            user_query = input("You> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n👋 종료합니다.")
+            break
+
+        if not user_query:
+            continue
+        if user_query.lower() in ("/exit", ":q", "quit", "exit"):
+            print("👋 종료합니다.")
+            break
+        if user_query.lower() == "/clear":
+            orchestrator.clear_short_term_memory()
+            continue
+
+        # 1) 최초 질의 실행
+        state = orchestrator.run(user_query)
+        if state.get("error"):
+            print(f"Bot> 오류: {state['error']}")
+            continue
+
+        # 2) 결과가 완결되었는지 확인 (final_response 또는 산출물)
+        def print_if_done(s):
+            final_resp = s.get("final_response")
+            arts = s.get("artifacts", {}) or (s.get("teacher_state", {}) or {}).get("artifacts", {})
+            if final_resp:
+                print(f"Bot> {final_resp}")
+                return True
+            # PDF 등 산출물만 생성된 경우 표시
+            if isinstance(arts, dict):
+                gen = arts.get("generated_pdfs") or arts.get("pdfs")
+                if gen:
+                    print("Bot> PDF 생성 완료:")
+                    for p in gen:
+                        print(f"  - {p}")
+                    return True
+            return False
+
+        if print_if_done(state):
+            continue
+
+        # 3) 인터럽트 처리 루프
+        while True:
+            # 우선 출력 모드 확인
+            routing = state.get("routing", {}) or (state.get("teacher_state", {}) or {}).get("routing", {})
+            output_mode = (routing or {}).get("output_mode")
+            if output_mode not in ("pdf", "form"):
+                # 유효한 입력이 들어올 때까지 대기
+                while True:
+                    mode_in = input("Bot> 출력 방식을 선택하세요 (pdf|form): ").strip().lower()
+                    if mode_in in ("pdf", "form"):
+                        state = orchestrator.resume_workflow(mode_in)
+                        break
+                    print("Bot> 잘못된 입력입니다. 'pdf' 또는 'form'을 입력하세요.")
+                if print_if_done(state):
+                    break
+
+            # 폼 답변 필요 여부 확인
+            sh = state.get("shared", {}) or (state.get("teacher_state", {}) or {}).get("shared", {})
+            questions = sh.get("question", []) or []
+            user_answer = sh.get("user_answer")
+            if (routing or {}).get("output_mode") == "form" and (not isinstance(user_answer, list) or not user_answer):
+                qn = len(questions)
+                if qn <= 0:
+                    # 상태에 질문이 아직 반영되지 않았다면 일단 재개하여 질문을 채운다
+                    state = orchestrator.resume_workflow("form")
+                    sh = state.get("shared", {}) or (state.get("teacher_state", {}) or {}).get("shared", {})
+                    questions = sh.get("question", []) or []
+                    qn = len(questions)
+
+                # 정답 입력 유도
+                while True:
+                    ans_in = input(f"Bot> 정답을 쉼표로 입력하세요 (문항 {qn}개, 예: 2,1,3): ").strip()
+                    parts = [p.strip() for p in ans_in.split(",") if p.strip()]
+                    if len(parts) != qn:
+                        print(f"Bot> 문항 수({qn})와 입력 개수({len(parts)})가 다릅니다. 다시 입력하세요.")
+                        continue
+                    if not all(p.isdigit() for p in parts):
+                        print("Bot> 모든 정답은 숫자여야 합니다. 다시 입력하세요.")
+                        continue
+                    state = orchestrator.resume_workflow({"user_answer": parts})
+                    break
+                if print_if_done(state):
+                    break
+
+            # 출력 모드가 pdf인 경우에는 한 번 더 재개하여 생성 진행
+            if (routing or {}).get("output_mode") == "pdf" and not state.get("final_response"):
+                state = orchestrator.resume_workflow("pdf")
+                if print_if_done(state):
+                    break
+
+            # 더 이상 요구 입력이 없으면 루프 종료
+            if print_if_done(state):
+                break
+            # 안전장치: 추가 상태 변화 없으면 탈출
+            print("Bot> 진행할 단계가 더 없습니다. 새 질문을 입력하세요.")
+            break
 
 if __name__ == "__main__":
     main()

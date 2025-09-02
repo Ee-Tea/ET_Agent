@@ -111,7 +111,7 @@ def classify_question_simple(query: str) -> str:
 - "시세"와 "판매처" 키워드가 함께 있으면 → "시세+판매처"
 - "농작물"과 "시세" 키워드가 함께 있을 때는 작물명의 유무에 따라 → "시세" or "정보 부족"
 - "농작물"과 "판매처" 키워드가 함께 있을 때는 지역명의 유무에 따라 → "판매처" or "정보 부족"
-- 구체적인 작물명과 "팔고 싶어", "판매" 등이 있으면 → "시세+판매처"
+- 구체적인 작물명과 "팔고 싶어", "판매" 등 팔고 싶은 의도가 있으면('지역명'에서 '작물명' 팔고 싶어) → "시세+판매처"
 - 가격 관련 키워드만 있으면 → "시세"
 - 판매처 관련 키워드만 있으면 → "판매처"
 - 애매한 경우 → "시세+판매처" (기본값)
@@ -564,7 +564,7 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
     all_valid = all(is_valid for is_valid, _ in validations.values()) if validations else True
     all_issues = [issue for _, issues in validations.values() for issue in issues]
     
-    print(f"✅ 검증 완료: {'통과' if all_valid else '실패'}")
+    print(f"✅ 자가 검증: {'통과' if all_valid else '실패'}")
     
     # 웹 검색 필요성 판단 - 1회 재분석 후에만 고려
     needs_web_search = False
@@ -1053,11 +1053,41 @@ graph.add_edge("output", END)
 graph.set_entry_point("input")
 
 # 실행 함수
-def run(state):
-    print("\n\n===== Sales Agent 실행 시작 =====")
-    app = graph.compile()
-    result_state = app.invoke(state)
-    return result_state
+def run(state: dict) -> dict:
+    """
+    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 답변
+    """
+    try:
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 판매처 관련 질문을 해주세요."}
+        
+        print(f"[판매처_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 컴파일 및 실행
+        app = graph.compile()
+        result_state = app.invoke(state)
+        
+        # 답변 추출
+        answer = result_state.get("final_answer", "답변을 생성할 수 없습니다.")
+        
+        print(f"[판매처_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
+    except Exception as e:
+        error_msg = f"판매처 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[판매처_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
 
 if __name__ == "__main__":
     # 판매처 에이전트 단독 실행용 코드

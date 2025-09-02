@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#uv run main.py
 """
 메인 오케스트레이터
 사용자 입력을 분석하여 farmer 또는 teacher 서비스를 선택하고 실행하는 메인 오케스트레이터
@@ -13,11 +14,13 @@ from typing_extensions import Annotated
 from dotenv import load_dotenv
 from openai import OpenAI
 import graphviz
+import uuid
+from typing import Optional
+from langgraph.checkpoint.memory import MemorySaver as LGMemorySaver
 
 from langgraph.graph import StateGraph, END, START
 # from langgraph.graph.message import Message  # 사용하지 않는 import 제거
 # from langgraph.prebuilt import MemorySaver  # 사용하지 않는 import 제거
-from langgraph.checkpoint.memory import MemorySaver as LangGraphMemorySaver
 from langgraph.types import interrupt
 
 # 프로젝트 루트 경로 추가
@@ -91,56 +94,66 @@ class MainState(TypedDict):
     loaded_memory_data: NotRequired[Dict]     # 로드된 메모리 데이터
     memory_loaded: NotRequired[bool]          # 메모리 로드 성공 여부
     memory_saved: NotRequired[bool]           # 메모리 저장 성공 여부
+    # 재개 플래그: 재시작 시 분류/라우팅을 건너뛰고 teacher로 직행
+    resume_to_teacher: NotRequired[bool]
 
 class MainOrchestrator:
     """메인 오케스트레이터 클래스"""
     
-    def __init__(self, user_id: str = "default_user", chat_id: str = "default_chat"):
-        """
-        메인 오케스트레이터 초기화
-        
-        Args:
-            user_id: 사용자 ID
-            chat_id: 채팅 ID
-        """
+    def __init__(
+        self,
+        user_id: str = "cli_user",
+        chat_id: Optional[str] = None,
+        *,
+        redis_host: str = "localhost",
+        redis_port: int = 6380,
+    ):
+        # 1) 식별자(재개에 절대적으로 중요)
         self.user_id = user_id
-        self.chat_id = chat_id
-        self._last_user_query: str = ""
-        self._resume_to_teacher: bool = False
-        # 체크포인터 식별자 고정 (run/resume 간 일관성)
-        self.thread_id = f"{self.user_id}_{self.chat_id}"
+        self.chat_id = chat_id or "cli_chat"  # 백엔드에서 주면 그걸 쓰고, 아니면 고정/uuid
+        self.thread_id = f"teacher:{self.user_id}:{self.chat_id}"
         self.checkpoint_id = "main_orchestrator"
-        
-        # 메모리 초기화
+
+        # 2) 숏텀 메모리(대화/세션) - 기존 Redis 사용 (체크포인터와 역할 다름)
         try:
             self.memory = RedisLangGraphMemory(
-                user_id=user_id,
+                user_id=self.user_id,
                 service="main_orchestrator",
-                chat_id=chat_id,
-                redis_host="localhost",
-                redis_port=6380
+                chat_id=self.chat_id,
+                redis_host=redis_host,
+                redis_port=redis_port,
             )
         except Exception as e:
             print(f"⚠️ Redis 연결 실패: {e}")
-            print("📝 메모리 기반으로 실행합니다.")
-            self.memory = LangGraphMemorySaver()
-        
-        # 에이전트 초기화
+            self.memory = None
+
+        # 3) LangGraph 체크포인터(중단/재개 스냅샷용)
+        self.checkpointer = LGMemorySaver()
+
+        # 4) Teacher 서브그래프도 동일 체크포인터 공유
         self.teacher = Teacher(
-            user_id=user_id,
+            user_id=self.user_id,
             service="teacher",
-            chat_id=chat_id,
+            chat_id=self.chat_id,
             init_agents=True,
-            checkpointer=self.memory,
+            checkpointer=self.checkpointer,  # 꼭 동일 인스턴스!
         )
 
-        # LLM for classification
-        self.llm = SimpleLLM(client=client, model=llm_model, temperature=llm_temperature)
-        
-        # 그래프 생성 및 컴파일
+        # 5) 그래프 컴파일도 동일 체크포인터
         self.graph = self._create_graph()
+        self.app = self.graph.compile(checkpointer=self.checkpointer)
+        self.llm = SimpleLLM(client=client, model=llm_model, temperature=llm_temperature)
 
-        self.app = self.graph.compile(checkpointer=self.memory)
+        # 6) 기본 config (run/resume 공통 사용 권장)
+        self.base_config = {
+            "configurable": {
+                "thread_id": self.thread_id,
+            },
+            "interrupt_after": [
+                "teacher_app.await_output_mode",
+                "teacher_app.await_form_answers",
+            ],
+        }
     
     def load_memory_data(self, state: MainState) -> MainState:
         """
@@ -387,17 +400,7 @@ class MainOrchestrator:
             is_first_question = not bool(previous_service)
         
         try:
-            # 첫 번째 질문이 아니고 이전 서비스가 있는 경우, 해당 서비스로 고정
-            if not is_first_question and previous_service:
-                print(f"🔒 서비스 고정됨: {previous_service}")
-                return {
-                    **state,
-                    "service_classification": previous_service,
-                    "classification_confidence": 1.0,
-                    "classification_reason": f"이전 세션에서 고정된 서비스: {previous_service}",
-                    "is_first_question": is_first_question,
-                    "previous_service": previous_service,
-                }
+            # 너무 strict한 서비스 고정은 비활성화하고 항상 재분류
             
             # LLM을 사용한 서비스 분류
             classification_prompt = f"""
@@ -561,17 +564,10 @@ class MainOrchestrator:
         """
         관련성 체크 후 라우팅 결정
         """
-        # 재개 플래그가 켜져 있으면 teacher로 바로 진입 (중간 분기 우회)
-        if getattr(self, "_resume_to_teacher", False):
-            self._resume_to_teacher = False
-            return "teacher_app"
         is_relevant = state.get("is_relevant", True)
-        
         if not is_relevant:
             return "handle_irrelevant_question"
-        else:
-            # 간소화: 바로 서비스 분류로 이동
-            return "classify_service"
+        return "classify_service"
 
     # 간소화로 인해 사용되지 않음 (보존만 함)
     def route_after_consistency_check(self, state: MainState) -> str:
@@ -961,7 +957,7 @@ class MainOrchestrator:
         # 기존 노드들
         builder.add_node("hitl_confirmation", self.hitl_confirmation)
         # Teacher 서브그래프를 그대로 노드로 등록하여 interrupt가 버블업되도록 구성
-        builder.add_node("teacher_app", self.teacher.graph | (lambda ts: {"teacher_state": ts}))
+        builder.add_node("teacher_app", self.teacher.graph)
         builder.add_node("merge_teacher_result", self.merge_teacher_result)
         builder.add_node("execute_farmer", self.execute_farmer)
         builder.add_node("finalize_response", self.finalize_response)
@@ -1021,7 +1017,7 @@ class MainOrchestrator:
             }
         )
         
-        # 8. 서비스 실행 후 메모리 저장
+        # 8. 서비스 실행 후 메모리 저장 (wrap 노드 제거, 직접 연결)
         builder.add_edge("teacher_app", "merge_teacher_result")
         builder.add_edge("merge_teacher_result", "save_memory_data")
         builder.add_edge("execute_farmer", "save_memory_data")
@@ -1064,7 +1060,6 @@ class MainOrchestrator:
         cfg = config.get("configurable", {})
         cfg.update({
             "thread_id": self.thread_id,
-            "checkpoint_id": self.checkpoint_id,
         })
         config["configurable"] = cfg
         
@@ -1093,51 +1088,45 @@ class MainOrchestrator:
             Dict[str, Any]: 재개 결과
         """
         # LangGraph Command를 사용해 정확히 중단 지점에서 재개
-        try:
-            from langgraph.checkpoint.memory import Command
-        except Exception:
-            try:
-                from langgraph.types import Command
-            except Exception:
-                from langgraph import Command  # 최후 시도
+        from langgraph.types import Command
         try:
             if config is None:
                 config = {}
-            cfg = config.get("configurable", {})
+            cfg = (config.get("configurable", {}) or {})
             cfg.update({
                 "thread_id": self.thread_id,
                 "checkpoint_id": self.checkpoint_id,
             })
             config["configurable"] = cfg
-            # 재개 시에도 user_id/chat_id 기본 보전 + Teacher 재개 힌트 주입
-            # 문자열 'form' 재개인 경우 Teacher에 힌트 저장
+            # 재개 시에도 적절한 인터럽트 포인트를 유지
+            config["interrupt_after"] = [
+                "teacher_app.await_output_mode",
+                "teacher_app.await_form_answers",
+            ]
+            # Teacher 측 힌트 주입 (있으면 사용되고 곧바로 소모됨)
             try:
                 if isinstance(hitl_response, str) and hitl_response.lower() in ("pdf", "form"):
                     setattr(self.teacher, "_pending_output_mode", hitl_response.lower())
-                    # 다음 턴은 teacher로 바로 진입
-                    self._resume_to_teacher = True
                 if isinstance(hitl_response, dict) and "user_answer" in hitl_response:
                     setattr(self.teacher, "_pending_form_answers", list(hitl_response["user_answer"]))
-                    # 폼 답안 재개 시 출력 모드는 반드시 form 이어야 함
                     setattr(self.teacher, "_pending_output_mode", "form")
-                    # 다음 턴은 teacher로 바로 진입
-                    self._resume_to_teacher = True
                 if isinstance(hitl_response, dict) and "user_feedback" in hitl_response:
                     setattr(self.teacher, "_pending_user_feedback", str(hitl_response["user_feedback"]))
-                    self._resume_to_teacher = True
             except Exception:
                 pass
             resume_cmd = Command(resume=hitl_response)
-            # 메인 그래프에서 생성된 인터럽트는 메인 체크포인터에 저장됨 → 메인으로 재개해야 정확히 이어집니다.
             result = self.app.invoke(resume_cmd, config=config)
             res = dict(result)
-            # 보강: teacher_state가 있고 상위 키가 비어있으면 병합 노출
-            if "shared" not in res or "artifacts" not in res:
-                ts = res.get("teacher_state")
-                if isinstance(ts, dict):
-                    for key in ("final_response", "artifacts", "routing", "shared", "score"):
-                        if key in ts and key not in res:
-                            res[key] = ts[key]
+            # 보강: teacher_state가 있으면 산출물/중요 키를 항상 노출
+            ts = res.get("teacher_state")
+            if isinstance(ts, dict):
+                # artifacts는 항상 최신으로 덮어써서 PDF 생성 여부가 드러나도록 함
+                if "artifacts" in ts:
+                    res["artifacts"] = ts["artifacts"]
+                # 나머지는 없을 때만 채움
+                for key in ("final_response", "routing", "shared", "score"):
+                    if key in ts and key not in res:
+                        res[key] = ts[key]
             return res
         except Exception as e:
             print(f"❌ 워크플로우 재개 중 오류: {e}")
@@ -1210,115 +1199,276 @@ def visualize_teacher_graph():
         import traceback
         traceback.print_exc()
         return None
+    
+def _get_quiz_from_snapshot(orchestrator, cfg):
+    """스냅샷에서 현재 폼의 문항/보기 가져오기"""
+    try:
+        snap = orchestrator.app.get_state(cfg)
+        vals = getattr(snap, "values", {}) or {}
+    except Exception:
+        vals = {}
+    sh = vals.get("shared", {}) or {}
+    questions = sh.get("question") or []
+    options = sh.get("options") or []  # 2차원 배열(문항별 보기)
+    return questions, options
+
+def _ask_answers_interactively(q_count: int, options) -> list[str]:
+    """
+    정답 입력을 안전하게 받는다.
+    - 구분자: 콤마, 공백, 전각 콤마(，) 모두 허용
+    - 개수 불일치 시 재입력
+    - 숫자 아님/범위 벗어나면 재입력
+    """
+    while True:
+        ans_in = input(f"Bot> 정답을 입력하세요 (문항 {q_count}개, 예: 2,1,3): ").strip()
+        # 구분자 정규화
+        normalized = ans_in.replace("，", ",").replace(" ", ",")
+        parts = [p for p in normalized.split(",") if p]
+
+        # 개수 검증
+        if len(parts) != q_count:
+            print(f"Bot> ⚠️ 문항 수({q_count})와 입력 개수({len(parts)})가 다릅니다. 다시 입력하세요.")
+            continue
+
+        # 숫자/범위 검증
+        ok = True
+        nums: list[int] = []
+        for i, p in enumerate(parts):
+            if not p.isdigit():
+                print(f"Bot> ⚠️ 모든 정답은 숫자(1~보기수)여야 합니다. 다시 입력하세요.")
+                ok = False
+                break
+            n = int(p)
+            # 보기 개수가 있으면 범위 체크 (없으면 1 이상만 체크)
+            opt_count = len(options[i]) if i < len(options) and isinstance(options[i], list) else None
+            if n < 1 or (opt_count is not None and n > opt_count):
+                if opt_count:
+                    print(f"Bot> ⚠️ {i+1}번 문항의 정답은 1~{opt_count} 사이여야 합니다. 다시 입력하세요.")
+                else:
+                    print(f"Bot> ⚠️ {i+1}번 문항의 정답은 1 이상의 숫자여야 합니다. 다시 입력하세요.")
+                ok = False
+                break
+            nums.append(n)
+        if not ok:
+            continue
+
+        # 정상 입력 → 문자열 리스트로 반환 (['2','1','3'] 형태)
+        return [str(n) for n in nums]
+
+
+def _make_cfg(orchestrator):
+    return {
+        "configurable": {
+            "thread_id": orchestrator.thread_id,
+            "checkpoint_id": orchestrator.checkpoint_id,
+        },
+        "interrupt_after": [
+            "teacher_app.await_output_mode",
+            "teacher_app.await_form_answers",
+        ],
+    }
+
+def _get_snapshot(orchestrator, cfg):
+    try:
+        return orchestrator.app.get_state(cfg)
+    except Exception:
+        return None
+
+def _get_pending_nodes(orchestrator, cfg):
+    snap = _get_snapshot(orchestrator, cfg)
+    if snap is None:
+        return []
+    # 우선 그래프 엔진이 제공하는 helper가 있으면 사용
+    try:
+        helper = getattr(orchestrator.app, "get_pending_nodes", None)
+        if callable(helper):
+            nodes = helper(cfg) or []
+            return [str(n) for n in nodes]
+    except Exception:
+        pass
+    # fallback: 다양한 형태 지원
+    nxt = getattr(snap, "next", None)
+    if nxt is None and isinstance(snap, dict):
+        nxt = snap.get("next") or snap.get("pending")
+    try:
+        return [str(n) for n in (nxt or [])]
+    except Exception:
+        return []
+
+def _get_values(orchestrator, cfg):
+    snap = _get_snapshot(orchestrator, cfg)
+    if snap is None:
+        return {}
+    # 1) 객체 속성 형태
+    vals = getattr(snap, "values", None)
+    if isinstance(vals, dict) and vals:
+        return vals
+    # 2) 딕셔너리 형태
+    if isinstance(snap, dict):
+        if isinstance(snap.get("values"), dict):
+            return snap.get("values") or {}
+        # 일부 실행기에서 상태가 top-level에 직접 실릴 수 있음
+        return snap
+    return {}
+
+def _print_outputs_if_any(state):
+    final_resp = state.get("final_response")
+    if final_resp:
+        print(f"Bot> {final_resp}")
+        return True
+    arts = state.get("artifacts") or (state.get("teacher_state") or {}).get("artifacts") or {}
+    gen = arts.get("generated_pdfs") or arts.get("pdfs")
+    if isinstance(gen, list) and gen:
+        print("Bot> PDF 생성 완료:")
+        for p in gen:
+            print(f"  - {p}")
+        return True
+    return False
+
+def _in_await_output_mode(orchestrator, cfg):
+    # pending 없을 때도 상태값 기반으로 보정
+    vals = _get_values(orchestrator, cfg)
+    routing = (vals.get("routing") or
+               (vals.get("teacher_state") or {}).get("routing") or {})
+    stage = routing.get("stage") or routing.get("await") or routing.get("pending")
+    # teacher가 stage="await_output_mode" 같은 키를 넣는 경우를 커버
+    return (stage == "await_output_mode") or bool(routing.get("await_output_mode"))
+
+def _in_await_form_answers(orchestrator, cfg):
+    vals = _get_values(orchestrator, cfg)
+    routing = (vals.get("routing") or
+               (vals.get("teacher_state") or {}).get("routing") or {})
+    stage = routing.get("stage") or routing.get("await") or routing.get("pending")
+    ua = (vals.get("shared") or {}).get("user_answer") or \
+         ((vals.get("teacher_state") or {}).get("shared") or {}).get("user_answer")
+    # 폼이 준비됐는데 user_answer가 아직 없으면 대기 상태로 간주
+    return (stage == "await_form_answers") or bool(routing.get("await_form_answers")) or (routing.get("output_mode") == "form" and not ua)
+
+def _get_quiz_from_snapshot(orchestrator, cfg):
+    vals = _get_values(orchestrator, cfg)
+    sh = vals.get("shared", {}) or (vals.get("teacher_state") or {}).get("shared", {}) or {}
+    return sh.get("question") or [], sh.get("options") or []
+
+def _ask_answers_interactively(q_count: int, options) -> list[str]:
+    while True:
+        ans_in = input(f"Bot> 정답을 입력하세요 (문항 {q_count}개, 예: 2,1,3): ").strip()
+        normalized = ans_in.replace("，", ",").replace(" ", ",")
+        parts = [p for p in normalized.split(",") if p]
+        if len(parts) != q_count:
+            print(f"Bot> ⚠️ 문항 수({q_count})와 입력 개수({len(parts)})가 다릅니다. 다시 입력하세요.")
+            continue
+        ok, nums = True, []
+        for i, p in enumerate(parts):
+            if not p.isdigit():
+                print("Bot> ⚠️ 모든 정답은 숫자(1~보기수)여야 합니다. 다시 입력하세요.")
+                ok = False; break
+            n = int(p)
+            opt_count = len(options[i]) if i < len(options) and isinstance(options[i], list) else None
+            if n < 1 or (opt_count is not None and n > opt_count):
+                if opt_count:
+                    print(f"Bot> ⚠️ {i+1}번 문항의 정답은 1~{opt_count} 사이여야 합니다. 다시 입력하세요.")
+                else:
+                    print(f"Bot> ⚠️ {i+1}번 문항의 정답은 1 이상의 숫자여야 합니다. 다시 입력하세요.")
+                ok = False; break
+            nums.append(n)
+        if not ok:
+            continue
+        return [str(n) for n in nums]
+
 
 def main():
-    """인터랙티브 챗봇 실행 함수"""
     print("🚀 ET-Agent 메인 오케스트레이터 시작 (대화형 모드)")
-
-    # 오케스트레이터 생성 (세션 유지)
     orchestrator = MainOrchestrator(user_id="cli_user", chat_id="cli_chat")
+    print("명령: /exit 종료, /clear 메모리 초기화, /new 새 세션")
 
-    print("명령: /exit 종료, /clear 메모리 초기화")
     while True:
+        cfg = _make_cfg(orchestrator)
+
+        # 0) 스냅샷에서 인터럽트 대기 여부를 '두 가지'로 판정 (pending + 상태 보정)
+        pending = _get_pending_nodes(orchestrator, cfg)
+        print(pending)
+        try:
+            if pending:
+                print(f"[DEBUG] pending nodes: {pending}")
+        except Exception:
+            pass
+        in_await_mode = any(p.startswith("teacher_app.await_output_mode") for p in pending) or _in_await_output_mode(orchestrator, cfg)
+        in_await_form = any(p.startswith("teacher_app.await_form_answers") for p in pending) or _in_await_form_answers(orchestrator, cfg)
+        print(in_await_mode)
+        print(in_await_form)
+        # A) 출력 모드 대기 → 무조건 모드 입력 받고 resume
+        if in_await_mode:
+            # 상태에 이미 모드가 있으면 즉시 그 모드로 resume
+            vals = _get_values(orchestrator, cfg)
+            routing = (vals.get("routing") or (vals.get("teacher_state") or {}).get("routing") or {})
+            decided_mode = (routing or {}).get("output_mode")
+            if decided_mode in ("pdf", "form"):
+                state = orchestrator.resume_workflow(decided_mode, config=cfg)
+                if state.get("error"):
+                    print(f"Bot> 오류: {state['error']}")
+                else:
+                    _print_outputs_if_any(state)
+                continue
+            while True:
+                try:
+                    mode_in = input("Bot> 출력 방식을 선택하세요 (pdf|form): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n👋 종료합니다."); return
+                if mode_in in ("pdf", "form"):
+                    state = orchestrator.resume_workflow(mode_in, config=cfg)
+                    if state.get("error"):
+                        print(f"Bot> 오류: {state['error']}")
+                    else:
+                        _print_outputs_if_any(state)
+                    break
+                print("Bot> 잘못된 입력입니다. 'pdf' 또는 'form'을 입력하세요.")
+            continue
+
+        # B) 폼 정답 대기 → 문항/보기 읽어와 검증 입력 받고 resume
+        if in_await_form:
+            qs, opts = _get_quiz_from_snapshot(orchestrator, cfg)
+            if len(qs) <= 0:
+                # 혹시 비어 있으면 form으로 한 번 흘려 상태 보강
+                state = orchestrator.resume_workflow("form", config=cfg)
+                qs, opts = _get_quiz_from_snapshot(orchestrator, cfg)
+            if len(qs) <= 0:
+                print("Bot> ⚠️ 아직 문항이 준비되지 않았습니다. 다시 시도해 주세요.")
+                continue
+            answers = _ask_answers_interactively(len(qs), opts)
+            state = orchestrator.resume_workflow({"user_answer": answers}, config=cfg)
+            if state.get("error"):
+                print(f"Bot> 오류: {state['error']}")
+            else:
+                _print_outputs_if_any(state)
+            continue
+
+        # C) 여기까지 왔으면 인터럽트 없음 → 새 입력 받기
         try:
             user_query = input("You> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n👋 종료합니다.")
-            break
-
+            print("\n👋 종료합니다."); break
         if not user_query:
             continue
-        if user_query.lower() in ("/exit", ":q", "quit", "exit"):
-            print("👋 종료합니다.")
-            break
-        if user_query.lower() == "/clear":
+        cmd = user_query.lower()
+        if cmd in ("/exit", ":q", "quit", "exit"):
+            print("👋 종료합니다."); break
+        if cmd == "/clear":
             orchestrator.clear_short_term_memory()
-            continue
+            print("🧹 메모리 초기화 완료"); continue
+        if cmd == "/new":
+            import uuid
+            new_chat = uuid.uuid4().hex
+            orchestrator.chat_id = new_chat
+            orchestrator.thread_id = f"teacher:{orchestrator.user_id}:{new_chat}"
+            print("🔁 새 세션 시작되었습니다."); continue
 
-        # 1) 최초 질의 실행
-        state = orchestrator.run(user_query)
+        # D) 새 실행
+        state = orchestrator.run(user_query, config=cfg)
         if state.get("error"):
-            print(f"Bot> 오류: {state['error']}")
-            continue
+            print(f"Bot> 오류: {state['error']}"); continue
+        _print_outputs_if_any(state)
+        # 다음 루프에서 곧바로 pending/상태를 다시 보고 resume 프롬프트를 띄웁니다.
 
-        # 2) 결과가 완결되었는지 확인 (final_response 또는 산출물)
-        def print_if_done(s):
-            final_resp = s.get("final_response")
-            arts = s.get("artifacts", {}) or (s.get("teacher_state", {}) or {}).get("artifacts", {})
-            if final_resp:
-                print(f"Bot> {final_resp}")
-                return True
-            # PDF 등 산출물만 생성된 경우 표시
-            if isinstance(arts, dict):
-                gen = arts.get("generated_pdfs") or arts.get("pdfs")
-                if gen:
-                    print("Bot> PDF 생성 완료:")
-                    for p in gen:
-                        print(f"  - {p}")
-                    return True
-            return False
-
-        if print_if_done(state):
-            continue
-
-        # 3) 인터럽트 처리 루프
-        while True:
-            # 우선 출력 모드 확인
-            routing = state.get("routing", {}) or (state.get("teacher_state", {}) or {}).get("routing", {})
-            output_mode = (routing or {}).get("output_mode")
-            if output_mode not in ("pdf", "form"):
-                # 유효한 입력이 들어올 때까지 대기
-                while True:
-                    mode_in = input("Bot> 출력 방식을 선택하세요 (pdf|form): ").strip().lower()
-                    if mode_in in ("pdf", "form"):
-                        state = orchestrator.resume_workflow(mode_in)
-                        break
-                    print("Bot> 잘못된 입력입니다. 'pdf' 또는 'form'을 입력하세요.")
-                if print_if_done(state):
-                    break
-
-            # 폼 답변 필요 여부 확인
-            sh = state.get("shared", {}) or (state.get("teacher_state", {}) or {}).get("shared", {})
-            questions = sh.get("question", []) or []
-            user_answer = sh.get("user_answer")
-            if (routing or {}).get("output_mode") == "form" and (not isinstance(user_answer, list) or not user_answer):
-                qn = len(questions)
-                if qn <= 0:
-                    # 상태에 질문이 아직 반영되지 않았다면 일단 재개하여 질문을 채운다
-                    state = orchestrator.resume_workflow("form")
-                    sh = state.get("shared", {}) or (state.get("teacher_state", {}) or {}).get("shared", {})
-                    questions = sh.get("question", []) or []
-                    qn = len(questions)
-
-                # 정답 입력 유도
-                while True:
-                    ans_in = input(f"Bot> 정답을 쉼표로 입력하세요 (문항 {qn}개, 예: 2,1,3): ").strip()
-                    parts = [p.strip() for p in ans_in.split(",") if p.strip()]
-                    if len(parts) != qn:
-                        print(f"Bot> 문항 수({qn})와 입력 개수({len(parts)})가 다릅니다. 다시 입력하세요.")
-                        continue
-                    if not all(p.isdigit() for p in parts):
-                        print("Bot> 모든 정답은 숫자여야 합니다. 다시 입력하세요.")
-                        continue
-                    state = orchestrator.resume_workflow({"user_answer": parts})
-                    break
-                if print_if_done(state):
-                    break
-
-            # 출력 모드가 pdf인 경우에는 한 번 더 재개하여 생성 진행
-            if (routing or {}).get("output_mode") == "pdf" and not state.get("final_response"):
-                state = orchestrator.resume_workflow("pdf")
-                if print_if_done(state):
-                    break
-
-            # 더 이상 요구 입력이 없으면 루프 종료
-            if print_if_done(state):
-                break
-            # 안전장치: 추가 상태 변화 없으면 탈출
-            print("Bot> 진행할 단계가 더 없습니다. 새 질문을 입력하세요.")
-            break
 
 if __name__ == "__main__":
     main()
-
-

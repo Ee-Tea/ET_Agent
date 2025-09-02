@@ -276,6 +276,13 @@ class RedisLangGraphMemory:
         except Exception:
             pass
 
+    def delete(self, key: str) -> None:
+        """주어진 키 삭제 (세션 잠금 해제 등)"""
+        try:
+            self.redis.delete(key)
+        except Exception:
+            pass
+
     # 외부 편의 메서드 (메인 오케스트레이터 호환)
     def get_chat_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """

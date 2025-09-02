@@ -82,7 +82,7 @@ class Farmer:
             "기타": self.etc_agent_run
         }
     
-    def execute(self, state: dict) -> dict:
+    def invoke(self, state: dict) -> dict:
         """
         Supervisor에서 호출되는 메인 실행 함수
         

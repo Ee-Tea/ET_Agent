@@ -2,30 +2,7 @@
   "exam_title": "2024년3회_기사필기_전체문제",
   "total_questions": 10,
   "questions": [
-    {
-      "question": "XP(eXtreme Programming) 에 대한 설명으로 옳지 않은 것은 ?",
-      "options": [
-        "릴리즈 기간을 짧게 반복하여 고객의 요구 변화에 빠르게 대응한다.",
-        "코 드들은 하나의 작업이 마무리될 때마다 지속적으로 통합한다.",
-        "테스트가 지속적으로 진행될 수 있도록 테스트 자동화 도구를 사용한다.",
-        "개발 책임자가 모든 책임을 가지므로 팀원들은 책임 없이 자유로운 개발이 가능하다."
-      ],
-      "answer": "4",
-      "explanation": "",
-      "subject": "소프트웨어 설계"
-    },
-    {
-      "question": "자료 흐름도 (Data Flow Diagram) 의 구성 요소로 옳은 것은 ?",
-      "options": [
-        "process, data flow, data store, comment",
-        "process, data flow, data store, terminator",
-        "data flow, data store, terminator, data dictionary",
-        "process, data store, terminator, mini-spec"
-      ],
-      "answer": "2",
-      "explanation": "",
-      "subject": "소프트웨어 설계"
-    },
+    
     {
       "question": "분산 시스템에서의 미들웨어 (Middleware) 와 관련한 설명으로 틀린 것은?",
       "options": [
@@ -39,6 +16,30 @@
       "subject": "소프트웨어 설계"
     },
     {
+      "question": "다음 중 스택을 이용한 연산과 거리가 먼 것은 ?",
+      "options": [
+        "선택 정렬",
+        "재귀 호출",
+        "후위 표현 (Post-Fix Expression) 의 연산",
+        "깊이 우선 탐색"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "소프트웨어 테스트와 관련한 설명으로 틀린 것은 ?",
+      "options": [
+        "화이트박스 테스트는 모듈의 논리적인 구조를 체계적으로 점 검할 수 있다.",
+        "블랙박스 테스트는 프로그램의 구조를 고려하지 않는다.",
+        "테스트 케이스에는 일반적으로 시험 조건 , 테스트 데이터 , 예상 결과가 포함되어야 한다.",
+        "화이트박스 테스트에서 기본 경로 (Basis Path) 란 흐름 그래프 의 시작 노드에서 종료 노드까지의 서로 독립된 경로로 싸이클 을 허용하지 않는 경로를 말한다."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
       "question": "디자인 패턴 사용의 장٠단점에 대한 설명으로 거리가 먼 것은?",
       "options": [
         "소프트웨어 구조 파악이 용이하다.",
@@ -49,66 +50,6 @@
       "answer": "4",
       "explanation": "",
       "subject": "소프트웨어 설계"
-    },
-    {
-      "question": "형상 관리 도구의 주요 기능으로 거리가 먼 것은 ?",
-      "options": [
-        "정규화(Normalization)",
-        "체크인(Check-in)",
-        "체크아웃(Check-out)",
-        "커밋(commit)"
-      ],
-      "answer": "1",
-      "explanation": "",
-      "subject": "소프트웨어 개발"
-    },
-    {
-      "question": "패키지 소프트웨어의 일반적인 제품 품질 요구사항 및 테스트를 위한 국제 표준은?",
-      "options": [
-        "ISO/IEC2196",
-        "IEEE19554",
-        "ISO/IEC12119",
-        "ISO/IEC14959"
-      ],
-      "answer": "3",
-      "explanation": "",
-      "subject": "소프트웨어 개발"
-    },
-    {
-      "question": "블랙박스 테스트 기법으로 거리가 먼 것은 ?",
-      "options": [
-        "기초 경로 검사",
-        "동치 클래스 분해",
-        "경계값 분석",
-        "원인 결과 그래프"
-      ],
-      "answer": "3",
-      "explanation": "",
-      "subject": "소프트웨어 개발"
-    },
-    {
-      "question": "인터페이스 구현 검증 도구가 아닌 것은 ?",
-      "options": [
-        "ESB",
-        "xUnit",
-        "STAF",
-        "NTAF"
-      ],
-      "answer": "1",
-      "explanation": "",
-      "subject": "소프트웨어 개발"
-    },
-    {
-      "question": "다음에서 설명하는 스키마 (Schema) 는 ?",
-      "options": [
-        "개념 스키마",
-        "내부 스키마",
-        "외부 스키마",
-        "내용 스키마"
-      ],
-      "answer": "1",
-      "explanation": "",
-      "subject": "데이터베이스 구축"
     },
     {
       "question": "조건을 만족하는 릴레이션의 수평적 부분집합으로 구성하며 , 연산자의 기호는 그리스 문자 시그마 ( σ ) 를 사용하는 관계대수 연산은 ?",
@@ -147,42 +88,6 @@
       "subject": "데이터베이스 구축"
     },
     {
-      "question": "다음 C 언어 프로그램이 실행되었을 때의 결과는 ?",
-      "options": [
-        "31",
-        "32",
-        "100",
-        "190"
-      ],
-      "answer": "1",
-      "explanation": "",
-      "subject": "프로그래밍 언어 활용"
-    },
-    {
-      "question": "HRN 방식으로 스케줄링 할 경우 , 입력된 작업이 다음과 같을 때 처리되는 작업 순서로 옳은 것은?",
-      "options": [
-        "A → B → C → D",
-        "A → C → B → D",
-        "D → B → C → A",
-        "D → A → B → C"
-      ],
-      "answer": "3",
-      "explanation": "",
-      "subject": "프로그래밍 언어 활용"
-    },
-    {
-      "question": "C, Java 언어 등에서 사용되는 예약어로 , 반복문 안에서 이후의 문장을 실행하지 않고 제어를 반복문의 처음으로 옮기는 명령어는 무엇인가?",
-      "options": [
-        "break",
-        "continue",
-        "next",
-        "release"
-      ],
-      "answer": "2",
-      "explanation": "",
-      "subject": "프로그래밍 언어 활용"
-    },
-    {
       "question": "3 개의 페이지 프레임을 갖는 시스템에서 페이지 참조 순서가1, 2,1,0,4,1,3 일 경우 FIFO 알고리즘에 의한 페이지 교체의 경우 프레임의 최종 상태는?",
       "options": [
         "1,2,0",
@@ -194,18 +99,7 @@
       "explanation": "",
       "subject": "프로그래밍 언어 활용"
     },
-    {
-      "question": "다음 내용이 설명하는 것은 ?",
-      "options": [
-        "자바스크립트(JAVA Script)",
-        "ASP(Active Server Page)",
-        "JSP(Java Server Page)",
-        "파이썬(Python)"
-      ],
-      "answer": "2",
-      "explanation": "",
-      "subject": "프로그래밍 언어 활용"
-    },
+    
     {
       "question": "다음 중 IP 버전에 대한 설명 중 틀린 것은 ?",
       "options": [
@@ -218,30 +112,7 @@
       "explanation": "",
       "subject": "프로그래밍 언어 활용"
     },
-    {
-      "question": "C 언어에서 사용할 수 없는 변수명은 ?",
-      "options": [
-        "student2025",
-        "text-color",
-        "_korea",
-        "amount"
-      ],
-      "answer": "2",
-      "explanation": "",
-      "subject": "프로그래밍 언어 활용"
-    },
-    {
-      "question": "TCP/IP 에서 사용되는 논리 주소를 물리 주소로 변환시켜 주는 프로토콜은?",
-      "options": [
-        "TCP",
-        "ARP",
-        "FTP",
-        "IP"
-      ],
-      "answer": "2",
-      "explanation": "",
-      "subject": "프로그래밍 언어 활용"
-    },
+    
     {
       "question": "라이브러리의 개념과 구성에 대한 설명 중 틀린 것은 ?",
       "options": [
@@ -265,6 +136,30 @@
       "answer": "1",
       "explanation": "",
       "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "SSH(Secure Shell) 에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "SSH 의 기본 네트워크 포트는25 번을 사용한다",
+        "전송되는 데이터는 암호화 된다.",
+        "키를 통한 인증은 클라이언트의 공개키를 서버에 등록해야 한",
+        "서로 연결되어 있는 컴퓨터 간 원격 명령 실행이나 셀 서비스 등을 수행한다."
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "DDoS 공격과 연관이 있는 공격 방법은 ?",
+      "options": [
+        "Secure shell",
+        "Tribe Flood Network",
+        "Nimda",
+        "Deadlock"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
     }
   ]
 }

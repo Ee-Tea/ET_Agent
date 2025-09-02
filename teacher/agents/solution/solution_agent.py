@@ -146,6 +146,8 @@ class SolutionState(TypedDict):
     results: List[Dict]
     validated: bool
     retry_count: int
+    retry_gen: int            # 생성 재시도 횟수
+    retry_retrieve: int       # 검색 재시도 횟수
 
     chat_history: List[str]
     eval: Dict[str, Any]
@@ -166,6 +168,9 @@ class SolutionAgent(BaseAgent):
         self.bm25_retriever = None      # ← 없으면 AttributeError
         self.reranker = None            # ← 리랭커도 안전하게 기본값
         self.rerank_model_name = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        # --- retry ---
+        self.MAX_RETRIEVE_RETRIES = int(os.getenv("MAX_RETRIEVE_RETRIES", "5"))
+        self.MAX_GEN_RETRIES = int(os.getenv("MAX_GEN_RETRIES", "5"))
         
         try:
             self.reranker = CrossEncoder(self.rerank_model_name, device=os.getenv("RERANK_DEVICE","cpu"))
@@ -201,11 +206,20 @@ class SolutionAgent(BaseAgent):
     def description(self) -> str:
         return "시험문제를 인식하여 답과 풀이, 해설을 제공하는 에이전트입니다."
 
+    # def _llm(self, temperature: float = 0):
+    #     return ChatOpenAI(
+    #         api_key=GROQAI_API_KEY,
+    #         base_url=GROQAI_BASE_URL,
+    #         model=GROQAI_LLM_MODEL,
+    #         temperature=temperature,
+    #         max_tokens=min(LLM_MAX_TOKENS, 2048),
+    #     )
+
     def _llm(self, temperature: float = 0):
         return ChatOpenAI(
-            api_key=GROQAI_API_KEY,
-            base_url=GROQAI_BASE_URL,
-            model=GROQAI_LLM_MODEL,
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+            model=OPENAI_LLM_MODEL,
             temperature=temperature,
             max_tokens=min(LLM_MAX_TOKENS, 2048),
         )
@@ -284,6 +298,12 @@ class SolutionAgent(BaseAgent):
                 vector_field=vec_c,   # ← 여기서 반드시 'embedding'으로 잡힐 것
             )
             print(f"✅ Milvus '{coll_c}' 연결 OK (text_field={txt_c}, vector_field={vec_c})")
+
+    def _reset_tunables(self):
+        self.RETRIEVAL_FETCH_K = self.BASE_RETRIEVAL_FETCH_K
+        self.HYBRID_TOPK       = self.BASE_HYBRID_TOPK
+        self.RERANK_TOPK       = self.BASE_RERANK_TOPK
+        self.HYBRID_ALPHA      = self.BASE_HYBRID_ALPHA
 
     def _build_concept_query(self, problem: str, options: List[str]) -> str:
         opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
@@ -450,6 +470,26 @@ class SolutionAgent(BaseAgent):
 
     # 패치 즉시 적용
     _patch_ragas_trace_parsing()
+
+    def _route_after_validate(self, s: SolutionState) -> str:
+        ra = (s.get("eval", {}) or {}).get("ragas", {}) or {}
+        f = float(ra.get("faithfulness", 0) or 0.0)
+        r = float(ra.get("answer_relevancy", 0) or 0.0)
+        thr = (ra.get("thresholds", {}) or {})
+        thr_f = float(thr.get("faithfulness", float(os.getenv("RAGAS_THR_FAITH", "0.4"))))
+        thr_r = float(thr.get("answer_relevancy", float(os.getenv("RAGAS_THR_RELEVANCY", "0.45"))))
+
+        if (f >= thr_f) and (r >= thr_r):
+            return "ok"
+
+        # 둘 다 실패하면 검색(retrieve) 우선
+        if f < thr_f and s.get("retry_retrieve", 0) < self.MAX_RETRIEVE_RETRIES:
+            return "requery"   # → retrieve_parallel
+        if r < thr_r and s.get("retry_gen", 0) < self.MAX_GEN_RETRIES:
+            return "regen"     # → generate_solution
+
+        # 상한 초과 시 더 진행하지 않고 저장(혹은 별도 종료 경로 마련 가능)
+        return "force_store"
     
     #----------------------------------------create graph------------------------------------------------------
 
@@ -474,11 +514,16 @@ class SolutionAgent(BaseAgent):
         graph.add_edge("generate_solution", "validate")
         graph.add_edge("store", END)
 
+        # ✅ 지표 기반 분기
         graph.add_conditional_edges(
-            "validate", 
-            # 검증 실패 → retry<5이면 back, 아니면 그냥 store로 진행
-            lambda s: "ok" if s["validated"] else ("back" if s.get("retry_count", 0) < 5 else "force_store"),
-            {"ok": "store", "back": "generate_solution", "force_store": "store"}
+            "validate",
+            self._route_after_validate,
+            {
+                "ok": "store",
+                "requery": "retrieve_parallel",   # faith 실패 → 재검색
+                "regen": "generate_solution",     # ans_rel 실패 → 재생성
+                "force_store": "store",
+            },
         )
 
         return graph.compile()
@@ -857,7 +902,7 @@ class SolutionAgent(BaseAgent):
             cleaned = Document(page_content=content, metadata={"subject": subject})
             cleaned_docs.append(cleaned)
 
-            chunks.append(f"과목: {subject}\n내용: {content}")
+            chunks.append(f"과목: {subject} 내용: {content}")
             print(f" - [{idx}] subject='{subject}' content={content[:30]}...")
 
         state["concept_contexts"] = cleaned_docs
@@ -867,6 +912,7 @@ class SolutionAgent(BaseAgent):
 
     
     def _retrieve_parallel(self, state: SolutionState) -> SolutionState:
+
         # state를 복사해서 각 작업이 독립적으로 수정하도록 함
         s1 = copy.deepcopy(state)
         s2 = copy.deepcopy(state)
@@ -985,7 +1031,7 @@ class SolutionAgent(BaseAgent):
             과목: ...
         """
 
-        llm = self._llm()
+        # llm = self._llm()
         response = llm.invoke(prompt)
         result = response.content.strip()
         clean = self._strip_md(result)
@@ -1038,6 +1084,7 @@ class SolutionAgent(BaseAgent):
             if got is not None:
                 print("[RAGAS] score dict: direct mapping", res)
                 return got
+            
 
             # 1) 신버전: res.scores 가 dict
             if hasattr(res, "scores") and isinstance(getattr(res, "scores"), dict):
@@ -1197,48 +1244,59 @@ class SolutionAgent(BaseAgent):
             res = _run(dataset2)
             f_sc, r_sc = self._extract_scores(res)
 
-        # 🔹 최신 점수/메타를 항상 state에 반영 (validated 여부 무관)
-        state.setdefault("eval", {})
-        state["eval"]["ragas"] = {
-            "faithfulness": f_sc,
-            "answer_relevancy": r_sc,
-            "thresholds": {"faithfulness": thr_f, "answer_relevancy": thr_r},
-            "n_contexts": len(ctx_list),
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        }
-
-        # (선택) 히스토리로도 적재해 두면 디버깅/비교에 유용
-        state.setdefault("ragas_history", [])
-        state["ragas_history"].append({
-            "faithfulness": f_sc,
-            "answer_relevancy": r_sc,
-            "n_contexts": len(ctx_list),
-            "timestamp": state["eval"]["ragas"]["timestamp"],
-        })
-
-        # 8) 임계값 판정 + state 반영
-        is_valid = (f_sc >= thr_f) and (r_sc >= thr_r)
-        state["validated"] = bool(is_valid)
-        if not is_valid:
-            state["retry_count"] = int(state.get("retry_count", 0)) + 1
-        # 8) 임계값 판정 + state 반영
-        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.45"))
+        # ✅ 임계값: 먼저 정의
+        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.4"))
         thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.45"))
-        is_valid = (f_sc >= thr_f) and (r_sc >= thr_r)
 
-        state["validated"] = bool(is_valid)
-        if not is_valid:
-            state["retry_count"] = int(state.get("retry_count", 0)) + 1
+        pass_f = (f_sc >= thr_f)
+        pass_r = (r_sc >= thr_r)
+        state["validated"] = bool(pass_f and pass_r)
 
+        # ✅ 최신 점수/메타를 항상 기록 (validated 여부 무관)
+        ts = datetime.now().isoformat(timespec="seconds")
         state.setdefault("eval", {})
-        state["eval"]["ragas"] = {
+        eval_record = {
             "faithfulness": f_sc,
             "answer_relevancy": r_sc,
             "thresholds": {"faithfulness": thr_f, "answer_relevancy": thr_r},
             "n_contexts": len(ctx_list),
+            "timestamp": ts,
+            "pass_faith": pass_f,
+            "pass_ansrel": pass_r,
         }
+        state["eval"]["ragas"] = eval_record
 
-        print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | ans_rel={r_sc:.3f}(thr {thr_r}) | validated={state['validated']}")
+        # (선택) 히스토리 적재
+        state.setdefault("ragas_history", [])
+        # 히스토리에 넣을 땐 복사본 권장(참조 공유 방지)
+        state["ragas_history"].append(eval_record.copy())
+
+        # ✅ 실패 유형별로 카운터 분리 증가 (둘 다 실패면 검색 우선)
+        if not pass_f:
+            state["retry_retrieve"] = int(state.get("retry_retrieve", 0)) + 1
+
+            print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | "
+            f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
+            f"pass_f={pass_f} pass_r={pass_r} | "
+            f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
+        elif not pass_r:
+            state["retry_gen"] = int(state.get("retry_gen", 0)) + 1
+
+            print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | "
+            f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
+            f"pass_f={pass_f} pass_r={pass_r} | "
+            f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
+        else:
+
+            print(f"✅ [RAGAS] faith={f_sc:.3f}(thr {thr_f}) | "
+            f"ans_rel={r_sc:.3f}(thr {thr_r}) | "
+            f"pass_f={pass_f} pass_r={pass_r} | "
+            f"retry(retrieve/gen)={state['retry_retrieve']}/{state['retry_gen']}")
+
+            # 성공 시 리셋(선택)
+            state["retry_retrieve"] = 0
+            state["retry_gen"] = 0
+
         return state
 
 
@@ -1427,6 +1485,7 @@ class SolutionAgent(BaseAgent):
             "generated_answer": state.get("generated_answer", ""),
             "generated_explanation": state.get("generated_explanation", ""),
             "generated_subject": state.get("generated_subject", ""),
+            "retry_count": int(state.get("retry_count", 0) or 0),   # ← 추가
             "validated": state.get("validated", False),
             "chat_history": state.get("chat_history", []),
             # RAGAS 메타(→ CSV로 직행)
@@ -1462,6 +1521,8 @@ class SolutionAgent(BaseAgent):
         #     print("⚠️ vectorstore_p가 없습니다. 유사 문제 검색이 비활성화됩니다.")
         # if vs_c is None:
         #     print("⚠️ vectorstore_c가 없습니다. 개념 검색이 비활성화됩니다.")
+
+        self._reset_tunables()
         
         initial_state: SolutionState = {
             "user_input_txt": user_input_txt,
@@ -1481,7 +1542,10 @@ class SolutionAgent(BaseAgent):
             "generated_explanation": "",
             "generated_subject": "",
             "validated": False,
+
             "retry_count": 0,
+            "retry_gen": 0,
+            "retry_retrieve": 0,
 
             "results": [],
             
@@ -1493,7 +1557,7 @@ class SolutionAgent(BaseAgent):
         
         final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
         
-        # 그래프 시각화
+        # # 그래프 시각화
         # try:
         #     graph_image_path = "solution_agent_workflow.png"
         #     with open(graph_image_path, "wb") as f:
@@ -1509,7 +1573,7 @@ class SolutionAgent(BaseAgent):
         
         if results:
             for i, result in enumerate(results):
-                print(f"   - 결과 {i+1}: {result.get('question', '')[:30]}...")
+                print(f"   - 결과 {i+1}: {result.get('user_problem', '')[:30]}...")
         else:
             print("   ⚠️ results가 비어있습니다!")
             print(f"   - final_state 내용: {final_state}")
@@ -1519,8 +1583,6 @@ class SolutionAgent(BaseAgent):
 
 # ====== replace the entire __main__ block in solution_agent.py ======
 if __name__ == "__main__":
-    
-
     # ----------------------------
     # 고정 실행 파라미터 (원하면 여기만 수정)
     # ----------------------------
@@ -1531,7 +1593,7 @@ if __name__ == "__main__":
     CONCEPT_COLL    = os.getenv("CONCEPT_COLL", "concepts")
     INSTRUCTION     = os.getenv("AGENT_INSTRUCTION", "이 문제의 정답 번호와 풀이, 그리고 과목을 알려줘.")  # ← input() 제거
     RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "200"))
-    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "1"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
+    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "0"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
 
     # --- app.py 참고한 벡터 연결 함수 ---
     def init_vectorstore(host: str, port: str, coll: str,
@@ -1638,14 +1700,23 @@ if __name__ == "__main__":
                 res_state = run_one(p)
                 outputs.append((i, (res_state.get("results") or [{}])[-1]))
 
-        # --- CSV 누적 저장 ---
-        CSV_PATH = os.getenv("RAGAS_CSV_PATH", "./teacher/agents/solution/eval_results/ragas_results.csv")
+         # --- CSV: 입력 JSON 파일별로 별도 생성/누적 저장 ---
+        CSV_DIR = os.getenv("RAGAS_CSV_DIR", "./teacher/agents/solution/eval_results")
+        os.makedirs(CSV_DIR, exist_ok=True)
+
+        # 입력 파일명 그대로 사용하되 확장자는 .csv 로
+        base_name = os.path.splitext(os.path.basename(jf))[0]
+        CSV_PATH = os.path.join(CSV_DIR, f"{base_name}.csv")
+
+        # 필요 컬럼 정의 (answer_explanation을 CSV에 포함하려면 필드에도 추가)
         CSV_FIELDS = [
             "timestamp", "file", "index",
             "question", "options",
             "answer_pred", "subject_pred", "validated", "retry_count",
             "faithfulness", "answer_relevancy", "thr_f", "thr_r", "n_contexts",
+            "answer_explanation",  # ← 설명 컬럼도 저장하고 싶다면 유지, 아니면 제거
         ]
+
         def _to_json_str(x):
             try:
                 return json.dumps(x, ensure_ascii=False)
@@ -1654,6 +1725,7 @@ if __name__ == "__main__":
 
         def append_rows(rows, path=CSV_PATH):
             write_header = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+            # Excel로 바로 여는 경우 utf-8-sig 권장 (일반 뷰어/파이프라인이면 utf-8 그대로 사용해도 무방)
             with open(path, "a", encoding="utf-8", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
                 if write_header:
@@ -1665,13 +1737,13 @@ if __name__ == "__main__":
         rows = []
         for i, r in outputs:
             rows.append({
-                
+                "timestamp": now,
+                "file": os.path.basename(jf),
                 "index": i,
                 "question": (r.get("user_problem") or "")[:500],
                 "options": _to_json_str(r.get("user_problem_options", [])),
                 "answer_pred": r.get("generated_answer", ""),
                 "subject_pred": r.get("generated_subject", ""),
-                "answer_explanation": (r.get("generated_explanation") or ""),
                 "validated": r.get("validated", False),
                 "retry_count": r.get("retry_count", 0),
                 "faithfulness": r.get("ragas_faithfulness", ""),
@@ -1679,6 +1751,7 @@ if __name__ == "__main__":
                 "thr_f": r.get("ragas_thr_f", ""),
                 "thr_r": r.get("ragas_thr_r", ""),
                 "n_contexts": r.get("ragas_n_contexts", ""),
+                "answer_explanation": (r.get("generated_explanation") or ""),  # CSV_FIELDS에 없애면 이 줄도 제거
             })
 
         append_rows(rows)

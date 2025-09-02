@@ -15,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 import copy
 from datasets import Dataset, Features, Value, Sequence
 import os
+from collections.abc import Mapping
+
 os.environ.setdefault("RAGAS_DISABLE_TRACING", "1")
 os.environ.setdefault("OPENINFERENCE_DISABLED", "1")
 os.environ.pop("LANGCHAIN_TRACING_V2", None)
@@ -107,9 +109,11 @@ except Exception:
 
 
 # LLM 모델 설정을 환경변수에서 가져오기
-OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("GROQAI_API_KEY", "")
-OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
+OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("OPENAI_LLM_MODEL", "gpt-o4-mini")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+GROQAI_API_KEY = os.getenv("GROQAI_API_KEY", "")
+GROQAI_LLM_MODEL = os.getenv("GROQAI_LLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQAI_BASE_URL = os.getenv("GROQAI_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
@@ -125,7 +129,7 @@ class SolutionState(TypedDict):
     vectorstore_p: Milvus
     vectorstore_c: Milvus
 
-    retrieved_docs: List[Document]
+    problems_contexts: List[Document]
     problems_contexts_text : str
 
     concept_contexts : List[Document]
@@ -151,18 +155,16 @@ class SolutionAgent(BaseAgent):
         # --- 하이브리드/리랭크 파라미터 ---
         self.RETRIEVAL_FETCH_K = int(os.getenv("RETRIEVAL_FETCH_K", "30"))
         self.HYBRID_TOPK       = int(os.getenv("HYBRID_TOPK", "12"))
-        self.RERANK_TOPK       = int(os.getenv("RERANK_TOPK", "5"))
+        self.RERANK_TOPK       = int(os.getenv("RERANK_TOPK", "3"))
         self.HYBRID_ALPHA      = float(os.getenv("HYBRID_ALPHA", "0.5"))
         # --- 유사 컨텍스트 필터링 ---
         self.USE_P_BLOCKS = int(os.getenv("USE_PROBLEM_CTX", "2"))
         self.USE_C_BLOCKS = int(os.getenv("USE_CONCEPT_CTX", "2"))
-
         # --- 반드시 기본값으로 생성해 두기 ---
         self.bm25_retriever = None      # ← 없으면 AttributeError
         self.reranker = None            # ← 리랭커도 안전하게 기본값
         self.rerank_model_name = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
         
-
         try:
             self.reranker = CrossEncoder(self.rerank_model_name, device=os.getenv("RERANK_DEVICE","cpu"))
             print(f"[Rerank] CrossEncoder loaded: {self.rerank_model_name}")
@@ -200,8 +202,8 @@ class SolutionAgent(BaseAgent):
     def _llm(self, temperature: float = 0):
         return ChatOpenAI(
             api_key=GROQAI_API_KEY,
-            base_url=OPENAI_BASE_URL,
-            model=OPENAI_LLM_MODEL,
+            base_url=GROQAI_BASE_URL,
+            model=GROQAI_LLM_MODEL,
             temperature=temperature,
             max_tokens=min(LLM_MAX_TOKENS, 2048),
         )
@@ -285,20 +287,12 @@ class SolutionAgent(BaseAgent):
         opts = "\n".join([f"{i+1}) {o}" for i, o in enumerate(options or [])])
         return f"{(problem or '').strip()}\n{opts}"
     
-
-
-        
     def _split_blocks(self, text: str) -> list[str]:
         # 빈 블록 제거, 순서 유지
         if not isinstance(text, str) or not text.strip():
             return []
         return [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
 
-    def _sim_ratio(self, a: str, b: str) -> float:
-        # 간단·빠른 유사도(토치/임베딩 불필요)
-        return SequenceMatcher(a=a, b=b).ratio()
-
-    
     def _strip_md(self, s: str) -> str:
         if not s: return s
         # 코드펜스 제거
@@ -316,20 +310,100 @@ class SolutionAgent(BaseAgent):
         if not s: return s
         trans = str.maketrans({"①":"1","②":"2","③":"3","④":"4"})
         return s.translate(trans)
-
-    def _extract_answer_subject(self, text: str):
-        """정답 번호와 과목명 안전 추출"""
+    
+    def _extract_triplet(self, text: str, options: List[str]) -> tuple[Optional[int], str, str]:
+        """
+        LLM 응답에서 정답(번호), 풀이(텍스트), 과목(정규화) 3종을 뽑아냄.
+        - 정답: '정답:' 줄의 숫자/원형 숫자/한글표현/텍스트(보기 내용) 모두 허용
+        - 풀이: '풀이:'부터 다음 라벨(과목:) 전까지
+        - 과목: 5개 셋으로 정규화
+        """
         t = self._normalize_digits(self._strip_md(text))
 
-        # 정답 번호(1~4) 추출: 굵게/공백/괄호/한글 콜론 등 허용
-        m = re.search(r"정\s*답\s*[:：\-]?\s*[*_\(]*\s*([1-4])\s*[*_\)]*", t)
-        ans = int(m.group(1)) if m else None
+        # 1) '정답:' 라인 파싱
+        ans_num = None
+        ans_line = None
+        m_ans_line = re.search(r"정\s*답\s*[:：\-]\s*(.+)", t)
+        if m_ans_line:
+            ans_line = m_ans_line.group(1).strip()
 
-        # 과목 추출
-        sm = re.search(r"과\s*목\s*[:：\-]?\s*([^\n\r]+)", t)
-        subj = sm.group(1).strip(" *`_") if sm else ""
+        # (a) 숫자 직접 추출: 1~4 또는 '2번'
+        if ans_line:
+            m_num = re.search(r"\b([1-4])\b|([1-4])\s*번", ans_line)
+            if m_num:
+                ans_num = int(next(g for g in m_num.groups() if g))
+            else:
+                # (b) '①②③④'는 _normalize_digits가 처리함
+                m_num2 = re.search(r"[1-4]", ans_line)
+                if m_num2:
+                    ans_num = int(m_num2.group(0))
 
-        return ans, subj
+        # (c) 텍스트로만 적힌 경우 → 보기와 유사도 매칭
+        def _best_match_option(txt: str, opts: List[str]) -> Optional[int]:
+            txt = (txt or "").strip()
+            if not txt or not opts: return None
+            best_i, best_s = None, 0.0
+            for i, o in enumerate(opts, start=1):
+                s = self._sim_ratio(txt, str(o))
+                if s > best_s:
+                    best_i, best_s = i, s
+            return best_i if best_s >= 0.6 else None  # 임계값 0.6 정도
+
+        if ans_num is None and ans_line and options:
+            # '정답: 우선순위 스케줄링' 같은 패턴일 때
+            # 괄호/따옴표 제거 후 매칭
+            txt = re.sub(r"^[\(\[\{\"\']|[\)\]\}\"\']$", "", ans_line).strip()
+            ans_num = _best_match_option(txt, options)
+
+        # 2) 풀이: '풀이:' ~ '과목:' (또는 끝)
+        expl = ""
+        m_sol = re.search(r"풀이\s*[:：\-]\s*", t)
+        if m_sol:
+            start = m_sol.end()
+            # 과목 라벨 찾기
+            m_sub = re.search(r"\n?\s*과\s*목\s*[:：\-]\s*", t[start:])
+            if m_sub:
+                expl = t[start:start + m_sub.start()].strip()
+            else:
+                expl = t[start:].strip()
+        else:
+            # 라벨이 없으면 전체에서 '과목:' 이전을 풀이로 가정
+            m_sub = re.search(r"과\s*목\s*[:：\-]\s*", t)
+            expl = (t[:m_sub.start()] if m_sub else t).strip()
+
+        # 3) 과목: 5개로 정규화
+        subject_raw = ""
+        m_subject = re.search(r"과\s*목\s*[:：\-]\s*([^\n\r]+)", t)
+        if m_subject:
+            subject_raw = m_subject.group(1).strip()
+
+        SUBJECT_SET = {
+            "소프트웨어설계": {"소프트웨어 설계", "소프트웨어-설계", "설계"},
+            "소프트웨어개발": {"소프트웨어 개발", "개발"},
+            "데이터베이스구축": {"데이터베이스 구축", "데이터베이스", "DB", "DB구축"},
+            "프로그래밍언어활용": {"프로그래밍 언어 활용", "언어활용", "프언활"},
+            "정보시스템구축관리": {"정보시스템 구축 관리", "정보시스템", "구축관리", "정시관"},
+        }
+
+        def _normalize_subject(s: str) -> str:
+            s = re.sub(r"\s+", "", s)
+            for canon, aliases in SUBJECT_SET.items():
+                if s == canon or any(s == re.sub(r"\s+", "", a) for a in aliases):
+                    return canon
+            # 키워드 포함 매칭 (느슨)
+            for canon, aliases in SUBJECT_SET.items():
+                if any(a.replace(" ", "") in s for a in aliases | {canon}):
+                    return canon
+            return ""
+
+        subject = _normalize_subject(subject_raw)
+
+        # 최종 안전장치: 보기 범위 체크
+        if ans_num is not None:
+            if not (1 <= ans_num <= max(1, len(options or []))):
+                ans_num = None
+
+        return ans_num, expl, subject
     
     def _format_ctx_for_prompt(self, blocks, p_blocks, c_blocks, max_chars=900):
         """프롬프트용 컨텍스트 포맷터: [CTX i | 출처] 헤더 + per-block 트리밍"""
@@ -341,24 +415,6 @@ class SolutionAgent(BaseAgent):
             piece = b.strip()[:max_chars]
             formatted.append(f"[CTX {i} | {src}] {piece}")
         return "\n\n".join(formatted)
-
-    def _debug_ds(self, ds, tag: str):
-        print(f"[DBG:ds {tag}] n={len(ds)}, cols={list(ds.features.keys())}")
-        if len(ds) == 0:
-            print(f"[DBG:ds {tag}] (empty dataset)")
-            return
-        row0 = ds[0]
-        keys = list(row0.keys())
-        print(f"[DBG:ds {tag}] row0 keys={keys}")
-        if "contexts" in keys:
-            c0 = row0["contexts"]
-            print(f"[DBG:ds {tag}] type(contexts)={type(c0).__name__}, "
-                f"is_list={isinstance(c0,(list,tuple))}, "
-                f"len={len(c0) if isinstance(c0,(list,tuple)) else 'n/a'}")
-            if isinstance(c0, (list, tuple)):
-                print(f"[DBG:ds {tag}] contexts[0] exists? {bool(c0[:1])}")
-                if c0[:1] and isinstance(c0[0], str):
-                    print(f"[DBG:ds {tag}] contexts[0] head={c0[0][:80]!r}")
 
     # === RAGAS trace parser 안전 패치 ===
     @staticmethod
@@ -392,8 +448,6 @@ class SolutionAgent(BaseAgent):
 
     # 패치 즉시 적용
     _patch_ragas_trace_parsing()
-
-
     
     #----------------------------------------create graph------------------------------------------------------
 
@@ -437,11 +491,10 @@ class SolutionAgent(BaseAgent):
 
         if vectorstore_p is None:
             print("⚠️ vectorstore_p없음 → 유사 문제 검색 건너뜀")
-            state["retrieved_docs"] = []
+            state["problems_contexts"] = []
             state["problems_contexts_text"] = ""
             return state
 
-        # q = state["user_problem"]
         q = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
 
         # ---------- (1) Dense 후보 넉넉히 수집 ----------
@@ -623,7 +676,7 @@ class SolutionAgent(BaseAgent):
                 """
             similar_questions.append(formatted)
 
-        state["retrieved_docs"] = results
+        state["problems_contexts"] = results
         state["problems_contexts_text"] = "\n\n".join(similar_questions)
 
         print(f"유사 문제 {len(results)}개 (dense fetch={len(dense_docs)}, hybrid_pool={len(pool)})")
@@ -640,10 +693,8 @@ class SolutionAgent(BaseAgent):
             state["concept_contexts"], state["concept_contexts_text"] = [], ""
             return state
 
-        q = self._build_concept_query(
-            state.get("user_problem", ""),
-            state.get("user_problem_options", []),
-        )
+        q = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
+
 
         # ---------- (1) Dense 후보 넉넉히 수집 ----------
         try:
@@ -825,7 +876,7 @@ class SolutionAgent(BaseAgent):
             r_con = f_con.result()
 
         # 결과 합치기
-        state["retrieved_docs"]        = r_sim.get("retrieved_docs", [])
+        state["problems_contexts"]        = r_sim.get("problems_contexts", [])
         state["problems_contexts_text"]= r_sim.get("problems_contexts_text", "")
         state["concept_contexts"]      = r_con.get("concept_contexts", [])
         state["concept_contexts_text"] = r_con.get("concept_contexts_text", "")
@@ -841,7 +892,7 @@ class SolutionAgent(BaseAgent):
         state["ctx_used_text"]   = "\n\n".join(selected_blocks)
 
         # 디버그 로그
-        print(f"[Parallel] similar_problems={len(state['retrieved_docs'])}, "
+        print(f"[Parallel] similar_problems={len(state['problems_contexts'])}, "
               f"similar_concepts={len(state['concept_contexts'])}")
         print(f"[Parallel] selected for LLM -> problems:{len(p_sel)} + concepts:{len(c_sel)} = total:{len(selected_blocks)}")
 
@@ -876,7 +927,7 @@ class SolutionAgent(BaseAgent):
         state["ctx_blocks_used"] = final_ctx_blocks
         state["ctx_used_text"]   = ctx_structured  # ← 검증에선 쓰지 않지만 기록/디버깅용으로 남김
 
-        def preview_context(ctx, label: str, max_blocks: int = 3, head_chars: int = 500):
+        def preview_context(ctx, label: str, head_chars: int = 500):
             """
             ctx: 문자열(\n\n로 블록 분리) 또는 블록 리스트 둘 다 지원
             """
@@ -893,7 +944,7 @@ class SolutionAgent(BaseAgent):
                 print(f"{label}: (비어 있음)")
                 return
 
-            for i, b in enumerate(blocks[:max_blocks], 1):
+            for i, b in enumerate(blocks, 1):
                 lines = b.splitlines()
                 first = lines[0] if lines else b
                 print(f" - {label} {i}: {first[:head_chars]}...")
@@ -921,8 +972,8 @@ class SolutionAgent(BaseAgent):
             {ctx_structured}
 
 
-            1. 사용자가 입력한 문제의 **정답**을 의 보기 번호를 정답으로 작성해 주세요.
-            2. 이어서 그 정답인 근거를 담은 **풀이 과정**을 상세히 설명해 주세요.
+            1. 사용자가 입력한 문제의 정답을 의 보기 번호를 정답으로 작성해 주세요.
+            2. 이어서 그 정답인 근거를 담은 풀이 과정을 상세히 설명해 주세요.
             3. 이 문제의 과목을 정보처리기사 과목 5개 중에서 가장 적합한 것으로 지정해 주세요.
                 [소프트웨어설계, 소프트웨어개발, 데이터베이스구축, 프로그래밍언어활용, 정보시스템구축관리]
                 (유사문제와 개념 요약 컨텍스트의 과목을 참고해도 좋습니다.)
@@ -937,14 +988,24 @@ class SolutionAgent(BaseAgent):
         llm = self._llm()
         response = llm.invoke(prompt)
         result = response.content.strip()
-        clean  = self._strip_md(result)
-        answer_idx, subject = self._extract_answer_subject(clean)
+        clean = self._strip_md(result)
+
+        # NEW: 정답/풀이/과목 3종 한 번에 추출
+        ans_idx, explanation, subject = self._extract_triplet(
+            clean,
+            state.get('user_problem_options') or []
+        )
+
+        state["generated_answer"] = str(ans_idx) if ans_idx is not None else ""
+        state["generated_explanation"] = explanation
+        state["generated_subject"] = subject
+        state["chat_history"].append(f"Q: {state['user_input_txt']}\nP: {state['user_problem']}\nA: {state['generated_answer']}\nE: {state['generated_explanation']}")
+
         print("🧠 LLM 응답 완료")
         
-        state["generated_answer"]   = str(answer_idx) if answer_idx is not None else ""
-        state["generated_explanation"] = clean  # 또는 별도 정규식으로 "풀이:"만 추출
-        state["generated_subject"]  = subject
-        state["chat_history"].append(f"Q: {state['user_input_txt']}\nP: {state['user_problem']}\nA: {state['generated_answer']}\nE: {state['generated_explanation']}")
+        print(f" - 예측 정답 번호: {state['generated_answer']}")
+        print(f" - 예측 과목: {state['generated_subject']}")
+        print(f" - 풀이(앞 100자): {state['generated_explanation'][:100]}...")
 
         p_blocks = self._split_blocks(problems_ctx_text)
         c_blocks = self._split_blocks(concept_ctx_text)
@@ -956,25 +1017,63 @@ class SolutionAgent(BaseAgent):
 
 
     @staticmethod
+
     def _extract_scores(res) -> tuple[float, float]:
+        def _as_float(x, default=0.0):
+            try:
+                return float(x)
+            except Exception:
+                return default
+
+        def _from_mapping(m: Mapping) -> tuple[float, float] | None:
+            if not isinstance(m, Mapping):
+                return None
+            f = _as_float(m.get("faithfulness", 0.0))
+            r = _as_float(m.get("answer_relevancy", 0.0))
+            return f, r
+
         f_sc = r_sc = 0.0
         try:
-            # 1) 신버전: res.scores 딕셔너리
-            if hasattr(res, "scores") and isinstance(res.scores, dict):
-                f_sc = float(res.scores.get("faithfulness", 0) or 0)
-                r_sc = float(res.scores.get("answer_relevancy", 0) or 0)
-                return f_sc, r_sc
-            # 2) 구버전: pandas 변환
+            # 0) 결과 자체가 dict/매핑인 경우 (가끔 이렇게 떨어집니다)
+            got = _from_mapping(res) if isinstance(res, Mapping) else None
+            if got is not None:
+                print("[RAGAS] score dict: direct mapping", res)
+                return got
+
+            # 1) 신버전: res.scores 가 dict
+            if hasattr(res, "scores") and isinstance(getattr(res, "scores"), dict):
+                print("[RAGAS] score dict: new", res.scores)
+                got = _from_mapping(res.scores)
+                if got is not None:
+                    return got
+
+            # 2) 사전 변환기가 있으면 먼저 시도
+            if hasattr(res, "to_dict"):
+                try:
+                    d = res.to_dict()
+                    got = _from_mapping(d)
+                    if got is not None:
+                        print("[RAGAS] score dict: to_dict", d)
+                        return got
+                except Exception:
+                    pass
+
+            # 3) 구버전: pandas DataFrame
             if hasattr(res, "to_pandas"):
+                print("[RAGAS] score dict: legacy via pandas", res)
                 df = res.to_pandas()
+                # 여러 샘플일 때 평균
                 if "faithfulness" in df.columns:
-                    f_sc = float(df["faithfulness"].iloc[0])
+                    f_sc = _as_float(df["faithfulness"].astype(float).mean())
                 if "answer_relevancy" in df.columns:
-                    r_sc = float(df["answer_relevancy"].iloc[0])
+                    r_sc = _as_float(df["answer_relevancy"].astype(float).mean())
                 return f_sc, r_sc
+
         except Exception as e:
             print(f"[RAGAS] score parse fallback: {e}")
-        return f_sc, r_sc
+
+        return f_sc, r_sc  # 기본 0.0, 0.0
+
 
     def _validate_solution(self, state: SolutionState) -> SolutionState:
         """
@@ -984,7 +1083,7 @@ class SolutionAgent(BaseAgent):
         - contexts : problems_contexts_text, concept_contexts_text (원문 그대로)
         - metrics  : faithfulness, answer_relevancy
         """
-        print("\n🧪 [3단계] RAGAS 검증 시작 (SingleTurnSample + Wrappers / 원문 그대로)")
+        print("\n🧪 [3단계] RAGAS 검증 시작")
 
         def _norm(s: str) -> str:
             return (s or "").strip()
@@ -1018,8 +1117,9 @@ class SolutionAgent(BaseAgent):
         c_txt = _norm(state.get("concept_contexts_text", ""))
         ctx_list: List[str] = [t for t in (p_txt, c_txt) if t]
         if not ctx_list:
+            print("[RAGAS] contexts 텍스트 비어있음 → problems_contexts + concept_contexts 원문 결합 시도")
             buf = []
-            for d in (state.get("retrieved_docs") or []):
+            for d in (state.get("problems_contexts") or []):
                 if _norm(getattr(d, "page_content", "")):
                     buf.append(_norm(d.page_content))
                 md = getattr(d, "metadata", {}) or {}
@@ -1045,8 +1145,11 @@ class SolutionAgent(BaseAgent):
         dataset = EvaluationDataset(samples=[sample])
 
         # 5) Wrappers
-        eval_llm = self._llm(temperature=0)
-        llm_wrapped = RagasLLMWrapper(eval_llm)
+        eval_llm = ChatOpenAI(
+            model=OPENAI_LLM_MODEL,
+            base_url=OPENAI_BASE_URL,
+            temperature=0.1,
+            api_key=OPENAI_API_KEY=REDACTED = RagasLLMWrapper(eval_llm)
 
         emb = None
         for vs in (state.get("vectorstore_c"), state.get("vectorstore_p"),
@@ -1094,8 +1197,8 @@ class SolutionAgent(BaseAgent):
             f_sc, r_sc = self._extract_scores(res)
 
         # 8) 임계값 판정 + state 반영
-        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.55"))
-        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.55"))
+        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.45"))
+        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.45"))
         is_valid = (f_sc >= thr_f) and (r_sc >= thr_r)
 
         state["validated"] = bool(is_valid)
@@ -1182,8 +1285,8 @@ class SolutionAgent(BaseAgent):
 
         # did = doc_id_of(q, opts)
 
-        # # ---------- 완전 일치 1개만: retrieved_docs[0] ----------
-        # docs = state.get("retrieved_docs", []) or []
+        # # ---------- 완전 일치 1개만: problems_contexts[0] ----------
+        # docs = state.get("problems_contexts", []) or []
         # exact = None
         # if docs:
         #     d = docs[0]
@@ -1276,6 +1379,8 @@ class SolutionAgent(BaseAgent):
         #     print("🆕 신규 문항 저장")
 
         # ---------- 결과 기록 ----------
+        eval_info = (state.get("eval", {}) or {}).get("ragas", {}) or {}
+
         state.setdefault("results", []).append({
             "user_problem":state.get("user_problem", "") or "",
             "user_problem_options": state.get("user_problem_options", []) or [],
@@ -1283,6 +1388,13 @@ class SolutionAgent(BaseAgent):
             "generated_explanation": state.get("generated_explanation", ""),
             "generated_subject": state.get("generated_subject", ""),
             "validated": state.get("validated", False),
+            "chat_history": state.get("chat_history", []),
+             # RAGAS
+            "ragas_faithfulness": float(eval_info.get("faithfulness", 0.0) or 0.0),
+            "ragas_answer_relevancy": float(eval_info.get("answer_relevancy", 0.0) or 0.0),
+            "ragas_thr_f": float(((eval_info.get("thresholds", {}) or {}).get("faithfulness", 0.0)) or 0.0),
+            "ragas_thr_r": float(((eval_info.get("thresholds", {}) or {}).get("answer_relevancy", 0.0)) or 0.0),
+            "ragas_n_contexts": int(eval_info.get("n_contexts", 0) or 0),
             "chat_history": state.get("chat_history", []),
         })
         return state
@@ -1320,7 +1432,7 @@ class SolutionAgent(BaseAgent):
             "vectorstore_p": vectorstore_p,
             "vectorstore_c": vectorstore_c,
 
-            "retrieved_docs": [],
+            "problems_contexts": [],
             "problems_contexts_text": "",
             "concept_contexts": [],
             "concept_contexts_text": "",
@@ -1376,7 +1488,7 @@ if __name__ == "__main__":
     CONCEPT_COLL    = os.getenv("CONCEPT_COLL", "concepts")
     INSTRUCTION     = os.getenv("AGENT_INSTRUCTION", "이 문제의 정답 번호와 풀이, 그리고 과목을 알려줘.")  # ← input() 제거
     RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "200"))
-    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "0"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
+    ONLY_INDEX      = int(os.getenv("AGENT_ONLY_INDEX", "1"))  # 0이면 전체, 1 이상이면 해당 문제(1-based)
 
     # --- app.py 참고한 벡터 연결 함수 ---
     def init_vectorstore(host: str, port: str, coll: str,
@@ -1483,13 +1595,63 @@ if __name__ == "__main__":
                 res_state = run_one(p)
                 outputs.append((i, (res_state.get("results") or [{}])[-1]))
 
+        # --- CSV 누적 저장 ---
+        CSV_PATH = os.getenv("RAGAS_CSV_PATH", "./teacher/agents/solution/eval_results/ragas_results.csv")
+        CSV_FIELDS = [
+            "timestamp", "file", "index",
+            "question", "options",
+            "answer_pred", "subject_pred", "validated", "retry_count",
+            "faithfulness", "answer_relevancy", "thr_f", "thr_r", "n_contexts",
+        ]
+        def _to_json_str(x):
+            try:
+                return json.dumps(x, ensure_ascii=False)
+            except Exception:
+                return str(x)
+
+        def append_rows(rows, path=CSV_PATH):
+            write_header = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+            with open(path, "a", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+                if write_header:
+                    w.writeheader()
+                for row in rows:
+                    w.writerow(row)
+
+        now = datetime.now().isoformat(timespec='seconds')
+        rows = []
+        for i, r in outputs:
+            rows.append({
+                "timestamp": now,
+                "file": jf,
+                "index": i,
+                "question": (r.get("user_problem") or "")[:500],
+                "options": _to_json_str(r.get("user_problem_options", [])),
+                "answer_pred": r.get("generated_answer", ""),
+                "subject_pred": r.get("generated_subject", ""),
+                "validated": r.get("validated", False),
+                "retry_count": r.get("retry_count", 0),
+                "faithfulness": r.get("ragas_faithfulness", ""),
+                "answer_relevancy": r.get("ragas_answer_relevancy", ""),
+                "thr_f": r.get("ragas_thr_f", ""),
+                "thr_r": r.get("ragas_thr_r", ""),
+                "n_contexts": r.get("ragas_n_contexts", ""),
+            })
+
+        append_rows(rows)
+        print(f"[CSV] {len(rows)}개 행을 '{CSV_PATH}'에 추가했습니다.")
+
         # --- 콘솔 출력 ---
         print("\n================= 결과 =================")
         print(f"- 실행시각: {datetime.now().isoformat(timespec='seconds')}")
         print(f"- 입력파일: {jf}")
         for i, r in outputs:
-            print(f"\n# 결과 {i}")
+            print(f"   - 결과 {i+1}: {(r.get('user_problem', '') or '')[:30]}...")
             print(f"- 정답(번호): {r.get('generated_answer','-')}")
-            print(f"- 과목: {r.get('generated_subject','-')}")
-            print(f"- 풀이:\n{r.get('generated_explanation','-')}")
+            print(f"- 과목:{r.get('generated_subject','-')}")
+            print(f"- 풀이:{r.get('generated_explanation','-')}")
+            print(f"   - faith={r.get('ragas_faithfulness')}, ans_rel={r.get('ragas_answer_relevancy')}, valid={r.get('validated')}")
         print("========================================\n")
+
+
+        

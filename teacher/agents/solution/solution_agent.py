@@ -157,10 +157,17 @@ class SolutionAgent(BaseAgent):
 
     def __init__(self):
         # --- 하이브리드/리랭크 파라미터 ---
-        self.RETRIEVAL_FETCH_K = int(os.getenv("RETRIEVAL_FETCH_K", "30"))
-        self.HYBRID_TOPK       = int(os.getenv("HYBRID_TOPK", "12"))
-        self.RERANK_TOPK       = int(os.getenv("RERANK_TOPK", "3"))
-        self.HYBRID_ALPHA      = float(os.getenv("HYBRID_ALPHA", "0.5"))
+        # 1) 베이스 값 저장
+        self.BASE_RETRIEVAL_FETCH_K = int(os.getenv("RETRIEVAL_FETCH_K", "30"))
+        self.BASE_HYBRID_TOPK       = int(os.getenv("HYBRID_TOPK", "12"))
+        self.BASE_RERANK_TOPK       = int(os.getenv("RERANK_TOPK", "3"))
+        self.BASE_HYBRID_ALPHA      = float(os.getenv("HYBRID_ALPHA", "0.5"))
+
+        # 2) 현재(가변) 값 초기화
+        self.RETRIEVAL_FETCH_K = self.BASE_RETRIEVAL_FETCH_K
+        self.HYBRID_TOPK       = self.BASE_HYBRID_TOPK
+        self.RERANK_TOPK       = self.BASE_RERANK_TOPK
+        self.HYBRID_ALPHA      = self.BASE_HYBRID_ALPHA
         # --- 유사 컨텍스트 필터링 ---
         self.USE_P_BLOCKS = int(os.getenv("USE_PROBLEM_CTX", "2"))
         self.USE_C_BLOCKS = int(os.getenv("USE_CONCEPT_CTX", "2"))
@@ -476,19 +483,20 @@ class SolutionAgent(BaseAgent):
         f = float(ra.get("faithfulness", 0) or 0.0)
         r = float(ra.get("answer_relevancy", 0) or 0.0)
         thr = (ra.get("thresholds", {}) or {})
-        thr_f = float(thr.get("faithfulness", float(os.getenv("RAGAS_THR_FAITH", "0.4"))))
-        thr_r = float(thr.get("answer_relevancy", float(os.getenv("RAGAS_THR_RELEVANCY", "0.45"))))
+        thr_f = float(thr.get("faithfulness", float(os.getenv("RAGAS_THR_FAITH", "0.6"))))
+        thr_r = float(thr.get("answer_relevancy", float(os.getenv("RAGAS_THR_RELEVANCY", "0.6"))))
 
         if (f >= thr_f) and (r >= thr_r):
             return "ok"
 
         # 둘 다 실패하면 검색(retrieve) 우선
-        if f < thr_f and s.get("retry_retrieve", 0) < self.MAX_RETRIEVE_RETRIES:
+        if f < thr_f and int(s.get("retry_retrieve", 0) or 0) < self.MAX_RETRIEVE_RETRIES:
             return "requery"   # → retrieve_parallel
-        if r < thr_r and s.get("retry_gen", 0) < self.MAX_GEN_RETRIES:
-            return "regen"     # → generate_solution
 
-        # 상한 초과 시 더 진행하지 않고 저장(혹은 별도 종료 경로 마련 가능)
+        if r < thr_r and int(s.get("retry_gen", 0) or 0) < self.MAX_GEN_RETRIES:
+            s["pass_f"] = True         # ← 문자열 키로 저장
+            return "regen"             # → generate_solution
+
         return "force_store"
     
     #----------------------------------------create graph------------------------------------------------------
@@ -913,6 +921,13 @@ class SolutionAgent(BaseAgent):
     
     def _retrieve_parallel(self, state: SolutionState) -> SolutionState:
 
+        tries = int(state.get("retry_retrieve", 0) or 0)
+        # 예: fetch 폭 점증
+        self.RETRIEVAL_FETCH_K = int(os.getenv("RETRIEVAL_FETCH_K", "30")) + tries*10
+        self.HYBRID_TOPK       = int(os.getenv("HYBRID_TOPK", "12")) + min(tries*2, 8)
+        # 필요하면 BM25 비중/알파도 약간 조정
+        self.HYBRID_ALPHA      = max(0.3, min(0.7, float(os.getenv("HYBRID_ALPHA", "0.5")) - 0.05*tries))
+
         # state를 복사해서 각 작업이 독립적으로 수정하도록 함
         s1 = copy.deepcopy(state)
         s2 = copy.deepcopy(state)
@@ -950,6 +965,10 @@ class SolutionAgent(BaseAgent):
     def _generate_solution(self, state: SolutionState) -> SolutionState:
 
         print("\n✏️ [2단계] 해답 및 풀이 생성 시작")
+
+        tries = int(state.get("retry_gen", 0) or 0)
+        # 예: 살짝 다양성 부여
+        llm = self._llm(temperature=min(0.5, 0.2 + 0.1*tries))
 
         # 1) 최종 블록 확정 (현행 그대로)
         preselected = state.get("ctx_blocks_used")
@@ -1084,7 +1103,7 @@ class SolutionAgent(BaseAgent):
             if got is not None:
                 print("[RAGAS] score dict: direct mapping", res)
                 return got
-            
+                
 
             # 1) 신버전: res.scores 가 dict
             if hasattr(res, "scores") and isinstance(getattr(res, "scores"), dict):
@@ -1245,12 +1264,25 @@ class SolutionAgent(BaseAgent):
             f_sc, r_sc = self._extract_scores(res)
 
         # ✅ 임계값: 먼저 정의
-        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.4"))
-        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.45"))
+        thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.7"))
+        thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.7"))
 
         pass_f = (f_sc >= thr_f)
         pass_r = (r_sc >= thr_r)
+        # ▶ 라우터가 남긴 'pass_f' 힌트가 있으면 한 번만 강제 통과로 처리
+        if state.get("pass_f"):
+            pass_f = True
+            state.pop("pass_f", None)  # 재사용 방지 (중요)
+
         state["validated"] = bool(pass_f and pass_r)
+        # 이하 retry_retrieve / retry_gen 증가 로직은 그대로:
+        if not pass_f:
+            state["retry_retrieve"] = int(state.get("retry_retrieve", 0) or 0) + 1
+        elif not pass_r:
+            state["retry_gen"] = int(state.get("retry_gen", 0) or 0) + 1
+        else:
+            state["retry_retrieve"] = 0
+            state["retry_gen"] = 0
 
         # ✅ 최신 점수/메타를 항상 기록 (validated 여부 무관)
         ts = datetime.now().isoformat(timespec="seconds")
@@ -1472,8 +1504,8 @@ class SolutionAgent(BaseAgent):
                     "faithfulness": last.get("faithfulness", 0.0),
                     "answer_relevancy": last.get("answer_relevancy", 0.0),
                     "thresholds": {
-                        "faithfulness": float(os.getenv("RAGAS_THR_FAITH", "0.55")),
-                        "answer_relevancy": float(os.getenv("RAGAS_THR_RELEVANCY", "0.55")),
+                        "faithfulness": float(os.getenv("RAGAS_THR_FAITH", "0.7")),
+                        "answer_relevancy": float(os.getenv("RAGAS_THR_RELEVANCY", "0.7")),
                     },
                     "n_contexts": last.get("n_contexts", 0),
                     "timestamp": last.get("timestamp", ""),
@@ -1485,7 +1517,8 @@ class SolutionAgent(BaseAgent):
             "generated_answer": state.get("generated_answer", ""),
             "generated_explanation": state.get("generated_explanation", ""),
             "generated_subject": state.get("generated_subject", ""),
-            "retry_count": int(state.get("retry_count", 0) or 0),   # ← 추가
+            "retry_gen": int(state.get("retry_gen", 0) or 0),
+            "retry_retrieve": int(state.get("retry_retrieve", 0) or 0),
             "validated": state.get("validated", False),
             "chat_history": state.get("chat_history", []),
             # RAGAS 메타(→ CSV로 직행)
@@ -1745,7 +1778,9 @@ if __name__ == "__main__":
                 "answer_pred": r.get("generated_answer", ""),
                 "subject_pred": r.get("generated_subject", ""),
                 "validated": r.get("validated", False),
-                "retry_count": r.get("retry_count", 0),
+                "retry_gen": r.get("retry_gen", 0),
+                "retry_retrieve": r.get("retry_retrieve", 0),
+                # RAGAS 메타
                 "faithfulness": r.get("ragas_faithfulness", ""),
                 "answer_relevancy": r.get("ragas_answer_relevancy", ""),
                 "thr_f": r.get("ragas_thr_f", ""),

@@ -18,7 +18,7 @@ collection_name = "market_price_docs"
 collection = None
 
 # CSV 파일 임베딩 및 Milvus에 저장 함수
-def embed_and_store_csv(csv_path="sales/info_20240812.csv"):
+def embed_and_store_csv(csv_path="./data/salesinfo/info_20240812.csv"):
     global collection
     df = pd.read_csv(csv_path, encoding="euc-kr")
     df['품목'] = df['품목'].fillna("정보 없음")

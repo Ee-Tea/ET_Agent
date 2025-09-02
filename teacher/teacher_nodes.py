@@ -347,8 +347,8 @@ def parse_generator_input(user_question: str) -> dict:
 # ========== 라우팅 함수들 ==========
 def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
     """solution 노드 라우팅 - 항상 preprocess를 먼저 거침"""
-    from teacher_util import has_questions, extract_image_paths
-    from pdf_preprocessor import extract_pdf_paths
+    from .teacher_util import has_questions, extract_image_paths
+    from .pdf_preprocessor import extract_pdf_paths
     
     print(f"🔍 [route_solution] 상태 확인:")
     print(f"   user_query: {state.get('user_query', '')}")
@@ -399,7 +399,7 @@ def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def route_score(state: Dict[str, Any]) -> Dict[str, Any]:
     """score 노드 라우팅"""
-    from teacher_util import has_solution_answers
+    from .teacher_util import has_solution_answers
     
     next_node = "score" if has_solution_answers(state) else "mark_after_solution_score"
     new_state = {**state}
@@ -409,7 +409,7 @@ def route_score(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def route_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
     """analysis 노드 라우팅"""
-    from teacher_util import has_score
+    from .teacher_util import has_score
     
     next_node = "analysis" if has_score(state) else "mark_after_score_analysis"
     new_state = {**state}

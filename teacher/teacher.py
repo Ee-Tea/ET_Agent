@@ -49,7 +49,7 @@ from datetime import datetime
 from .teacher_util import (
     ensure_shared, validate_qas, safe_execute,
     has_questions, has_solution_answers, has_score, has_files_to_preprocess,
-    extract_image_paths, extract_problems_from_images, SupportsExecute
+    extract_image_paths, extract_problems_from_images, extract_problems_from_pdf, SupportsExecute
 )
 from .pdf_preprocessor import PDFPreprocessor
 
@@ -605,6 +605,24 @@ class Teacher:
         file_mapper = FilePathMapper()
         external_file_paths = file_mapper.map_artifacts_to_paths(current_artifacts)
 
+        # 동일 파일 중복 제거 (경로 정규화 기반)
+        try:
+            _seen_paths = set()
+            _unique_paths = []
+            for _p in external_file_paths or []:
+                try:
+                    _key = os.path.normcase(os.path.abspath((_p or "").strip()))
+                except Exception:
+                    _key = ((_p or "").strip()).lower()
+                if _key in _seen_paths:
+                    continue
+                _seen_paths.add(_key)
+                _unique_paths.append(_p)
+            if _unique_paths is not None:
+                external_file_paths = _unique_paths
+        except Exception:
+            pass
+
         if not external_file_paths:
             print("⚠️ 전처리할 파일이 없습니다.")
             print(f"🔍 user_query: {uq}")
@@ -703,13 +721,45 @@ class Teacher:
             
             # PDF 파일 처리
             if pdf_files:
+                # 중복 제거 보강 (확장자별 리스트에도 적용)
+                try:
+                    _seen_pdf = set()
+                    _uniq_pdf = []
+                    for _p in pdf_files:
+                        try:
+                            _key = os.path.normcase(os.path.abspath((_p or "").strip()))
+                        except Exception:
+                            _key = ((_p or "").strip()).lower()
+                        if _key in _seen_pdf:
+                            continue
+                        _seen_pdf.add(_key)
+                        _uniq_pdf.append(_p)
+                    pdf_files = _uniq_pdf
+                except Exception:
+                    pass
                 print("📄 PDF 파일에서 문제 추출 중...")
-                pdf_problems = self.pdf_preprocessor.extract_problems_from_pdf(pdf_files)
+                pdf_problems = extract_problems_from_pdf(self.pdf_preprocessor, pdf_files)
                 extracted_problems.extend(pdf_problems or [])
                 print(f"📄 PDF에서 {len(pdf_problems or [])}개 문제 추출")
             
             # 이미지 파일 처리
             if image_files:
+                # 중복 제거 보강
+                try:
+                    _seen_img = set()
+                    _uniq_img = []
+                    for _p in image_files:
+                        try:
+                            _key = os.path.normcase(os.path.abspath((_p or "").strip()))
+                        except Exception:
+                            _key = ((_p or "").strip()).lower()
+                        if _key in _seen_img:
+                            continue
+                        _seen_img.add(_key)
+                        _uniq_img.append(_p)
+                    image_files = _uniq_img
+                except Exception:
+                    pass
                 print("🖼️ 이미지 파일에서 문제 추출 중...")
                 image_problems = extract_problems_from_images(image_files)
                 extracted_problems.extend(image_problems or [])
@@ -1248,6 +1298,16 @@ class Teacher:
         재개 시 decide_output_mode에서 실제 분기 결정을 수행
         """
         print("⏸️ 출력 방식 선택 대기 (await_output_mode)")
+        # 이미 상태에 결정된 출력 모드가 있으면 인터럽트 없이 통과
+        try:
+            existing = ((state.get("routing") or {}).get("output_mode") or "").strip().lower()
+            if existing in ("pdf", "form"):
+                new_state: TeacherState = {**state}
+                new_state.setdefault("routing", {})
+                new_state["routing"]["output_mode"] = existing
+                return new_state
+        except Exception:
+            pass
         # 재개 경로 지원: 사전 주입된 선택값이 있으면 interrupt를 건너뜀
         try:
             pending = getattr(self, "_pending_output_mode", None)

@@ -145,9 +145,10 @@ class SolutionState(TypedDict):
 
     results: List[Dict]
     validated: bool
-    retry_count: int             # 검증 실패 시 재시도 횟수
+    retry_count: int
 
     chat_history: List[str]
+    eval: Dict[str, Any]
     
 class SolutionAgent(BaseAgent):
     """문제 해답/풀이 생성 에이전트"""
@@ -890,7 +891,6 @@ class SolutionAgent(BaseAgent):
 
         selected_blocks = p_sel + c_sel
         state["ctx_blocks_used"] = selected_blocks
-        state["ctx_used_text"]   = "\n\n".join(selected_blocks)
 
         # 디버그 로그
         print(f"[Parallel] similar_problems={len(state['problems_contexts'])}, "
@@ -926,7 +926,6 @@ class SolutionAgent(BaseAgent):
 
         # 4) 상태 저장(검증은 블록 리스트로 사용, 프롬프트는 구조화 텍스트)
         state["ctx_blocks_used"] = final_ctx_blocks
-        state["ctx_used_text"]   = ctx_structured  # ← 검증에선 쓰지 않지만 기록/디버깅용으로 남김
 
         def preview_context(ctx, label: str, head_chars: int = 500):
             """
@@ -1018,7 +1017,6 @@ class SolutionAgent(BaseAgent):
 
 
     @staticmethod
-
     def _extract_scores(res) -> tuple[float, float]:
         def _as_float(x, default=0.0):
             try:
@@ -1031,11 +1029,11 @@ class SolutionAgent(BaseAgent):
                 return None
             f = _as_float(m.get("faithfulness", 0.0))
             r = _as_float(m.get("answer_relevancy", 0.0))
-            return f, r
+            return (f, r)
 
         f_sc = r_sc = 0.0
         try:
-            # 0) 결과 자체가 dict/매핑인 경우 (가끔 이렇게 떨어집니다)
+            # 0) 결과 자체가 dict/매핑인 경우
             got = _from_mapping(res) if isinstance(res, Mapping) else None
             if got is not None:
                 print("[RAGAS] score dict: direct mapping", res)
@@ -1199,6 +1197,30 @@ class SolutionAgent(BaseAgent):
             res = _run(dataset2)
             f_sc, r_sc = self._extract_scores(res)
 
+        # 🔹 최신 점수/메타를 항상 state에 반영 (validated 여부 무관)
+        state.setdefault("eval", {})
+        state["eval"]["ragas"] = {
+            "faithfulness": f_sc,
+            "answer_relevancy": r_sc,
+            "thresholds": {"faithfulness": thr_f, "answer_relevancy": thr_r},
+            "n_contexts": len(ctx_list),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        # (선택) 히스토리로도 적재해 두면 디버깅/비교에 유용
+        state.setdefault("ragas_history", [])
+        state["ragas_history"].append({
+            "faithfulness": f_sc,
+            "answer_relevancy": r_sc,
+            "n_contexts": len(ctx_list),
+            "timestamp": state["eval"]["ragas"]["timestamp"],
+        })
+
+        # 8) 임계값 판정 + state 반영
+        is_valid = (f_sc >= thr_f) and (r_sc >= thr_r)
+        state["validated"] = bool(is_valid)
+        if not is_valid:
+            state["retry_count"] = int(state.get("retry_count", 0)) + 1
         # 8) 임계값 판정 + state 반영
         thr_f = float(os.getenv("RAGAS_THR_FAITH", "0.45"))
         thr_r = float(os.getenv("RAGAS_THR_RELEVANCY", "0.45"))
@@ -1383,6 +1405,21 @@ class SolutionAgent(BaseAgent):
 
         # ---------- 결과 기록 ----------
         eval_info = (state.get("eval", {}) or {}).get("ragas", {}) or {}
+        if not eval_info:
+            # 폴백: 히스토리가 있으면 가장 최근 값 사용
+            hist = state.get("ragas_history") or []
+            if hist:
+                last = hist[-1]
+                eval_info = {
+                    "faithfulness": last.get("faithfulness", 0.0),
+                    "answer_relevancy": last.get("answer_relevancy", 0.0),
+                    "thresholds": {
+                        "faithfulness": float(os.getenv("RAGAS_THR_FAITH", "0.55")),
+                        "answer_relevancy": float(os.getenv("RAGAS_THR_RELEVANCY", "0.55")),
+                    },
+                    "n_contexts": last.get("n_contexts", 0),
+                    "timestamp": last.get("timestamp", ""),
+                }
 
         state.setdefault("results", []).append({
             "user_problem":state.get("user_problem", "") or "",
@@ -1392,14 +1429,14 @@ class SolutionAgent(BaseAgent):
             "generated_subject": state.get("generated_subject", ""),
             "validated": state.get("validated", False),
             "chat_history": state.get("chat_history", []),
-             # RAGAS
+            # RAGAS 메타(→ CSV로 직행)
             "ragas_faithfulness": float(eval_info.get("faithfulness", 0.0) or 0.0),
             "ragas_answer_relevancy": float(eval_info.get("answer_relevancy", 0.0) or 0.0),
             "ragas_thr_f": float(((eval_info.get("thresholds", {}) or {}).get("faithfulness", 0.0)) or 0.0),
             "ragas_thr_r": float(((eval_info.get("thresholds", {}) or {}).get("answer_relevancy", 0.0)) or 0.0),
             "ragas_n_contexts": int(eval_info.get("n_contexts", 0) or 0),
-            "chat_history": state.get("chat_history", []),
-        })
+            "ragas_timestamp": eval_info.get("timestamp", ""),
+            })
         return state
 
     def invoke(
@@ -1448,7 +1485,10 @@ class SolutionAgent(BaseAgent):
 
             "results": [],
             
-            "chat_history": []
+            "chat_history": [],
+
+            "eval": {},   
+            "ragas_history": [], 
         }
         
         final_state = self.graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
@@ -1625,13 +1665,13 @@ if __name__ == "__main__":
         rows = []
         for i, r in outputs:
             rows.append({
-                "timestamp": now,
-                "file": jf,
+                
                 "index": i,
                 "question": (r.get("user_problem") or "")[:500],
                 "options": _to_json_str(r.get("user_problem_options", [])),
                 "answer_pred": r.get("generated_answer", ""),
                 "subject_pred": r.get("generated_subject", ""),
+                "answer_explanation": (r.get("generated_explanation") or ""),
                 "validated": r.get("validated", False),
                 "retry_count": r.get("retry_count", 0),
                 "faithfulness": r.get("ragas_faithfulness", ""),
@@ -1653,7 +1693,7 @@ if __name__ == "__main__":
             print(f"- 정답(번호): {r.get('generated_answer','-')}")
             print(f"- 과목:{r.get('generated_subject','-')}")
             print(f"- 풀이:{r.get('generated_explanation','-')}")
-            print(f"   - faith={r.get('ragas_faithfulness')}, ans_rel={r.get('ragas_answer_relevancy')}, valid={r.get('validated')}")
+            print(f"- faith={r.get('ragas_faithfulness')}, ans_rel={r.get('ragas_answer_relevancy')}, valid={r.get('validated')}")
         print("========================================\n")
 
 

@@ -107,20 +107,39 @@ def build_graph():
 
 def run(state: dict) -> dict:
     """
-    오케스트레이터에서 호출 가능한 entrypoint 함수.
-    입력: {"query": 질문}
-    반환: {"pred_answer": 답변}
+    OchestratorTest.py에서 호출되는 작물추천 에이전트 실행 함수
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 답변
     """
-    app = build_graph()
-    question = state.get("query", "")
-    if not question:
-        return {"pred_answer": "질문이 비어 있습니다."}
     try:
-        result = app.invoke({"question": question})
-        answer = result.get("answer", "답변 생성 실패")
-        return {"pred_answer": answer}
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 작물추천 관련 질문을 해주세요."}
+        
+        print(f"[작물추천_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 빌드 및 실행
+        app = build_graph()
+        result = app.invoke({"question": query})
+        
+        # 답변 추출
+        answer = result.get("answer", "답변을 생성할 수 없습니다.")
+        
+        print(f"[작물추천_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
     except Exception as e:
-        return {"pred_answer": f"crop65pdfllm 실행 중 오류: {e}"}
+        error_msg = f"작물추천 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[작물추천_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
 
 if __name__ == "__main__":
     print("💬 LangGraph RAG 시작 (exit/quit 종료)")

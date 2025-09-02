@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, List, TypedDict, NotRequired
 from typing_extensions import Annotated
 from dotenv import load_dotenv
 from openai import OpenAI
+import graphviz
 
 from langgraph.graph import StateGraph, END, START
 # from langgraph.graph.message import Message  # 사용하지 않는 import 제거
@@ -255,16 +256,16 @@ class MainOrchestrator:
         try:
             # LLM을 사용한 관련성 체크
             relevance_prompt = f"""
-사용자의 질문이 농사 자격증(농산업기사, 종자산업기사 등)과 관련이 있는지 분석해주세요.
+            사용자의 질문이 농사 또는 자격증(정보처리기사)과 관련이 있는지 분석해주세요.
 
-질문: {user_query}
+            질문: {user_query}
 
-다음 중 하나로만 답변해주세요:
-- "relevant": 농사 자격증, 농업 기술, 작물 재배, 농업 관련 질문
-- "irrelevant": 농사 자격증과 전혀 무관한 질문
+            다음 중 하나로만 답변해주세요:
+            - "relevant": 농사 또는 자격증, 농업 기술, 작물 재배, 농업 관련 질문, 정보처리기사 관련 질문
+            - "irrelevant": 농사 또는 자격증과 전혀 무관한 질문
 
-답변:
-"""
+            답변:
+            """
             
             response = self.llm.invoke(relevance_prompt)
             relevance = response.content.strip().lower()
@@ -345,8 +346,20 @@ class MainOrchestrator:
         사용자 입력을 분석하여 서비스를 분류하는 노드
         """
         user_query = state["user_query"]
-        is_first_question = state.get("is_first_question", True)
-        previous_service = state.get("previous_service")
+
+        # 이전 서비스/첫 질문 유도 플래그를 여기서 계산하여 단일 체크로 간소화
+        session_data = state.get("session_data", {})
+        chat_history = state.get("chat_history", [])
+        previous_service = state.get("previous_service") or session_data.get("locked_service")
+        if not previous_service and chat_history:
+            for interaction in reversed(chat_history):
+                sc = interaction.get("service_classification")
+                if sc in ["teacher", "farmer"]:
+                    previous_service = sc
+                    break
+        is_first_question = state.get("is_first_question")
+        if is_first_question is None:
+            is_first_question = not bool(previous_service)
         
         try:
             # 첫 번째 질문이 아니고 이전 서비스가 있는 경우, 해당 서비스로 고정
@@ -356,7 +369,9 @@ class MainOrchestrator:
                     **state,
                     "service_classification": previous_service,
                     "classification_confidence": 1.0,
-                    "classification_reason": f"이전 세션에서 고정된 서비스: {previous_service}"
+                    "classification_reason": f"이전 세션에서 고정된 서비스: {previous_service}",
+                    "is_first_question": is_first_question,
+                    "previous_service": previous_service,
                 }
             
             # LLM을 사용한 서비스 분류
@@ -390,7 +405,9 @@ class MainOrchestrator:
                 **state,
                 "service_classification": service_classification,
                 "classification_confidence": 1.0,
-                "classification_reason": "LLM 분류 결과"
+                "classification_reason": "LLM 분류 결과",
+                "is_first_question": is_first_question,
+                "previous_service": previous_service,
             }
             
         except Exception as e:
@@ -399,7 +416,9 @@ class MainOrchestrator:
                 **state,
                 "service_classification": "teacher",  # 기본값
                 "classification_confidence": 0.0,
-                "classification_reason": f"오류로 인한 기본값: {str(e)}"
+                "classification_reason": f"오류로 인한 기본값: {str(e)}",
+                "is_first_question": is_first_question,
+                "previous_service": previous_service,
             }
     
     def handle_irrelevant_question(self, state: MainState) -> MainState:
@@ -522,18 +541,12 @@ class MainOrchestrator:
         if not is_relevant:
             return "handle_irrelevant_question"
         else:
-            return "check_service_consistency"
-
-    def route_after_consistency_check(self, state: MainState) -> str:
-        """
-        일관성 체크 후 라우팅 결정
-        """
-        service_consistent = state.get("service_consistent", True)
-        
-        if not service_consistent:
-            return "handle_service_inconsistency"
-        else:
+            # 간소화: 바로 서비스 분류로 이동
             return "classify_service"
+
+    # 간소화로 인해 사용되지 않음 (보존만 함)
+    def route_after_consistency_check(self, state: MainState) -> str:
+        return "classify_service"
 
     def check_final_service_consistency(self, state: MainState) -> MainState:
         """
@@ -553,17 +566,17 @@ class MainOrchestrator:
         # 서비스가 다른 경우
         if previous_service != current_service:
             consistency_message = f"""
-🚨 서비스 변경 감지됨!
+            🚨 서비스 변경 감지됨!
 
-기존 대화에서는 '{previous_service}' 서비스를 사용하고 있었는데,
-현재 질문은 '{current_service}' 서비스가 필요한 것으로 분류되었습니다.
+            기존 대화에서는 '{previous_service}' 서비스를 사용하고 있었는데,
+            현재 질문은 '{current_service}' 서비스가 필요한 것으로 분류되었습니다.
 
-더 나은 답변을 위해 새로운 채팅을 시작하는 것을 권장합니다.
-현재 대화를 계속하시겠습니까, 아니면 새 채팅을 시작하시겠습니까?
+            더 나은 답변을 위해 새로운 채팅을 시작하는 것을 권장합니다.
+            현재 대화를 계속하시겠습니까, 아니면 새 채팅을 시작하시겠습니까?
 
-- 현재 대화 계속: '계속'
-- 새 채팅 시작: '새 채팅'
-"""
+            - 현재 대화 계속: '계속'
+            - 새 채팅 시작: '새 채팅'
+            """
             return {
                 **state,
                 "service_consistent": False,
@@ -783,6 +796,36 @@ class MainOrchestrator:
                 "hitl_required": False
             }
     
+    def merge_teacher_result(self, state: MainState) -> MainState:
+        """
+        Teacher 서비스 실행 결과를 메인 상태에 병합하는 노드
+        
+        Args:
+            state: 메인 상태 (teacher_state 포함)
+            
+        Returns:
+            Teacher 결과가 병합된 메인 상태
+        """
+        print("🔄 Teacher 결과 병합 중...")
+        
+        teacher_state = state.get("teacher_state", {})
+        
+        # Teacher 결과를 메인 상태에 병합
+        if teacher_state:
+            # Teacher의 최종 응답을 메인 상태에 저장
+            if "final_response" in teacher_state:
+                state["final_response"] = teacher_state["final_response"]
+            
+            # Teacher의 아티팩트들을 메인 상태에 저장
+            if "artifacts" in teacher_state:
+                state["artifacts"] = teacher_state["artifacts"]
+            
+            # Teacher의 라우팅 정보를 메인 상태에 저장
+            if "routing" in teacher_state:
+                state["routing"] = teacher_state["routing"]
+        
+        return state
+    
     def process_hitl_response(self, state: MainState, hitl_response: str) -> MainState:
         """
         HITL 응답을 처리하는 노드
@@ -884,7 +927,6 @@ class MainOrchestrator:
         # 노드 추가 - 새로운 분기 로직
         builder.add_node("check_question_relevance", self.check_question_relevance)
         builder.add_node("handle_irrelevant_question", self.handle_irrelevant_question)
-        builder.add_node("check_service_consistency", self.check_service_consistency)
         builder.add_node("handle_service_inconsistency", self.handle_service_inconsistency)
         builder.add_node("classify_service", self.classify_service)
         builder.add_node("check_final_service_consistency", self.check_final_service_consistency)
@@ -909,27 +951,18 @@ class MainOrchestrator:
             self.route_after_relevance_check,
             {
                 "handle_irrelevant_question": "handle_irrelevant_question",
-                "check_service_consistency": "check_service_consistency"
+                # 간소화: 바로 classify_service로 이동
+                "classify_service": "classify_service",
             }
         )
         
         # 3. 무관한 질문 처리 -> 메모리 저장 -> 종료
         builder.add_edge("handle_irrelevant_question", "save_memory_data")
         
-        # 4. 서비스 일관성 체크 후 분기
-        builder.add_conditional_edges(
-            "check_service_consistency",
-            self.route_after_consistency_check,
-            {
-                "handle_service_inconsistency": "handle_service_inconsistency",
-                "classify_service": "classify_service"
-            }
-        )
-        
-        # 5. 서비스 불일치 처리 (HITL 필요) -> 메모리 저장 -> 종료
+        # 4. 서비스 불일치 처리 (HITL 필요) -> 메모리 저장 -> 종료
         builder.add_edge("handle_service_inconsistency", "save_memory_data")
         
-        # 6. 서비스 분류 후 분기
+        # 5. 서비스 분류 후 분기
         builder.add_conditional_edges(
             "classify_service",
             self.route_after_classification,
@@ -939,7 +972,7 @@ class MainOrchestrator:
             }
         )
         
-        # 6-1. 최종 일관성 체크 후 분기
+        # 5-1. 최종 일관성 체크 후 분기
         builder.add_conditional_edges(
             "check_final_service_consistency",
             self.route_after_final_consistency_check,
@@ -1052,10 +1085,96 @@ class MainOrchestrator:
             print(f"❌ 워크플로우 재개 중 오류: {e}")
             return {"error": str(e), "hitl_response": hitl_response}
 
+def visualize_main_graph():
+    """메인 오케스트레이터 그래프를 시각화합니다."""
+    try:
+        orchestrator = MainOrchestrator(
+            user_id="demo_user",
+            chat_id="demo_chat"
+        )
+        
+        # 컴파일된 그래프에서 get_graph() 호출
+        compiled = orchestrator.app
+        g = compiled.get_graph()
+
+        dot = graphviz.Digraph(comment="Main Orchestrator Graph", format="png")
+        dot.attr(rankdir="TD")
+
+        # 노드 추가 - nodes가 메서드인지 속성인지 확인
+        nodes = g.nodes() if callable(g.nodes) else g.nodes
+        for n in nodes:
+            dot.node(str(n), shape="box")
+
+        # 엣지 추가 - edges가 메서드인지 속성인지 확인
+        edges = g.edges() if callable(g.edges) else g.edges
+        for e in edges:
+            if isinstance(e, (tuple, list)) and len(e) >= 2:
+                dot.edge(str(e[0]), str(e[1]))
+
+        path = dot.render("main_orchestrator_graph", cleanup=True)
+        print(f"📊 메인 오케스트레이터 그래프 저장됨: {path}")
+        return path
+    except Exception as e:
+        print(f"❌ 메인 그래프 시각화 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def visualize_teacher_graph():
+    """Teacher 에이전트 그래프를 시각화합니다."""
+    try:
+        from teacher.teacher import Teacher
+        
+        # 실행 없이 그래프 구조만 빌드하므로 init_agents=False
+        teacher = Teacher(user_id="demo", service="teacher", chat_id="viz", init_agents=False)
+        compiled = teacher.graph
+        g = compiled.get_graph()
+
+        dot = graphviz.Digraph(comment="Teacher Agent Graph", format="png")
+        dot.attr(rankdir="TD")
+
+        # 노드 추가 - nodes가 메서드인지 속성인지 확인
+        nodes = g.nodes() if callable(g.nodes) else g.nodes
+        for n in nodes:
+            dot.node(str(n), shape="box")
+
+        # 엣지 추가 - edges가 메서드인지 속성인지 확인
+        edges = g.edges() if callable(g.edges) else g.edges
+        for e in edges:
+            if isinstance(e, (tuple, list)) and len(e) >= 2:
+                dot.edge(str(e[0]), str(e[1]))
+
+        path = dot.render("teacher_agent_graph", cleanup=True)
+        print(f"📊 Teacher 에이전트 그래프 저장됨: {path}")
+        return path
+    except Exception as e:
+        print(f"❌ Teacher 그래프 시각화 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 def main():
 
     """메인 실행 함수"""
     print("🚀 ET-Agent 메인 오케스트레이터 시작")
+    
+    # 그래프 시각화 생성
+    print("\n📊 그래프 시각화 생성 중...")
+    
+    print("🔧 메인 그래프 시각화 시도...")
+    main_graph_path = visualize_main_graph()
+    print(f"메인 그래프 결과: {main_graph_path}")
+    
+    print("🔧 Teacher 그래프 시각화 시도...")
+    teacher_graph_path = visualize_teacher_graph()
+    print(f"Teacher 그래프 결과: {teacher_graph_path}")
+    
+    if main_graph_path:
+        print(f"✅ 메인 오케스트레이터 그래프: {main_graph_path}")
+    if teacher_graph_path:
+        print(f"✅ Teacher 에이전트 그래프: {teacher_graph_path}")
+    
+    print("📊 그래프 시각화 완료")
     
     # 오케스트레이터 생성
     orchestrator = MainOrchestrator(

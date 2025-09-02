@@ -261,6 +261,26 @@ class RedisLangGraphMemory:
                 pass
         return out
 
+    # 외부 편의 메서드 (메인 오케스트레이터 호환)
+    def get_chat_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        채팅 히스토리를 반환합니다. 메인 오케스트레이터의 기대 인터페이스에 맞춘 편의 메서드.
+        """
+        try:
+            return self._load_history(limit=limit)
+        except Exception:
+            return []
+
+    def keys(self, pattern: str = "") -> List[str]:
+        """
+        키 목록을 반환합니다. 메인 오케스트레이터 호환을 위한 래퍼.
+        - 인자로 전달된 패턴은 무시하고 현재 세션 네임스페이스 내 키만 반환합니다.
+        """
+        try:
+            return self.list_keys()
+        except Exception:
+            return []
+
     # ---------- append-only 병합 로직 ----------
     @staticmethod
     def _merge_shared_append_only(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:

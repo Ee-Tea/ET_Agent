@@ -94,7 +94,7 @@ class TeacherState(TypedDict):
 
 # ========== Orchestrator ==========
 class Teacher:
-    def __init__(self, user_id: str, service: str, chat_id: str, init_agents: bool = True):
+    def __init__(self, user_id: str, service: str, chat_id: str, init_agents: bool = True, checkpointer=None):
         load_dotenv()
         if not os.getenv("LANGCHAIN_API_KEY"):
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
@@ -129,8 +129,8 @@ class Teacher:
             self.score_runner     = None
             self.analyst_runner   = None
 
-        # LangGraph 기반 그래프 생성
-        self.checkpointer = InMemorySaver()
+        # LangGraph 기반 그래프 생성 (메인과 단일 체크포인터 공유 가능)
+        self.checkpointer = checkpointer or InMemorySaver()
         self.graph = self._create_graph()
 
     # ── Memory IO ────────────────────────────────────────────────────────────
@@ -1248,6 +1248,16 @@ class Teacher:
         재개 시 decide_output_mode에서 실제 분기 결정을 수행
         """
         print("⏸️ 출력 방식 선택 대기 (await_output_mode)")
+        # 재개 경로 지원: 사전 주입된 선택값이 있으면 interrupt를 건너뜀
+        try:
+            pending = getattr(self, "_pending_output_mode", None)
+            if isinstance(pending, str) and pending.lower() in ("pdf", "form"):
+                new_state: TeacherState = {**state}
+                new_state.setdefault("routing", {})
+                new_state["routing"]["output_mode"] = pending.lower()
+                return new_state
+        except Exception:
+            pass
         try:
             from langgraph.types import interrupt
         except Exception:
@@ -1299,6 +1309,10 @@ class Teacher:
             except Exception:
                 pass
             decided = pending
+        # 기본 intent가 generate일 때는 폼 흐름을 선호
+        if decided not in ("pdf", "form"):
+            decided = "form"
+            new_state["routing"]["output_mode"] = decided
         if decided in ("pdf", "form"):
             print(f"✅ 결정된 출력 방식: {decided}")
             return new_state
@@ -1325,8 +1339,14 @@ class Teacher:
         print("⏸️ 폼 답변 대기 (await_form_answers)")
         new_state: TeacherState = ensure_shared({**state})
         shared = new_state["shared"]
+        # 재개 경로 지원: 사전 주입된 답안이 있으면 interrupt를 건너뜀
         pending_answers = getattr(self, "_pending_form_answers", None)
         if isinstance(pending_answers, list) and pending_answers:
+            shared["user_answer"] = [str(x).strip() for x in pending_answers]
+            try:
+                delattr(self, "_pending_form_answers")
+            except Exception:
+                pass
             return new_state
         user_answer = shared.get("user_answer")
         if isinstance(user_answer, list) and len(user_answer) > 0:

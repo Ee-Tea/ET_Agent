@@ -261,6 +261,21 @@ class RedisLangGraphMemory:
                 pass
         return out
 
+    # 외부에서 단일/다중 상호작용을 히스토리에 추가
+    def add_to_chat_history(self, interaction: Any) -> None:
+        try:
+            if not interaction:
+                return
+            if isinstance(interaction, dict):
+                self._append_history_entries([interaction])
+            elif isinstance(interaction, list):
+                # list[dict] 가정
+                safe_list = [x for x in interaction if isinstance(x, dict)]
+                if safe_list:
+                    self._append_history_entries(safe_list)
+        except Exception:
+            pass
+
     # 외부 편의 메서드 (메인 오케스트레이터 호환)
     def get_chat_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """

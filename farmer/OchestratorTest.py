@@ -15,6 +15,43 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
+# 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
+def merge_dicts(left: dict, right: dict) -> dict:
+    """딕셔너리 병합 함수 - LangGraph용"""
+    if not left:
+        return right or {}
+    if not right:
+        return left or {}
+    merged = left.copy()
+    merged.update(right)
+    return merged
+
+def merge_lists_unique(left: list, right: list) -> list:
+    """리스트 병합 함수 - 중복 제거 - LangGraph용"""
+    if not left:
+        return right or []
+    if not right:
+        return left or []
+    # 순서를 유지하면서 중복 제거
+    seen = set()
+    result = []
+    for item in left + right:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+# RouterState 클래스를 Farmer 클래스 외부로 이동
+class RouterState(dict):
+    query: Annotated[List[str], operator.add] = ""
+    selected_agents: Annotated[List[str], merge_lists_unique] = []
+    question_parts: Annotated[Dict[str, str], merge_dicts] = {}
+    execution_order: Annotated[List[str], merge_lists_unique] = []
+    crop_info: Annotated[List[str], operator.add] = []
+    selected_crop: Annotated[List[str], merge_lists_unique] = []
+    agent_results: Annotated[Dict[str, str], merge_dicts] = {}
+    output: Annotated[List[str], operator.add] = []
+
 class Farmer:
     """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
     
@@ -31,7 +68,7 @@ class Farmer:
         self._load_agent_functions()
         
         # 워크플로우 그래프 생성
-        self.graph = self._create_workflow()
+        self.graph = self.create_workflow()
     
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
@@ -92,30 +129,7 @@ class Farmer:
                 "error": str(e)
             }
 
-    def merge_dicts(left: dict, right: dict) -> dict:
-        """딕셔너리 병합 함수 - LangGraph용"""
-        if not left:
-            return right or {}
-        if not right:
-            return left or {}
-        merged = left.copy()
-        merged.update(right)
-        return merged
 
-    def merge_lists_unique(left: list, right: list) -> list:
-        """리스트 병합 함수 - 중복 제거 - LangGraph용"""
-        if not left:
-            return right or []
-        if not right:
-            return left or []
-        # 순서를 유지하면서 중복 제거
-        seen = set()
-        result = []
-        for item in left + right:
-            if item not in seen:
-                seen.add(item)
-                result.append(item)
-        return result
 
     # 에이전트 설명 정의
     agent_descriptions = {
@@ -310,15 +324,6 @@ class Farmer:
 
 
 
-    class RouterState(dict):
-        query: Annotated[List[str], operator.add] = ""
-        selected_agents: Annotated[List[str], merge_lists_unique] = []
-        question_parts: Annotated[Dict[str, str], merge_dicts] = {}
-        execution_order: Annotated[List[str], merge_lists_unique] = []
-        crop_info: Annotated[List[str], operator.add] = []
-        selected_crop: Annotated[List[str], merge_lists_unique] = []
-        agent_results: Annotated[Dict[str, str], merge_dicts] = {}
-        output: Annotated[List[str], operator.add] = []
 
     def select_single_crop_from_recommendations(self, crop_recommendations):
         """
@@ -407,7 +412,7 @@ class Farmer:
         return state
 
     @traceable(name="node_crop_recommend")
-    def node_crop_recommend(state: RouterState) -> RouterState:
+    def node_crop_recommend(self, state: RouterState) -> RouterState:
         if "작물추천_agent" not in state.get("selected_agents", []):
             return state
         
@@ -427,12 +432,12 @@ class Farmer:
         print(f"담당 질문: {question_part}")
         
         # 명확한 경계가 설정된 프롬프트로 실행
-        answer = execute_agent_with_boundaries("작물추천_agent", question_part, llm)
+        answer = self.execute_agent_with_boundaries("작물추천_agent", question_part)
         
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
         # 작물추천 결과에서 하나의 작물 선택
-        selected_crop = select_single_crop_from_recommendations(answer, llm)
+        selected_crop = self.select_single_crop_from_recommendations(answer)
         
         state["crop_info"] = [answer]
         state["selected_crop"] = [selected_crop]  # 선택된 단일 작물 저장
@@ -444,7 +449,7 @@ class Farmer:
 
     # 각 에이전트별로 개별 노드 생성
     @traceable(name="node_crop_grow_agent")
-    def node_crop_grow_agent(state: RouterState) -> RouterState:
+    def node_crop_grow_agent(self, state: RouterState) -> RouterState:
         """작물재배_agent 전용 노드"""
         if "작물재배_agent" not in state.get("selected_agents", []):
             return state
@@ -467,7 +472,7 @@ class Farmer:
             print(f"[🔄 수정된 질문 ] {question_part}")
 
         # 에이전트 실행
-        answer = execute_agent_with_boundaries("작물재배_agent", question_part, llm)
+        answer = self.execute_agent_with_boundaries("작물재배_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["작물재배_agent"] = answer
@@ -477,7 +482,7 @@ class Farmer:
         return state
 
     @traceable(name="node_disaster_agent")
-    def node_disaster_agent(state: RouterState) -> RouterState:
+    def node_disaster_agent(self, state: RouterState) -> RouterState:
         """재해_agent 전용 노드"""
         if "재해_agent" not in state.get("selected_agents", []):
             return state
@@ -500,7 +505,7 @@ class Farmer:
             print(f"[🔄 수정된 질문 ] {question_part}")
         
         # 에이전트 실행
-        answer = execute_agent_with_boundaries("재해_agent", question_part, llm)
+        answer = self.execute_agent_with_boundaries("재해_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["재해_agent"] = answer
@@ -510,7 +515,7 @@ class Farmer:
         return state
 
     @traceable(name="node_sales_agent")
-    def node_sales_agent(state: RouterState) -> RouterState:
+    def node_sales_agent(self, state: RouterState) -> RouterState:
         """판매처_agent 전용 노드"""
         if "판매처_agent" not in state.get("selected_agents", []):
             return state
@@ -533,7 +538,7 @@ class Farmer:
             print(f"[🔄 수정된 질문 ] {question_part}")
         
         # 에이전트 실행
-        answer = execute_agent_with_boundaries("판매처_agent", question_part, llm)
+        answer = self.execute_agent_with_boundaries("판매처_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["판매처_agent"] = answer
@@ -543,7 +548,7 @@ class Farmer:
         return state
 
     @traceable(name="node_etc")
-    def node_etc(state: RouterState) -> RouterState:
+    def node_etc(self, state: RouterState) -> RouterState:
         """기타 에이전트 전용 노드"""
         if "기타" not in state.get("selected_agents", []):
             return state
@@ -555,7 +560,7 @@ class Farmer:
         print(f"[📝 담당 질문] {question_part}")
         
         # 에이전트 실행
-        answer = execute_agent_with_boundaries("기타", question_part, llm)
+        answer = self.execute_agent_with_boundaries("기타", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["기타"] = answer
@@ -566,7 +571,7 @@ class Farmer:
 
     # 병렬 처리 노드 (기존 로직 단순화)
     @traceable(name="node_parallel_agents")
-    def node_parallel_agents(state: RouterState) -> RouterState:
+    def node_parallel_agents(self, state: RouterState) -> RouterState:
         """병렬 에이전트 실행을 조정하는 노드"""
         selected_agents = state.get("execution_order", [])
         
@@ -582,7 +587,7 @@ class Farmer:
         return state
 
     @traceable(name="node_merge_output")
-    def node_merge_output(state: RouterState) -> RouterState:
+    def node_merge_output(self, state: RouterState) -> RouterState:
         print("\n=== 최종 응답 병합 시작 ===")
         
         # 각 에이전트 결과 수집
@@ -660,7 +665,7 @@ class Farmer:
         )
         
         try:
-            summary = llm.invoke(summary_prompt)
+            summary = self.llm.invoke(summary_prompt)
             print(f"[✅ LLM 요약 완료] {len(summary.content)}자")
         except Exception as e:
             summary = f"요약 중 오류: {e}"
@@ -678,20 +683,20 @@ class Farmer:
         return state
 
     # 워크플로우 그래프
-    def create_workflow():
+    def create_workflow(self):
         """완전한 조건부 분기 워크플로우"""
         workflow = StateGraph(RouterState)
         
         # 노드 추가
-        workflow.add_node("input", node_input)
-        workflow.add_node("agent_select", node_agent_select)
-        workflow.add_node("crop_recommend", node_crop_recommend)
-        workflow.add_node("parallel_execution", node_parallel_agents)
-        workflow.add_node("crop_grow_agent", node_crop_grow_agent)
-        workflow.add_node("disaster_agent", node_disaster_agent)
-        workflow.add_node("sales_agent", node_sales_agent)
-        workflow.add_node("etc", node_etc)
-        workflow.add_node("merge_output", node_merge_output)
+        workflow.add_node("input", self.node_input)
+        workflow.add_node("agent_select", self.node_agent_select)
+        workflow.add_node("crop_recommend", self.node_crop_recommend)
+        workflow.add_node("parallel_execution", self.node_parallel_agents)
+        workflow.add_node("crop_grow_agent", self.node_crop_grow_agent)
+        workflow.add_node("disaster_agent", self.node_disaster_agent)
+        workflow.add_node("sales_agent", self.node_sales_agent)
+        workflow.add_node("etc", self.node_etc)
+        workflow.add_node("merge_output", self.node_merge_output)
         
         # 기본 엣지
         workflow.add_edge("input", "agent_select")
@@ -762,8 +767,8 @@ class Farmer:
         
         return workflow.compile()
 
-    def run_orchestrator_langgraph():
-        graph = create_workflow()
+    def run_orchestrator_langgraph(self):
+        graph = self.create_workflow()
         # try:
         #     graph_image_path = "ochestrator_workflow.png"
         #     with open(graph_image_path, "wb") as f:
@@ -784,19 +789,6 @@ class Farmer:
                 print(f"\n오류가 발생했습니다: {e}")
                 continue
 
-    def _create_workflow(self):
-        """워크플로우 그래프 생성"""
-        # 기존 create_workflow 함수의 내용을 여기에 구현
-        # 현재는 간단한 구조만 제공
-        workflow = StateGraph(RouterState)
-        
-        # 노드 추가
-        workflow.add_node("input", self.node_input)
-        workflow.add_node("agent_select", self.node_agent_select)
-        # 나머지 노드들도 추가...
-        
-        workflow.set_entry_point("input")
-        return workflow.compile()
     
     def run_standalone(self):
         """독립 실행용 함수 (기존 방식과 호환)"""
@@ -813,11 +805,11 @@ class Farmer:
                 continue
 
 
-    # 기존 실행 방식과의 호환성을 위한 전역 함수들
-    def run_orchestrator_langgraph():
-        """기존 실행 방식과의 호환성을 위한 함수"""
-        farmer = Farmer()
-        farmer.run_standalone()
+# 기존 실행 방식과의 호환성을 위한 전역 함수들
+def run_orchestrator_langgraph():
+    """기존 실행 방식과의 호환성을 위한 함수"""
+    farmer = Farmer()
+    farmer.run_standalone()
 
-    if __name__ == "__main__":
-        run_orchestrator_langgraph()
+if __name__ == "__main__":
+    run_orchestrator_langgraph()

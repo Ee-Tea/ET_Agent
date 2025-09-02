@@ -43,7 +43,7 @@ def embed_and_store_csv(csv_path="sales/info_20240812.csv"):
 
 # 실행
 if __name__ == "__main__":
-    print("Milvus 컬렉션을 강제로 재생성합니다...")
+    print("Milvus 컬렉션을 재생성합니다...")
     connections.connect("default", host=milvus_host, port=milvus_port)
 
     # 1. 컬렉션이 존재하면 삭제
@@ -59,7 +59,7 @@ if __name__ == "__main__":
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=1024),
         FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024),
     ]
-    schema = CollectionSchema(fields, "시장 가격 문서 컬렉션")
+    schema = CollectionSchema(fields, "판매처 정보 컬렉션")
     collection = Collection(collection_name, schema)
     print("컬렉션 생성 완료.")
 

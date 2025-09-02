@@ -45,7 +45,7 @@ class Farmer:
             "기타": self.etc_agent_run
         }
     
-    def execute(self, state: dict) -> dict:
+    def invoke(self, state: dict) -> dict:
         """
         Supervisor에서 호출되는 메인 실행 함수
         
@@ -304,8 +304,6 @@ class Farmer:
             "pred_answer": final_answer,
             "source": "web_search"
         }
-
-
 
     class RouterState(dict):
         query: Annotated[List[str], operator.add] = ""

@@ -47,7 +47,7 @@ def get_ner_model():
     return _NER_MODEL
 
 # ===== 설정 =====
-PDF_DIR = os.getenv("PDF_DIR", "./pdfs")
+PDF_DIR = os.getenv("PDF_DIR", "./재해대응/pdfs")
 IMAGE_DIR = os.getenv("IMAGE_DIR", "").strip()
 
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
@@ -91,7 +91,7 @@ _META_DEFAULTS = {
 }
 
 # ===== LangChain / VectorStore =====
-from langchain_community.vectorstores import Milvus
+from langchain_milvus import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -160,7 +160,7 @@ def _create_milvus_collection_if_not_exists(collection_name: str, embedding_dim:
             FieldSchema(name="type", dtype=DataType.VARCHAR, max_length=100),
             FieldSchema(name="regions", dtype=DataType.JSON),
         ]
-        schema = CollectionSchema(fields, "재해 대응 데이터")
+        schema = CollectionSchema(fields, "재해 대응 컬렉션")
         collection = Collection(name=collection_name, schema=schema)
         
         index_params = {
@@ -226,10 +226,6 @@ def _get_embedding(
             model_kwargs={"device": device},
             encode_kwargs={"normalize_embeddings": True},
         )
-    
-    # 모델의 device를 명시적으로 설정
-    if hasattr(embed_model, '_client') and embed_model._client is not None:
-        embed_model._client.to(device)
     
     print(f"임베딩 계산 중 ({len(texts)}개 텍스트, 장치: {device})...")
     return np.array(embed_model.embed_documents(texts), dtype="float32")
@@ -427,12 +423,12 @@ def vector_search(query: str, k=5, meta_filters: Dict[str, Any] | None = None):
     (regions/metrics는 JSON 문자열 파싱)
     """
     embed = _get_embedding()
-    vs = Milvus(
+    vectorstore = Milvus(
         embedding_function=embed,
         collection_name=COLLECTION_NAME,
         connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
     )
-    results = vs.similarity_search_with_score(query, k=k*3)  # 넉넉히 받아 필터
+    results = vectorstore.similarity_search_with_score(query, k=k*3)  # 넉넉히 받아 필터
     filt = []
     for doc, score in results:
         md = doc.metadata or {}

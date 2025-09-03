@@ -3,7 +3,7 @@ import requests
 import re
 import json
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import InMemorySaver
+
 from langchain_core.runnables import RunnableLambda
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -14,7 +14,7 @@ from tavily import TavilyClient
 import operator
 from langsmith import traceable
 from dotenv import load_dotenv
-import os
+import os, sys
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -82,9 +82,6 @@ class Farmer:
         # 메모리 시스템 초기화
         self._init_memory_system()
         
-        # 체크포인터 초기화
-        self.checkpointer = InMemorySaver()
-        
         # 에이전트 함수들 로드
         self._load_agent_functions()
         
@@ -95,82 +92,121 @@ class Farmer:
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
     
     def _init_memory_system(self):
-        """메모리 시스템 초기화"""
+        """메모리 시스템 초기화 - Redis만 사용"""
+        # Redis 연결 상태 확인 및 메모리 시스템 초기화
+        self.redis_connected = False
         try:
-            # Redis 메모리 시스템 시도
+            # Farmer 전용 Redis 메모리 시스템 시도
             sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-            from common.short_term.redis_memory import RedisLangGraphMemory
+            from common.short_term.farmer_redis import FarmerRedisMemory
             
             # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
             os.environ['REDIS_PORT'] = '6380'
-            self.memory = RedisLangGraphMemory(user_id=self.user_id, service=self.service, chat_id=self.chat_id)
-            print("✅ Redis 메모리 시스템 초기화 완료")
+            self.memory = FarmerRedisMemory(
+                user_id=self.user_id, 
+                service=self.service, 
+                chat_id=self.chat_id,
+                redis_port=6380
+            )
+            
+            # Redis 연결 테스트
+            if self.memory.connected:
+                test_state = {"test": "connection"}
+                self.memory.save(test_state, test_state)
+                self.memory.load(test_state)
+                
+                self.redis_connected = True
+                print("✅ Farmer Redis 메모리 시스템 초기화 완료 - 대화 맥락 유지 가능")
+                
+                # 메모리 통계 출력
+                stats = self.memory.get_memory_stats()
+                print(f"📊 메모리 상태: {stats}")
+            else:
+                raise Exception("Redis 연결 실패")
+                
         except Exception as e:
             print(f"⚠️ Redis 연결 실패: {e}")
-            print("📝 메모리 기반으로 실행합니다.")
-            # 간단한 메모리 기반 메모리 클래스
-            class SimpleMemory:
-                def load(self, state): 
-                    return state
-                def save(self, state, _): 
-                    return state
-            self.memory = SimpleMemory()
+            print("📝 메모리 시스템 없음 - 단일 질문 처리 모드")
+            self.redis_connected = False
+            self.memory = None
     
     def load_state(self, state: RouterState) -> RouterState:
         """그래프 시작 시 메모리에서 상태를 불러와 state에 병합"""
-        # 세션 정보 확인
-        session_info = state.get("session", {})
-        
-        # 새로운 질문인지 확인 (input 노드에서 설정됨)
-        if session_info.get("new_question", False):
-            # 새로운 질문인 경우: 이전 질문 관련 상태만 초기화, 메모리는 유지
-            print("[상태 초기화] 새로운 질문 - 이전 질문 상태만 초기화")
-            
-            # 질문 관련 상태만 초기화 (메모리/세션 정보는 유지)
-            state["query"] = []
-            state["selected_agents"] = []
-            state["question_parts"] = {}
-            state["execution_order"] = []
-            state["crop_info"] = []
-            state["selected_crop"] = []
-            state["agent_results"] = {}
-            state["output"] = []
-            state["routing"] = {}
-            state["error_info"] = {}
-            
-            # 세션 정보 업데이트
-            state["session"]["loaded"] = True
-            state["session"]["new_question"] = False  # 플래그 리셋
-            
-            return state
+        # Redis 연결 상태에 따른 처리
+        if self.redis_connected:
+            print("[상태 초기화] Farmer Redis 메모리 시스템 - 대화 맥락 유지")
         else:
-            # 기존 로직: 메모리에서 상태 불러오기 (숏텀 메모리 활용)
-            if session_info.get("loaded"):
-                return state
+            print("[상태 초기화] Redis 미연결 - 단일 질문 처리 모드 (문맥 무시)")
+            # Redis 미연결 시 항상 깨끗한 상태로 초기화
+            return self._initialize_clean_state(state)
+        
+        session_info = state.get("session", {})
+        if session_info.get("loaded"):
+            return state
+        
+        try:
+            # 메모리 시스템에서 상태 불러오기 (자동으로 맥락 포함)
+            loaded = self.memory.load(state)
+            loaded.setdefault("session", {})
+            loaded["session"]["loaded"] = True
+            loaded["session"]["redis_connected"] = self.redis_connected
             
-            try:
-                loaded = self.memory.load(state)
-                loaded.setdefault("session", {})
-                loaded["session"]["loaded"] = True
-                print("[메모리 로드] 이전 상태 불러오기 완료")
-                return loaded
-            except Exception as e:
-                print(f"⚠️ 메모리 로드 실패: {e}")
-                # 메모리 로드 실패 시 기본 상태로 시작
-                state.setdefault("session", {})
-                state["session"]["loaded"] = True
-                return state
+            print("[메모리 로드] Farmer Redis 메모리에서 상태 불러오기 완료")
+            
+            # 대화 맥락 정보 출력
+            context = self.memory.get_conversation_context(limit=3)
+            if context:
+                print(f"[대화 맥락] {context[:100]}...")
+            
+            # 작물 추천 맥락 정보 출력
+            crop_context = self.memory.get_crop_recommendation_context(limit=2)
+            if crop_context:
+                print(f"[작물 추천 맥락] {crop_context[:100]}...")
+            
+            return loaded
+        except Exception as e:
+            print(f"⚠️ 메모리 로드 실패: {e}")
+            return self._initialize_clean_state(state)
+    
+    def _initialize_clean_state(self, state: RouterState) -> RouterState:
+        """완전히 깨끗한 상태로 초기화 (Redis 미연결 시)"""
+        # 모든 상태 초기화
+        state.clear()
+        state["session"] = {"loaded": True, "new_question": True, "redis_connected": False}
+        state["query"] = []
+        state["selected_agents"] = []
+        state["question_parts"] = {}
+        state["execution_order"] = []
+        state["crop_info"] = []
+        state["selected_crop"] = []
+        state["agent_results"] = {}
+        state["output"] = []
+        state["routing"] = {}
+        state["error_info"] = {}
+        return state
     
     def persist_state(self, state: RouterState) -> RouterState:
         """그래프 리프 종료 후 메모리에 반영"""
+        # Redis 미연결 시 상태 저장 건너뛰기
+        if not self.redis_connected:
+            print("[메모리 저장] Redis 미연결 - 상태 저장 건너뛰기 (단일 질문 처리 모드)")
+            return state
+        
         try:
+            # 메모리 시스템에 상태 저장 (맥락 포함)
             self.memory.save(state, state)
+            print("[메모리 저장] Farmer Redis 메모리에 상태 저장 완료")
+            
         except Exception as e:
-            print(f"⚠️ 상태 저장 실패: {e}")
+            print(f"⚠️ Redis 상태 저장 실패: {e}")
         return state
     
     def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> RouterState:
-        """워크플로우 재개 기능"""
+        """워크플로우 재개 기능 - Redis 미연결 시 사용 불가"""
+        if not self.redis_connected:
+            print("❌ Redis 미연결 상태 - 워크플로우 재개 불가")
+            raise Exception("Redis 미연결 상태에서는 워크플로우 재개가 불가능합니다.")
+        
         if config is None:
             config = {"configurable": {"thread_id": "default"}}
         
@@ -194,7 +230,7 @@ class Farmer:
             resume_command = Command(resume=resume_data)
             print(f"📤 Command(resume) 전송: {resume_command}")
             
-            # 체크포인터가 설정된 그래프로 재개
+            # 그래프로 재개
             result = self.graph.invoke(resume_command, config)
             print("✅ 워크플로우 재개 완료")
             return result
@@ -227,6 +263,35 @@ class Farmer:
         
         return state
     
+    def clear_memory(self):
+        """메모리 전체 삭제"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'clear_memory'):
+            self.memory.clear_memory()
+            print("✅ Farmer 메모리 삭제 완료")
+        else:
+            print("⚠️ Redis 미연결 상태 - 메모리 삭제 불가")
+    
+    def get_memory_stats(self):
+        """메모리 사용 통계 조회"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'get_memory_stats'):
+            return self.memory.get_memory_stats()
+        else:
+            return {"connected": False, "type": "None"}
+    
+    def get_conversation_context(self, limit: int = 5):
+        """대화 맥락 조회"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'get_conversation_context'):
+            return self.memory.get_conversation_context(limit)
+        else:
+            return ""
+    
+    def get_crop_recommendation_context(self, limit: int = 3):
+        """작물 추천 맥락 조회"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'get_crop_recommendation_context'):
+            return self.memory.get_crop_recommendation_context(limit)
+        else:
+            return ""
+
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
         from 작물추천.crop_recommendation_agent import run as crop_recommend_run
@@ -327,7 +392,13 @@ class Farmer:
     def simple_agent_selector(self, user_question):
         """
         사용자 질문을 분석하여 필요한 에이전트를 선택하는 함수
+        메모리 시스템이 자동으로 대화 맥락을 관리합니다.
         """
+        # 메모리 시스템 상태 확인
+        if self.redis_connected:
+            print("[에이전트 선택] Farmer Redis 메모리 시스템 - 대화 맥락 자동 관리")
+        else:
+            print("[에이전트 선택] 메모리 시스템 없음 - 단일 질문 처리")
         selection_prompt = f"""
         다음 질문을 분석하여 필요한 에이전트를 선택해주세요.
         
@@ -551,9 +622,15 @@ class Farmer:
             # 유효한 입력인 경우 루프 종료
             break
 
-        # 새로운 질문 플래그 설정 (load_state에서 이 플래그를 확인하여 상태 초기화)
-        state.setdefault("session", {})
-        state["session"]["new_question"] = True
+        # Redis 미연결 시 새로운 질문 플래그 설정 (문맥 무시)
+        if not self.redis_connected:
+            state.setdefault("session", {})
+            state["session"]["new_question"] = True
+            print(f"[Redis 미연결] 단일 질문 처리 모드 - 문맥 무시")
+        else:
+            # Redis 연결 시 기존 로직 유지
+            state.setdefault("session", {})
+            state["session"]["new_question"] = True
         
         # 새로운 질문 저장
         state["query"] = [user_input]
@@ -564,6 +641,10 @@ class Farmer:
 
     @traceable(name="node_agent_select")
     def node_agent_select(self, state: RouterState) -> RouterState:
+        # 메모리 시스템 상태 표시
+        memory_type = "Farmer Redis" if self.redis_connected else "None"
+        print(f"\n[에이전트 선택] 메모리 시스템: {memory_type}")
+        
         # 기존 복잡한 로직을 단순화된 함수로 교체
         result = self.simple_agent_selector(state["query"][0] if state["query"] else "")
         # 기존 selected_agents 덮어쓰기 (중복 방지)
@@ -960,7 +1041,7 @@ class Farmer:
         
         workflow.set_entry_point("load_state")
         
-        return workflow.compile(checkpointer=self.checkpointer)
+        return workflow.compile()
 
     def run_orchestrator_langgraph(self):
         graph = self.create_workflow()

@@ -10,8 +10,7 @@ import os
 import pandas as pd
 from konlpy.tag import Okt
 import re
-from langchain_groq import ChatGroq
-# from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
@@ -35,11 +34,7 @@ milvus_port = os.getenv("MILVUS_PORT", "19530")
 collection_name = "market_price_docs"
 
 # LLM 및 프롬프트 설정
-llm = ChatGroq(model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-               temperature=0.7,
-               api_key=openai_api_key)
-# gpt-4o-mini
-# llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
+llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
 
 # 상태 스키마 정의
 class GraphState(TypedDict):
@@ -299,7 +294,7 @@ def execute_milvus_search(query: str) -> list[str]:
 
         results = search_market_docs(query, collection, top_k=3)
         connections.disconnect("default")
-        return results
+        return results 
     except Exception as e:
         print(f"❌ Milvus 연결 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
@@ -907,7 +902,7 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import
-        from sales.SalesRAGAS import SalesRAGASEvaluator
+        from .SalesRAGAS import SalesRAGASEvaluator
         
         # 평가기 초기화
         evaluator = SalesRAGASEvaluator()

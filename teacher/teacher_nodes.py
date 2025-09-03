@@ -442,7 +442,8 @@ def mark_after_score_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
 def post_generator_route(state: Dict[str, Any]) -> str:
     """generator 실행 후 다음 노드 결정"""
     nxt = ((state.get("routing") or {}).get("after_generator") or "").strip()
-    return nxt if nxt else "await_output_mode"  # 기본: PDF vs Form 선택 대기 노드로 이동
+    return nxt if nxt else "generate_problem_pdf"
+    # return nxt if nxt else "await_output_mode"  # 기본: PDF vs Form 선택 대기 노드로 이동
 
 def post_solution_route(state: Dict[str, Any]) -> str:
     """solution 실행 후 다음 노드 결정"""

@@ -83,3 +83,13 @@ $13
 *1
 $4
 EXEC
+*2
+$6
+SELECT
+$1
+0
+*2
+$3
+DEL
+$33
+streamlit_user:teacher:web:shared

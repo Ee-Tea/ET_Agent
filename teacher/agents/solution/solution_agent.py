@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 from ..base_agent import BaseAgent
 from datetime import datetime
-from teacher.agents.milvus_utils import connect_milvus_fallback
+# from teacher.agents.milvus_utils import connect_milvus_fallback
 
 
 load_dotenv()

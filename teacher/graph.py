@@ -1,5 +1,5 @@
 import os
-from teacher.teacher_graph import Orchestrator
+from .teacher_graph import Orchestrator
 
 USER_ID  = os.getenv("TEST_USER_ID", "demo_user")
 SERVICE  = os.getenv("TEST_SERVICE", "teacher")

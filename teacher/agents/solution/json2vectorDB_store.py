@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
 from typing import List
-
+import os
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
 from pymilvus import connections
+
 
 def load_docs_from_json_file(path: Path) -> List[Document]:
     print(f"🔍 JSON 파일 로드 시도: {path}")
@@ -50,9 +51,11 @@ def main():
     embedding = HuggingFaceEmbeddings(
         model_name="jhgan/ko-sroberta-multitask",
         model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True, "batch_size": int(os.getenv("EMBED_BATCH","64"))},
     )
 
-    collection_name = "problems"
+    PROBLEMS_COLL=os.getenv("PROBLEMS_COLL", "problems")
+    collection_name = PROBLEMS_COLL
 
     base_dir = Path(__file__).parent.parent.parent
     print(f"📁 base_dir: {base_dir}")
@@ -72,12 +75,19 @@ def main():
             print(f"⚠️ 문항 없음: {json_file.name} - 구조/내용 확인 필요")
             continue
 
+        INDEX_PARAMS  = {"metric_type": "COSINE", "index_type": "HNSW", "params": {"M": 16, "efConstruction": 200}}
+        SEARCH_PARAMS = {"metric_type": "COSINE", "params": {"ef": 128}}
+
+        
+
         try:
             print(f"ℹ️ 기존 콜렉션 열기 시도... ({json_file.name})")
             vs = Milvus(
                 embedding_function=embedding,
                 collection_name=collection_name,
                 connection_args={"host": "localhost", "port": "19530"},
+                index_params=INDEX_PARAMS,
+                search_params=SEARCH_PARAMS,
             )
             print(f"➕ 기존 콜렉션에 문서 추가 중... ({json_file.name})")
             vs.add_documents(docs)
@@ -89,6 +99,8 @@ def main():
                 embedding=embedding,
                 collection_name=collection_name,
                 connection_args={"host": "localhost", "port": "19530"},
+                index_params=INDEX_PARAMS,
+                search_params=SEARCH_PARAMS,
             )
 
         print(f"✅ {json_file.name} 벡터스토어 저장 완료")

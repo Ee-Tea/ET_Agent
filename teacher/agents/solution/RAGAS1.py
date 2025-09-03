@@ -1,4 +1,4 @@
-import os, re, json, glob
+import os, re, json
 from typing import List, Dict, Any
 from dataclasses import dataclass
 import pandas as pd
@@ -7,111 +7,21 @@ from datasets import Dataset
 from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
 
-from teacher.agents.solution.solution_agent import SolutionAgent
-
+from teacher.agents.solution.solution_agent1 import SolutionAgent
+import glob
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# 🔧 Milvus 연결/스키마 확인용
-from pymilvus import connections, Collection, DataType
-from langchain_milvus import Milvus
-
-# --- run_eval() 마지막에 이어 붙이세요 ---
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-
-OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("GROQAI_API_KEY", "")
-OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
-
-
-# === RAGAS 평가에 사용할 LLM/임베딩 명시 (필수) ===
-# llm = ChatOpenAI(
-#     model="gpt-4o-mini",
-#     temperature=0,
-#     api_key=os.environ["OPENAI_API_KEY=REDACTED = ChatOpenAI(
-    api_key=GROQAI_API_KEY,
-    base_url=OPENAI_BASE_URL,
-    model=OPENAI_LLM_MODEL,
-    temperature=LLM_TEMPERATURE,
-    max_tokens=min(LLM_MAX_TOKENS, 2048),
-)
-
-emb = HuggingFaceEmbeddings(
-    model_name="jhgan/ko-sroberta-multitask",
-    model_kwargs={"device": "cpu"}
-)
-
-# --------- Milvus 벡터스토어 연결 유틸 ---------
-def connect_vectorstore(
-    collection_name: str,
-    host: str = None,
-    port: str = None,
-    model_name: str = "jhgan/ko-sroberta-multitask",
-) -> Milvus:
-    """
-    컬렉션 스키마를 읽어 text/vector 필드명을 자동 추론한 뒤 LangChain Milvus 래퍼로 연결.
-    (problems=vector/text, concepts=embedding/content 같은 이질 스키마 대응)
-    """
-    host = host or os.getenv("MILVUS_HOST", "localhost")
-    port = port or os.getenv("MILVUS_PORT", "19530")
-
-    # 동기 HTTP 스킴으로 연결 (Streamlit 아님 → async 루프 이슈 회피)
-    if "default" not in connections.list_connections():
-        connections.connect(alias="default", uri=f"http://{host}:{port}")
-
-    # 스키마 탐색
-    c = Collection(collection_name)
-    vec_field = None
-    text_field = None
-
-    for f in c.schema.fields:
-        if f.dtype == DataType.FLOAT_VECTOR and vec_field is None:
-            vec_field = f.name
-
-    varchar_fields = [f.name for f in c.schema.fields if f.dtype == DataType.VARCHAR]
-    for cand in ("text", "page_content", "content", "question", "item_title", "title"):
-        if cand in varchar_fields:
-            text_field = cand
-            break
-    if text_field is None and varchar_fields:
-        text_field = varchar_fields[0]
-
-    if vec_field is None:
-        raise RuntimeError(f"[Milvus] '{collection_name}'에 FLOAT_VECTOR 필드가 없습니다.")
-
-    # Embeddings
-    _emb = HuggingFaceEmbeddings(model_name=model_name, model_kwargs={"device": "cpu"})
-
-    # LangChain Milvus VectorStore (검색만 할 것이므로 index/search_params는 생략)
-    vs = Milvus(
-        embedding_function=_emb,
-        collection_name=collection_name,
-        connection_args={"uri": f"http://{host}:{port}"},
-        text_field=text_field,
-        vector_field=vec_field,
+OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED 평가에 사용할 LLM/임베딩 명시 (필수) ===
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0,
+    api_key=OPENAI_API_KEY=REDACTED = HuggingFaceEmbeddings(
+        model_name="jhgan/ko-sroberta-multitask",
+        model_kwargs={"device": "cpu"}
     )
-    print(f"✅ Milvus connected: {collection_name} (text_field={text_field}, vector_field={vec_field})")
-    return vs
 
 # ---------- 유틸 ----------
-def _ctx_text(d) -> str:
-    md = getattr(d, "metadata", {}) or {}
-    # concepts는 content에, problems는 page_content에 있을 수 있음
-    txt = (md.get("content") or getattr(d, "page_content", "") or "")
-    return str(txt).strip()
-
-def build_contexts(retrieved_problems, retrieved_concepts, *, min_len: int = 20, max_k: int = 10) -> List[str]:
-    raw = [ _ctx_text(d) for d in (retrieved_problems or []) + (retrieved_concepts or []) ]
-    # 공백 제거 → 중복 제거 → 너무 짧은 조각 제거 → 상한 clip
-    cleaned = [s for s in (t.strip() for t in raw) if s]
-    deduped = list(dict.fromkeys(cleaned))
-    filtered = [s for s in deduped if len(s) >= min_len]
-    return filtered[:max_k]
-
 def build_question_with_options(question_text: str, options: List[str]) -> str:
     lines = ["[문제]", question_text, "", "[보기]"]
     for i, opt in enumerate(options, start=1):
@@ -147,7 +57,6 @@ def parse_idx_from_text(s: str) -> int | None:
         pass
     return None
 
-from dataclasses import dataclass
 @dataclass
 class EvalRow:
     question: str
@@ -157,12 +66,9 @@ class EvalRow:
     metadata: Dict[str, Any]
 
 # ---------- 핵심: 테스트 JSON -> 실행 -> RAGAS 입력 ----------
-
 def run_eval(
     test_json_path: str,
     out_dir: str = "./eval_out",
-    vectorstore_p: Milvus = None,
-    vectorstore_c: Milvus = None,
 ):
     os.makedirs(out_dir, exist_ok=True)
     print(f"[로드] JSON 파일 불러오기: {test_json_path}")
@@ -202,23 +108,22 @@ def run_eval(
         gt_exp     = (it.get("explanation") or "").strip()
         gt_sub     = (it.get("subject") or "").strip()
 
-        user_input_txt = "이 문제의 정답이 되는 보기 번화와 문제 풀이, 그리고 이 문제의 과목 이름을 알려주세요."
+        user_input_txt = "이 문제의 해답과 풀이, 이 문제의 과목 이름을 알려주세요."
         question_only = q_text
         options_list  = options
 
         print(f" - 문제: {q_text[:50]}...")
         print(f" - 보기 개수: {len(options_list)}")
 
-        # ✅ 변경: 두 벡터스토어를 명시적으로 전달
         final_state = agent.invoke(
             user_input_txt=user_input_txt,
             user_problem=question_only,
             user_problem_options=options_list,
-            vectorstore_p=vectorstore_p,
-            vectorstore_c=vectorstore_c,
+            vectorstore=None,
             recursion_limit=1000,
         )
 
+        
         gen_ans = final_state.get("generated_answer", "") or ""
         pred_idx = parse_idx_from_text(gen_ans)
         gen_text = options[pred_idx - 1] if (pred_idx and 1 <= pred_idx <= len(options)) else ""
@@ -227,11 +132,11 @@ def run_eval(
         print(f" - 예측 정답: {gen_ans}")
         print(f" - 예측 풀이: {gen_exp[:50]}...")
 
-        # ✅ 변경: 유사문제 + 개념요약 컨텍스트 모두 사용
-        retrieved_problems = final_state.get("retrieved_docs", []) or []
-        retrieved_concepts = final_state.get("concept_contexts", []) or []
-        ctx_texts = build_contexts(retrieved_problems, retrieved_concepts)
-        print(f" - Retrieval Contexts: {len(ctx_texts)}개 (유사문제+개념요약)")
+        retrieved = final_state.get("retrieved_docs", []) or []
+        
+        ctx_texts = [doc_to_ctx_text(d) for d in retrieved]
+        print(f" - Retrieval Contexts: {len(ctx_texts)}개 (RAGAS와 LLM 동일 컨텍스트)")
+
 
         q_full = f"{user_input_txt}\n\n" + build_question_with_options(q_text, options)
 
@@ -241,17 +146,20 @@ def run_eval(
         if gt_sub:
             gt_blob += f"\n과목: {gt_sub}"
 
+        pred_idx = parse_idx_from_text(gen_ans)
+
         rows.append(EvalRow(
             question=q_full,
-            contexts=retrieved_problems,
+            contexts=ctx_texts,
             answer=f"정답: {gen_ans}) {gen_text}\n풀이: {gen_exp}\n과목: {gen_sub}".strip(),
             ground_truth=gt_blob,
             metadata={
+                "subject": gt_sub,
                 "options": options,
                 "gt_answer_idx": gt_idx,
-                "gt_sub": gt_sub,
-                "pred_idx": pred_idx,
-                "gen_sub": gen_sub,
+                "gt_answer_text": gt_text,
+                "pred_answer_idx": pred_idx,
+                "generated_subject": gen_sub,
                 "validated": final_state.get("validated", False),
             }
         ))
@@ -263,15 +171,14 @@ def run_eval(
             "options": json.dumps(options, ensure_ascii=False),
             "gt_answer_idx": gt_idx,
             "gen_answer_idx": pred_idx,
-            "gt_sub": gt_sub,
+            "subject": gt_sub,
             "gen_subject": gen_sub,
             "gen_explanation": gen_exp,
-            "retrieved_problems": [doc.page_content[:500] for doc in retrieved_problems],
-            "retrieved_concepts": [doc.page_content[:500] for doc in retrieved_concepts],
-            "contexts": ctx_texts
+            "context": ctx_texts
         })
 
         print(f"[{i}/{len(items)}] 완료 — GT:{gt_idx} / Pred:{pred_idx}")
+
 
     # 빈 rows 방지
     if not rows:
@@ -286,7 +193,6 @@ def run_eval(
         "metadata": r.metadata,
     } for r in rows])
 
-    os.makedirs(out_dir, exist_ok=True)
     df_path = os.path.join(out_dir, "qa_eval_rows.parquet")
     df.to_parquet(df_path, index=False)
     print(f"[저장] QA 행 저장 완료 → {df_path}")
@@ -300,28 +206,17 @@ def run_eval(
     # ---------- RAGAS 평가 ----------
     try:
         print(f"[RAGAS] using llm={type(llm).__name__}, embeddings={type(emb).__name__}")
-        df_eval = df[
-            df["contexts"].apply(lambda x: isinstance(x, list) and len(x) > 0) &
-            df["ground_truths"].apply(lambda x: isinstance(x, list) and any(bool(t.strip()) for t in x))
-        ].copy()
-
-        if df_eval.empty:
-            print("[경고] 평가 가능한 행이 없습니다. (contexts 혹은 ground_truths 비어있음)")
-            # 저장만 하고 종료
-            df.to_parquet(df_path, index=False)
-            golden_df.to_csv(golden_csv, index=False, encoding="utf-8-sig")
-            return
-        ds = Dataset.from_pandas(df_eval)
+        ds = Dataset.from_pandas(df)
         ragas_result = evaluate(
             ds,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
             llm=llm,
             embeddings=emb,
         )
-        ragas_scores = pd.DataFrame(ragas_result.scores)
         print("[RAGAS 평가 완료]")
         print("RAGAS mean:", ragas_result)
 
+        ragas_scores = pd.DataFrame(ragas_result.scores)
     except Exception as e:
         print("[오류] RAGAS 평가 실패:", repr(e))
         # 빈 DataFrame으로라도 파일 생성
@@ -338,7 +233,7 @@ def run_eval(
             if not isinstance(m, dict):
                 continue
             gt = m.get("gt_answer_idx")
-            pr = m.get("pred_idx")   # ← 여기!
+            pr = m.get("pred_answer_idx")
             if gt is None or pr is None:
                 continue
             tot += 1
@@ -355,76 +250,13 @@ def run_eval(
     leaderboard.to_csv(lb_csv, index=False)
     print(f"[저장] Leaderboard 저장 완료 → {lb_csv}")
 
-    def make_plots_for_run(out_dir: str):
-        ragas_csv = os.path.join(out_dir, "ragas_scores.csv")
-        if not os.path.exists(ragas_csv):
-            print(f"[시각화] {ragas_csv} 없음 → 스킵")
-            return
-
-        import pandas as pd
-        df = pd.read_csv(ragas_csv)
-        metrics = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
-        for m in metrics:
-            if m not in df.columns:
-                df[m] = np.nan
-
-        # (A) 평균 막대 그래프
-        means = df[metrics].mean().fillna(0.0)
-        plt.figure()
-        plt.bar(np.arange(len(metrics)), means.values, width=0.6)
-        plt.xticks(np.arange(len(metrics)), metrics, rotation=20, ha="right")
-        plt.ylim(0, 1.0)
-        plt.ylabel("Mean score")
-        plt.title("RAGAS mean scores")
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "ragas_means_bar.png"), dpi=150)
-        plt.close()
-
-        # (B) 문항별 라인 그래프
-        plt.figure()
-        x = np.arange(1, len(df) + 1)
-        for m in metrics:
-            plt.plot(x, df[m].values, marker="o", linestyle="-", label=m)
-        plt.ylim(0, 1.0)
-        plt.xlabel("Question index")
-        plt.ylabel("Score")
-        plt.title("Per-question RAGAS scores")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "per_question_scores.png"), dpi=150)
-        plt.close()
-
-        # (C) 히트맵 (문항 × 지표)
-        heat = df[metrics].to_numpy(dtype=float)
-        plt.figure()
-        im = plt.imshow(heat, aspect="auto", vmin=0.0, vmax=1.0)
-        plt.colorbar(im, fraction=0.046, pad=0.04)
-        plt.yticks(np.arange(len(df)), [str(i) for i in x])
-        plt.xticks(np.arange(len(metrics)), metrics, rotation=20, ha="right")
-        plt.title("RAGAS scores heatmap")
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "ragas_heatmap.png"), dpi=150)
-        plt.close()
-
-        print(f"[시각화] 저장 완료 → {out_dir}")
-
-    # run_eval()의 마지막 줄 근처에 추가 호출
-    make_plots_for_run(out_dir)
-
-
 # ---------- 이미 생성된 리더보드가 있으면 건너뛰기 ----------
 def already_done(out_dir: str) -> bool:
     lb_csv = os.path.join(out_dir, "agent_eval_leaderboard.csv")
+    # 리더보드만 있어도 스킵 (요구사항)
     return os.path.exists(lb_csv)
 
 if __name__ == "__main__":
-    # 🔌 평가 시작 전 한 번만 두 컬렉션 연결
-    MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
-    MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
-
-    vectorstore_p = connect_vectorstore("problems", MILVUS_HOST, MILVUS_PORT)
-    vectorstore_c = connect_vectorstore("concepts", MILVUS_HOST, MILVUS_PORT)
-
     test_json_dir = "./teacher/exam/test_parsed_exam_json"
     json_files = glob.glob(os.path.join(test_json_dir, "*.json"))
     print(f"'{test_json_dir}' 폴더 내 {len(json_files)}개 JSON 파일 발견")
@@ -442,12 +274,7 @@ if __name__ == "__main__":
             continue
 
         print(f" - 실행 시작 (out_dir: {out_dir})")
-        run_eval(
-            test_json_path=json_file,
-            out_dir=out_dir,
-            vectorstore_p=vectorstore_p,
-            vectorstore_c=vectorstore_c,
-        )
+        run_eval(test_json_path=json_file, out_dir=out_dir)
         print(f"=== '{json_file}' 처리 완료 ===")
         done += 1
 

@@ -434,20 +434,61 @@ class MainOrchestrator:
         if "error" in teacher_result:
             return f"❌ Teacher 실행 오류: {teacher_result['error']}"
         
-        llm_response = teacher_result.get("llm_response", "")
+        # 1. llm_response가 있으면 우선적으로 사용 (가장 자연스러운 응답)
+        llm_response = teacher_result.get("llm_response", "").strip()
         if llm_response:
+            print(f"📝 Teacher llm_response 사용: {llm_response[:100]}...")
             return llm_response
         
-        # 문제 생성 결과가 있는 경우
+        # 2. llm_response가 없으면 intent와 데이터에 따라 적절한 메시지 생성
+        intent = teacher_result.get("intent", "").lower()
         shared_data = teacher_result.get("shared", {})
         questions = shared_data.get("question", [])
+        answers = shared_data.get("answer", [])
+        explanations = shared_data.get("explanation", [])
         
-        if questions:
+        print(f"📝 Teacher intent 기반 응답 생성: {intent}")
+        
+        if intent == "generate" and questions:
             response = "✅ 문제가 생성되었습니다!\n\n"
             for i, question in enumerate(questions):
                 if question:
                     response += f"문제 {i+1}: {question[:100]}...\n"
             response += "\n답변을 입력하려면 '정답은 1,2,3' 형식으로 입력하세요."
+            return response
+        
+        elif intent == "solution" and questions and answers:
+            response = "✅ 문제 풀이가 완료되었습니다!\n\n"
+            for i, (question, answer, explanation) in enumerate(zip(questions, answers, explanations)):
+                if question and answer:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
+                    response += f"정답: {answer}\n"
+                    if explanation:
+                        response += f"해설: {explanation[:100]}...\n"
+                    response += "\n"
+            return response
+        
+        elif intent == "score" and questions and answers:
+            response = "✅ 채점이 완료되었습니다!\n\n"
+            for i, (question, answer) in enumerate(zip(questions, answers)):
+                if question and answer:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
+                    response += f"정답: {answer}\n\n"
+            return response
+        
+        elif intent == "analyze" and questions:
+            response = "✅ 문제 분석이 완료되었습니다!\n\n"
+            for i, question in enumerate(questions):
+                if question:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
+            return response
+        
+        elif questions:
+            # intent가 명확하지 않지만 문제가 있는 경우
+            response = "✅ Teacher 서비스가 실행되었습니다!\n\n"
+            for i, question in enumerate(questions):
+                if question:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
             return response
         
         return "✅ Teacher 서비스가 실행되었습니다."
@@ -457,10 +498,14 @@ class MainOrchestrator:
         if "error" in farmer_result:
             return f"❌ Farmer 실행 오류: {farmer_result['error']}"
         
-        output = farmer_result.get("output", "")
+        # 1. output이 있으면 우선적으로 사용 (가장 자연스러운 응답)
+        output = farmer_result.get("output", "").strip()
         if output:
+            print(f"📝 Farmer output 사용: {output[:100]}...")
             return output
         
+        # 2. output이 없으면 기본 메시지
+        print("📝 Farmer 기본 응답 생성")
         return "✅ Farmer 서비스가 실행되었습니다."
     
     # Redis 관련 메서드들

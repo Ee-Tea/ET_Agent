@@ -783,3 +783,139 @@ class RedisLangGraphMemory:
             "options": options,
             "subject": subjects
         }
+    
+    # --------------------------
+    # 10) 서비스별 숏텀 메모리 관리 메서드들
+    def save_service_short_term_data(self, service: str, data: Dict[str, Any]) -> None:
+        """서비스별 숏텀 메모리 데이터 저장"""
+        try:
+            key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+            self.redis.setex(key, 3600, json.dumps(data, ensure_ascii=False))  # 1시간 TTL
+            print(f"💾 {service} 서비스 숏텀 메모리 저장 완료: {key}")
+        except Exception as e:
+            print(f"❌ {service} 서비스 숏텀 메모리 저장 실패: {e}")
+    
+    def load_service_short_term_data(self, service: str) -> Dict[str, Any]:
+        """서비스별 숏텀 메모리 데이터 로드"""
+        try:
+            key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+            data = self.redis.get(key)
+            if data:
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                return json.loads(data)
+            return {}
+        except Exception as e:
+            print(f"❌ {service} 서비스 숏텀 메모리 로드 실패: {e}")
+            return {}
+    
+
+    
+    def save_chat_history(self, user_query: str, response: str) -> None:
+        """채팅 히스토리 저장"""
+        try:
+            key = f"chat_history:{self.user_id}:{self.chat_id}"
+            chat_entry = {
+                "user_query": user_query,
+                "response": response,
+                "timestamp": self._now_ts()
+            }
+            
+            # 기존 히스토리 로드
+            existing_history = self.redis.lrange(key, 0, -1)
+            history = []
+            for entry in existing_history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                history.append(json.loads(entry))
+            
+            # 새 엔트리 추가
+            history.append(chat_entry)
+            
+            # 최근 50개만 유지
+            if len(history) > 50:
+                history = history[-50:]
+            
+            # Redis에 저장
+            self.redis.delete(key)  # 기존 데이터 삭제
+            for entry in history:
+                self.redis.rpush(key, json.dumps(entry, ensure_ascii=False))
+            
+            self.redis.expire(key, 3600)  # 1시간 TTL
+            
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 저장 실패: {e}")
+    
+    def get_chat_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """채팅 히스토리 조회"""
+        try:
+            key = f"chat_history:{self.user_id}:{self.chat_id}"
+            history = self.redis.lrange(key, -limit, -1)  # 최근 N개
+            
+            result = []
+            for entry in history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                result.append(json.loads(entry))
+            
+            return result
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 조회 실패: {e}")
+            return []
+    
+    def clear_short_term_memory(self, service: Optional[str] = None) -> None:
+        """숏텀 메모리 삭제 (특정 서비스 또는 전체)"""
+        try:
+            if service:
+                # 특정 서비스만 삭제
+                key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+                self.redis.delete(key)
+                print(f"🗑️ {service} 서비스 숏텀 메모리 삭제 완료")
+            else:
+                # 전체 숏텀 메모리 삭제
+                pattern = f"short_term:{self.user_id}:{self.chat_id}:*"
+                keys = self.redis.keys(pattern)
+                if keys:
+                    self.redis.delete(*keys)
+                    print(f"🗑️ 전체 숏텀 메모리 삭제 완료: {len(keys)}개 키")
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 삭제 실패: {e}")
+    
+    def get_short_term_memory_stats(self) -> Dict[str, Any]:
+        """숏텀 메모리 통계 조회"""
+        try:
+            stats = {
+                "teacher": {},
+                "farmer": {},
+                "chat_history": {}
+            }
+            
+            # Teacher 데이터
+            teacher_data = self.load_service_short_term_data("teacher")
+            if teacher_data:
+                stats["teacher"] = {
+                    "questions_count": len(teacher_data.get("questions", [])),
+                    "added_count": teacher_data.get("added_count", 0),
+                    "timestamp": teacher_data.get("timestamp", 0)
+                }
+            
+            # Farmer 데이터
+            farmer_data = self.load_service_short_term_data("farmer")
+            if farmer_data:
+                stats["farmer"] = {
+                    "has_selected_crop": bool(farmer_data.get("selected_crop")),
+                    "has_crop_info": bool(farmer_data.get("crop_info")),
+                    "timestamp": farmer_data.get("timestamp", 0)
+                }
+            
+            # 채팅 히스토리
+            chat_history = self.get_chat_history(limit=100)
+            stats["chat_history"] = {
+                "count": len(chat_history),
+                "latest_timestamp": chat_history[-1].get("timestamp", 0) if chat_history else 0
+            }
+            
+            return stats
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 통계 조회 실패: {e}")
+            return {}

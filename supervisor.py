@@ -6,6 +6,7 @@ LangGraph 기반 Main Orchestrator
 import os
 import json
 import hashlib
+import time
 from typing import Dict, List, Any, Optional, TypedDict
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
@@ -75,16 +76,22 @@ class MainOrchestrator:
             # 락된 서비스 확인
             locked_service = self.get_locked_service()
             
+            # 숏텀 메모리에서 서비스별 데이터 로드
+            short_term_data = self.load_short_term_memory()
+            
             state["existing_questions"] = existing_questions
             state["locked_service"] = locked_service
+            state["short_term_data"] = short_term_data
             
             print(f"📚 {len(existing_questions)}개 기존 문제 로드")
             print(f"🔒 락된 서비스: {locked_service}")
+            print(f"📝 숏텀 메모리 데이터: {short_term_data}")
             
         except Exception as e:
             print(f"❌ 메모리 로드 실패: {e}")
             state["existing_questions"] = []
             state["locked_service"] = None
+            state["short_term_data"] = {}
         
         return state
     
@@ -198,10 +205,19 @@ class MainOrchestrator:
         print("🌾 Farmer 서비스 실행 중...")
         
         try:
+            # 숏텀 메모리에서 Farmer 데이터 로드
+            short_term_data = state.get("short_term_data", {})
+            farmer_data = short_term_data.get("farmer", {})
+            
+            # Farmer 상태 준비 (기존 데이터 + 숏텀 메모리 데이터)
+            farmer_state = {
+                "query": state["user_query"],
+                "selected_crop": farmer_data.get("selected_crop", ""),
+                "crop_info": farmer_data.get("crop_info", "")
+            }
+            
             # Farmer 그래프 실행
-            result = self.farmer.invoke({
-                "query": state["user_query"]
-            })
+            result = self.farmer.invoke(farmer_state)
             
             state["farmer_result"] = result
             print("🌾 Farmer 실행 완료")
@@ -217,7 +233,11 @@ class MainOrchestrator:
         print("👨‍🏫 Teacher 서비스 실행 중...")
         
         try:
-            # Teacher 상태 준비
+            # 숏텀 메모리에서 Teacher 데이터 로드
+            short_term_data = state.get("short_term_data", {})
+            teacher_data = short_term_data.get("teacher", {})
+            
+            # Teacher 상태 준비 (기존 문제 + 숏텀 메모리 데이터)
             teacher_state = {
                 "user_query": state["user_query"],
                 "intent": self._determine_teacher_intent(state["user_query"]),
@@ -226,7 +246,8 @@ class MainOrchestrator:
                     "options": [q.get("options", []) for q in state["existing_questions"]],
                     "answer": [q.get("answer", "") for q in state["existing_questions"]],
                     "explanation": [q.get("explanation", "") for q in state["existing_questions"]],
-                    "subject": [q.get("subject", "") for q in state["existing_questions"]]
+                    "subject": [q.get("subject", "") for q in state["existing_questions"]],
+                    "added_count": teacher_data.get("added_count", 0)  # 최근 추가된 문항 수
                 },
                 "routing": {
                     "output_mode": "pdf"  # 비대화형 모드
@@ -287,10 +308,18 @@ class MainOrchestrator:
         """9. 메모리 데이터 저장"""
         print("💾 메모리 데이터 저장 중...")
         
-        # Farmer 결과가 있으면 저장 (필요시)
-        if state["farmer_result"] and "error" not in state["farmer_result"]:
-            # Farmer 결과 저장 로직 (필요시 구현)
-            pass
+        try:
+            # 서비스별 결과를 숏텀 메모리에 저장
+            if state["classified_service"] == "teacher" and state["teacher_result"]:
+                self.save_teacher_short_term_data_from_state(state["teacher_result"])
+            elif state["classified_service"] == "farmer" and state["farmer_result"]:
+                self.save_farmer_short_term_data_from_state(state["farmer_result"])
+            
+            # 채팅 히스토리 저장
+            self.save_chat_history(state["user_query"], state["final_response"])
+            
+        except Exception as e:
+            print(f"❌ 메모리 저장 실패: {e}")
         
         return state
     
@@ -542,6 +571,128 @@ class MainOrchestrator:
             return questions
         except Exception as e:
             print(f"❌ 문제 조회 실패: {e}")
+            return []
+    
+    # 숏텀 메모리 관련 메서드들
+    def load_short_term_memory(self) -> Dict[str, Any]:
+        """숏텀 메모리에서 서비스별 데이터 로드"""
+        try:
+            key = f"short_term:{self.session_key}"
+            data = self.memory.redis.get(key)
+            if data:
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                return json.loads(data)
+            return {}
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 로드 실패: {e}")
+            return {}
+    
+    def save_short_term_memory(self, data: Dict[str, Any]) -> None:
+        """숏텀 메모리에 서비스별 데이터 저장"""
+        try:
+            key = f"short_term:{self.session_key}"
+            self.memory.redis.setex(key, 3600, json.dumps(data, ensure_ascii=False))  # 1시간 TTL
+            print(f"💾 숏텀 메모리 저장 완료: {key}")
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 저장 실패: {e}")
+    
+    def save_teacher_short_term_data_from_state(self, teacher_result: Dict[str, Any]) -> None:
+        """Teacher 서비스 결과를 숏텀 메모리에 저장 (상태에서 직접 추출)"""
+        try:
+            shared_data = teacher_result.get("shared", {})
+            
+            # 기존 숏텀 메모리 데이터 로드
+            short_term_data = self.load_short_term_memory()
+            
+            # Teacher 데이터 업데이트 (added_count는 shared에서 직접 가져옴)
+            teacher_data = {
+                "questions": shared_data.get("question", []),
+                "options": shared_data.get("options", []),
+                "answer": shared_data.get("answer", []),
+                "explanation": shared_data.get("explanation", []),
+                "subject": shared_data.get("subject", []),
+                "added_count": shared_data.get("added_count", 0)  # shared에서 직접 가져옴
+            }
+            
+            short_term_data["teacher"] = teacher_data
+            self.save_short_term_memory(short_term_data)
+            
+            print(f"💾 Teacher 숏텀 메모리 저장: {len(teacher_data['questions'])}개 문제, added_count={teacher_data['added_count']}")
+            
+        except Exception as e:
+            print(f"❌ Teacher 숏텀 메모리 저장 실패: {e}")
+    
+    def save_farmer_short_term_data_from_state(self, farmer_result: Dict[str, Any]) -> None:
+        """Farmer 서비스 결과를 숏텀 메모리에 저장 (상태에서 직접 추출)"""
+        try:
+            # 기존 숏텀 메모리 데이터 로드
+            short_term_data = self.load_short_term_memory()
+            
+            # Farmer 데이터 업데이트
+            farmer_data = {
+                "selected_crop": farmer_result.get("selected_crop", ""),
+                "crop_info": farmer_result.get("crop_info", "")
+            }
+            
+            short_term_data["farmer"] = farmer_data
+            self.save_short_term_memory(short_term_data)
+            
+            print(f"💾 Farmer 숏텀 메모리 저장: selected_crop={farmer_data['selected_crop']}, crop_info={farmer_data['crop_info'][:100]}...")
+            
+        except Exception as e:
+            print(f"❌ Farmer 숏텀 메모리 저장 실패: {e}")
+    
+    def save_chat_history(self, user_query: str, response: str) -> None:
+        """채팅 히스토리 저장"""
+        try:
+            key = f"chat_history:{self.session_key}"
+            chat_entry = {
+                "user_query": user_query,
+                "response": response,
+                "timestamp": int(time.time())
+            }
+            
+            # 기존 히스토리 로드
+            existing_history = self.memory.redis.lrange(key, 0, -1)
+            history = []
+            for entry in existing_history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                history.append(json.loads(entry))
+            
+            # 새 엔트리 추가
+            history.append(chat_entry)
+            
+            # 최근 50개만 유지
+            if len(history) > 50:
+                history = history[-50:]
+            
+            # Redis에 저장
+            self.memory.redis.delete(key)  # 기존 데이터 삭제
+            for entry in history:
+                self.memory.redis.rpush(key, json.dumps(entry, ensure_ascii=False))
+            
+            self.memory.redis.expire(key, 3600)  # 1시간 TTL
+            
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 저장 실패: {e}")
+    
+    def get_chat_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """채팅 히스토리 조회"""
+        try:
+            key = f"chat_history:{self.session_key}"
+            history = self.memory.redis.lrange(key, -limit, -1)  # 최근 N개
+            
+            result = []
+            for entry in history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                result.append(json.loads(entry))
+            
+            return result
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 조회 실패: {e}")
             return []
 
 

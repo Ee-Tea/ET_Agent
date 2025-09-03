@@ -1021,7 +1021,7 @@ if os.path.exists(MID_REGIONS_CSV):
     MID_ALL_MAP = MID_load_all_from_csv(MID_REGIONS_CSV)
     MID_LAND_MAP = MID_split_region_only(MID_ALL_MAP)
     REGION_ALIASES = MID_build_alias_map(MID_LAND_MAP)
-    print(f"✅ 중기 CSV 로드: 전체 {len(MID_ALL_MAP)}개 / 권역 {len(MID_LAND_MAP)}개 (파일: {MID_REGIONS_CSV})")
+    print(f"✅ 권역 CSV 로드: 전체 {len(MID_ALL_MAP)}개 / 권역 {len(MID_LAND_MAP)}개 (파일: {MID_REGIONS_CSV})")
 else:
     print("⚠️ 중기 CSV 파일이 없어 중기 권역 매핑을 건너뜁니다. (MID_REGIONS_CSV)")
 

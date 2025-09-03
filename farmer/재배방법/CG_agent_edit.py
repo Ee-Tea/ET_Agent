@@ -93,10 +93,13 @@ VALIDATION_PROMPT = """
 
 tavily_tool = TavilySearchResults(max_results=5, api_key=TAVILY_API_KEY)
 
+# 전역 retriever 변수 (직렬화 문제 해결을 위해)
+_global_retriever = None
+
 # --- 3. LangGraph 상태 정의 ---
 class GraphState(TypedDict):
     question: Optional[str]
-    retriever: Optional[EnsembleRetriever]
+    # retriever: Optional[EnsembleRetriever]  # 직렬화 문제로 제거 - 전역 변수로 관리
     answer: Optional[str]
     topics: Optional[List[str]]
     db_context: Optional[str]
@@ -106,6 +109,13 @@ class GraphState(TypedDict):
     is_good_answer: Optional[str]
 
 # --- 4. 핵심 기능 함수 정의 ---
+def get_retriever() -> EnsembleRetriever:
+    """전역 retriever를 가져오거나 새로 생성합니다."""
+    global _global_retriever
+    if _global_retriever is None:
+        _global_retriever = create_retriever()
+    return _global_retriever
+
 def create_retriever() -> EnsembleRetriever:
     """두 개의 Milvus 컬렉션에 연결하여 EnsembleRetriever를 생성합니다."""
     print("---기능: Milvus 컬렉션 연결 및 EnsembleRetriever 생성 시작---")
@@ -152,11 +162,11 @@ def retrieve_relevant_chunks(retriever: EnsembleRetriever, question: str) -> Dic
 
 # --- 5. LangGraph 노드 함수 정의 ---
 def load_and_merge_dbs_node(state: GraphState) -> Dict[str, Any]:
-    """Milvus의 EnsembleRetriever를 생성합니다."""
-    print("\n---노드: Milvus EnsembleRetriever 생성 실행---")
-    retriever = create_retriever()
+    """Milvus의 EnsembleRetriever를 초기화합니다."""
+    print("\n---노드: Milvus EnsembleRetriever 초기화 실행---")
+    retriever = get_retriever()  # 전역 retriever 사용
     print("Milvus EnsembleRetriever 로드 완료.\n")
-    return {**state, "retriever": retriever}
+    return state  # retriever를 상태에 저장하지 않음
 
 def multi_classify_question_node(state: GraphState) -> Dict[str, Any]:
     print("\n---노드: 복합 질문 분류 실행---")
@@ -179,7 +189,8 @@ def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any
     # 1. DB 검색 (농작물 재배 관련)
     if "crop_growth" in topics:
         print("🔍 '농작물 재배' 주제 관련 DB 정보 검색 중...")
-        retrieval_result = retrieve_relevant_chunks(state["retriever"], question)
+        retriever = get_retriever()  # 전역 retriever 사용
+        retrieval_result = retrieve_relevant_chunks(retriever, question)
         db_context = retrieval_result["context"]
         db_sources = retrieval_result["db_sources"]
         print("✅ DB 검색 완료.")
@@ -259,11 +270,8 @@ def validate_and_regenerate_node(state: GraphState) -> Dict[str, Any]:
 # --- 6. LangGraph 워크플로우 빌드 및 컴파일 ---
 def build_initial_setup_graph():
     """초기 문서 로딩 및 벡터스토어 구축을 위한 그래프를 빌드합니다."""
-    initial_builder = StateGraph(GraphState)
-    initial_builder.add_node("load_and_merge_dbs", load_and_merge_dbs_node)
-    initial_builder.set_entry_point("load_and_merge_dbs")
-    initial_builder.add_edge("load_and_merge_dbs", END)
-    return initial_builder.compile()
+    # 더 이상 필요하지 않음 - 전역 retriever 사용
+    pass
 
 def build_query_graph():
     """질문 분류, RAG, 웹 검색을 통합한 메인 질의 그래프를 빌드합니다."""
@@ -350,17 +358,110 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
         # 오류 발생 시에도 일관된 DataFrame 구조를 반환
         return pd.DataFrame({'faithfulness': [0.0], 'answer_relevancy': [0.0], 'context_utilization': [0.0], 'context_precision': [0.0]})
 
-# --- 7. 메인 실행 로직 ---
+# --- 7. OchestratorTest.py와 호환되는 run 함수 ---
+def run(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    OchestratorTest.py에서 호출되는 메인 실행 함수
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+               - 기타 필요한 상태 정보들
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 응답
+            - status: 실행 상태
+            - error: 오류 정보 (있는 경우)
+    """
+    try:
+        # 입력 검증
+        if not state or not state.get("query"):
+            return {
+                "agent_answer": "질문이 제공되지 않았습니다.",
+                "status": "error",
+                "error": "query 필드가 없습니다."
+            }
+        
+        query = state["query"]
+        print(f"\n=== 🌱 작물재배_agent 실행 시작 ===")
+        print(f"질문: {query}")
+        
+        # Milvus EnsembleRetriever 초기화
+        print("Milvus EnsembleRetriever 초기화 중...")
+        try:
+            retriever = get_retriever()  # 전역 retriever 사용
+            print("✅ Milvus EnsembleRetriever 초기화 완료")
+        except Exception as e:
+            return {
+                "agent_answer": f"데이터베이스 연결에 실패했습니다: {e}",
+                "status": "error",
+                "error": f"Milvus EnsembleRetriever 초기화 실패: {e}"
+            }
+        
+        # RAG 애플리케이션 빌드
+        rag_app = build_query_graph()
+        
+        # 답변 생성 (최대 3회 시도)
+        MAX_ATTEMPTS = 3
+        attempts = 0
+        final_response = None
+        
+        while attempts < MAX_ATTEMPTS:
+            print(f"답변 생성 중... (시도 {attempts + 1}/{MAX_ATTEMPTS})")
+            try:
+                current_state = {
+                    "question": query, 
+                    "attempts": attempts
+                }
+                final_state = rag_app.invoke(current_state)
+                
+                # 최종 답변이 존재하면 루프 종료
+                if final_state.get('answer'):
+                    final_response = final_state['answer']
+                    print("✅ 답변 생성 완료")
+                    break
+                else:
+                    attempts += 1
+                    print(f"❗ 답변 품질이 낮습니다. 재시도합니다.")
+                    
+            except Exception as e:
+                print(f"❌ 답변 생성 중 오류: {e}")
+                attempts += 1
+                if attempts >= MAX_ATTEMPTS:
+                    final_response = f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {e}"
+        
+        # 최종 응답 반환
+        if final_response:
+            print(f"=== 🎯 작물재배_agent 실행 완료 ===")
+            return {
+                "agent_answer": final_response,
+                "status": "success",
+                "error": None
+            }
+        else:
+            return {
+                "agent_answer": "죄송합니다. 답변을 생성하기 어렵습니다. 다시 시도해주세요.",
+                "status": "error",
+                "error": "최대 시도 횟수 초과"
+            }
+            
+    except Exception as e:
+        print(f"❌ 작물재배_agent 실행 중 치명적 오류: {e}")
+        return {
+            "agent_answer": f"작물재배_agent 실행 중 오류가 발생했습니다: {e}",
+            "status": "error",
+            "error": str(e)
+        }
+
+# --- 8. 메인 실행 로직 (독립 실행용) ---
 if __name__ == "__main__":
     print("🌱 농작물 챗봇 에이전트 시작...")
     print("--------------------------------------------------")
     
-    print("챗봇 시스템을 준비하는 중입니다... (Milvus EnsembleRetriever 생성)")
-    setup_graph = build_initial_setup_graph()
-    initial_state = {"question": "setup"}
+    print("챗봇 시스템을 준비하는 중입니다... (Milvus EnsembleRetriever 초기화)")
     try:
-        setup_result = setup_graph.invoke(initial_state)
-        retriever = setup_result.get("retriever")
+        retriever = get_retriever()  # 전역 retriever 초기화
     except Exception as e:
         print(f"오류가 발생했습니다: {e}")
         exit()
@@ -385,7 +486,7 @@ if __name__ == "__main__":
         while attempts < MAX_ATTEMPTS:
             print("답변을 생성하는 중...")
             try:
-                current_state = {"question": prompt, "retriever": retriever, "attempts": attempts}
+                current_state = {"question": prompt, "attempts": attempts}
                 final_state = rag_app.invoke(current_state)
                 
                 # 최종 답변이 존재하면 바로 루프를 종료합니다.

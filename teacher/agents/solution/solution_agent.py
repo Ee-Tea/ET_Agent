@@ -8,6 +8,7 @@ from langgraph.graph import StateGraph, END
 from langchain_huggingface import HuggingFaceEmbeddings
 import json, re
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 from ..base_agent import BaseAgent
 from langchain_community.retrievers import BM25Retriever
 import asyncio, sys
@@ -533,7 +534,6 @@ class SolutionAgent(BaseAgent):
                 "force_store": "store",
             },
         )
-
         return graph.compile()
     
     #----------------------------------------nodes------------------------------------------------------
@@ -1546,7 +1546,6 @@ class SolutionAgent(BaseAgent):
         
         initial_state: SolutionState = {
             "user_input_txt": user_input_txt,
-
             "user_problem": user_problem,
             "user_problem_options": user_problem_options,
 
@@ -1597,7 +1596,6 @@ class SolutionAgent(BaseAgent):
         else:
             print("   ⚠️ results가 비어있습니다!")
             print(f"   - final_state 내용: {final_state}")
-        
         return final_state
 
 

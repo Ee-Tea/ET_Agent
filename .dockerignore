@@ -1,0 +1,52 @@
+# Exclude virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git
+.git/
+.gitignore
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# Local data & artifacts not needed in image
+volumes/
+data/redis/
+volumes/milvus/
+volumes/minio/
+volumes/etcd/
+logs/
+*.log
+
+# Large model or cache directories
+C:/temp/huggingface_cache/
+C/temp/huggingface_cache/
+**/huggingface_cache/
+
+# Test outputs
+*.png
+*.pdf
+
+# Local env files (keep .env if you want to COPY explicitly)
+!.env.example
+
+# Node / frontend (if any)
+node_modules/
+
+# Build artifacts
+*.egg-info/
+/dist/
+/build/
+
+# OS
+.DS_Store
+Thumbs.db

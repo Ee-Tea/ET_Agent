@@ -115,12 +115,48 @@ class Farmer:
     
     def load_state(self, state: RouterState) -> RouterState:
         """그래프 시작 시 메모리에서 상태를 불러와 state에 병합"""
-        if (state.get("session") or {}).get("loaded"):
+        # 세션 정보 확인
+        session_info = state.get("session", {})
+        
+        # 새로운 질문인지 확인 (input 노드에서 설정됨)
+        if session_info.get("new_question", False):
+            # 새로운 질문인 경우: 이전 질문 관련 상태만 초기화, 메모리는 유지
+            print("[상태 초기화] 새로운 질문 - 이전 질문 상태만 초기화")
+            
+            # 질문 관련 상태만 초기화 (메모리/세션 정보는 유지)
+            state["query"] = []
+            state["selected_agents"] = []
+            state["question_parts"] = {}
+            state["execution_order"] = []
+            state["crop_info"] = []
+            state["selected_crop"] = []
+            state["agent_results"] = {}
+            state["output"] = []
+            state["routing"] = {}
+            state["error_info"] = {}
+            
+            # 세션 정보 업데이트
+            state["session"]["loaded"] = True
+            state["session"]["new_question"] = False  # 플래그 리셋
+            
             return state
-        loaded = self.memory.load(state)
-        loaded.setdefault("session", {})
-        loaded["session"]["loaded"] = True
-        return loaded
+        else:
+            # 기존 로직: 메모리에서 상태 불러오기 (숏텀 메모리 활용)
+            if session_info.get("loaded"):
+                return state
+            
+            try:
+                loaded = self.memory.load(state)
+                loaded.setdefault("session", {})
+                loaded["session"]["loaded"] = True
+                print("[메모리 로드] 이전 상태 불러오기 완료")
+                return loaded
+            except Exception as e:
+                print(f"⚠️ 메모리 로드 실패: {e}")
+                # 메모리 로드 실패 시 기본 상태로 시작
+                state.setdefault("session", {})
+                state["session"]["loaded"] = True
+                return state
     
     def persist_state(self, state: RouterState) -> RouterState:
         """그래프 리프 종료 후 메모리에 반영"""
@@ -190,10 +226,10 @@ class Farmer:
     
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
-        from 작물추천.crop65pdfllm import run as crop_recommend_run
-        from 재배방법.crop_overall import run as crop_cultivation_run
+        from 작물추천.crop_recommendation_agent import run as crop_recommend_run
+        from 재배방법.CG_agent_edit import run as crop_cultivation_run
         from 재해대응.DisasterAgent import run as disaster_run
-        from 재해대응.longpluslg_complete_optimized import run as weather_run
+        from WeatherAgent import run as weather_run
         from sales.SalesAgent import run as market_run
         
         self.agent_functions = {
@@ -512,18 +548,14 @@ class Farmer:
             # 유효한 입력인 경우 루프 종료
             break
 
-        # 모든 상태 초기화
-        state["crop_info"] = []
-        state["selected_crop"] = []
-        state["selected_agents"] = []
-        state["question_parts"] = {}
-        state["execution_order"] = []
-        state["agent_results"] = {} # 에이전트별 결과 딕셔너리 초기화
-        state["output"] = []
-
-        # 유효한 입력인 경우 상태에 저장하고 다음 단계로 (리스트로 저장)
+        # 새로운 질문 플래그 설정 (load_state에서 이 플래그를 확인하여 상태 초기화)
+        state.setdefault("session", {})
+        state["session"]["new_question"] = True
+        
+        # 새로운 질문 저장
         state["query"] = [user_input]
         print(f"\n[질문] {user_input}")
+        print(f"[새로운 질문 처리 시작]")
         
         return state
 

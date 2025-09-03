@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import uuid
+import json
 from typing import Any, Dict, List, Optional, TypedDict, NotRequired
 
 from langgraph.graph import StateGraph, START, END
@@ -34,6 +35,9 @@ class MainReState(TypedDict):
     artifacts: NotRequired[Dict]
     routing: NotRequired[Dict]
     session_data: NotRequired[Dict]
+    # 숏텀메모리 관련
+    saved_questions: NotRequired[List[Dict[str, Any]]]
+    loaded_questions: NotRequired[List[Dict[str, Any]]]
 
 
 class MainRe:
@@ -73,6 +77,9 @@ class MainRe:
         self.teacher = Teacher(user_id=self.user_id, service="teacher", chat_id=self.chat_id, checkpointer=self.checkpointer)
         self.farmer = Farmer(user_id=self.user_id, service="farmer", chat_id=self.chat_id)
 
+        # 숏텀메모리 초기화
+        self.short_term_memory = self._init_short_term_memory()
+
         # compile combined graph
         self.graph = self._create_graph()
         self.app = self.graph.compile(checkpointer=self.checkpointer)
@@ -94,9 +101,184 @@ class MainRe:
                 print(f"⚠️ Redis 재생성 실패 → 기존 checkpointer 유지: {e}")
         self.teacher = Teacher(user_id=self.user_id, service="teacher", chat_id=self.chat_id, checkpointer=self.checkpointer)
         self.farmer = Farmer(user_id=self.user_id, service="farmer", chat_id=self.chat_id)
+        
+        # 숏텀메모리 재초기화
+        self.short_term_memory = self._init_short_term_memory()
+        
         self.graph = self._create_graph()
         self.app = self.graph.compile(checkpointer=self.checkpointer)
         print(f"🔁 앱 리빌드: thread_id={self.thread_id}")
+
+    def _init_short_term_memory(self) -> Optional[RedisLangGraphMemory]:
+        """숏텀메모리 초기화"""
+        if RedisLangGraphMemory is not None:
+            try:
+                memory = RedisLangGraphMemory(
+                    user_id=self.user_id,
+                    service="teacher",
+                    chat_id=self.chat_id,
+                    redis_host=os.getenv("REDIS_HOST", "localhost"),
+                    redis_port=int(os.getenv("REDIS_PORT", "6380")),
+                )
+                print("✅ 숏텀메모리 초기화 완료")
+                return memory
+            except Exception as e:
+                print(f"⚠️ 숏텀메모리 초기화 실패: {e}")
+                return None
+        return None
+
+    def save_teacher_data(self, teacher_state: TeacherState) -> bool:
+        """
+        Teacher 상태에서 문제/답/풀이 보기 데이터를 숏텀메모리에 저장
+        
+        Args:
+            teacher_state: Teacher 상태 객체
+            
+        Returns:
+            저장 성공 여부
+        """
+        if not self.short_term_memory:
+            print("⚠️ 숏텀메모리가 초기화되지 않았습니다.")
+            return False
+        
+        try:
+            shared = teacher_state.get("shared", {})
+            questions = shared.get("question", [])
+            options = shared.get("options", [])
+            answers = shared.get("answer", [])
+            explanations = shared.get("explanation", [])
+            subjects = shared.get("subject", [])
+            user_answers = shared.get("user_answer", [])
+            
+            if not questions:
+                print("📝 저장할 문제가 없습니다.")
+                return False
+            
+            # 문제 데이터를 Redis 메모리 형식으로 변환
+            question_data = []
+            for i, question in enumerate(questions):
+                if i < len(options) and i < len(answers) and i < len(explanations):
+                    question_data.append({
+                        "question": question,
+                        "options": options[i] if isinstance(options[i], list) else [],
+                        "answer": answers[i] if i < len(answers) else "",
+                        "explanation": explanations[i] if i < len(explanations) else "",
+                        "subject": subjects[i] if i < len(subjects) else "unknown",
+                        "user_answer": user_answers[i] if i < len(user_answers) else "",
+                        "timestamp": int(time.time())
+                    })
+            
+            if question_data:
+                # Redis 메모리에 저장 (중복 자동 필터링)
+                new_qids = self.short_term_memory.add_questions(question_data)
+                print(f"💾 {len(new_qids)}개 문제가 숏텀메모리에 저장되었습니다.")
+                
+                # 풀이 정보도 함께 저장
+                for i, qid in enumerate(new_qids):
+                    if i < len(question_data):
+                        q_data = question_data[i]
+                        self.short_term_memory.upsert_solution(
+                            qid=qid,
+                            user_answer=q_data.get("user_answer", ""),
+                            model_answer=q_data.get("answer", ""),
+                            explanation=q_data.get("explanation", ""),
+                            score=1.0 if q_data.get("user_answer") == q_data.get("answer") else 0.0,
+                            is_correct=q_data.get("user_answer") == q_data.get("answer")
+                        )
+                
+                return True
+            else:
+                print("📝 유효한 문제 데이터가 없습니다.")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 문제 데이터 저장 중 오류: {e}")
+            return False
+
+    def load_recent_questions(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        최근 저장된 문제들을 불러오기
+        
+        Args:
+            limit: 불러올 최대 문제 수
+            
+        Returns:
+            문제 데이터 리스트
+        """
+        if not self.short_term_memory:
+            print("⚠️ 숏텀메모리가 초기화되지 않았습니다.")
+            return []
+        
+        try:
+            # 최근 문제 ID들 가져오기
+            qids = self.short_term_memory.select_qids(limit=limit, recent_first=True)
+            
+            if not qids:
+                print("📝 저장된 문제가 없습니다.")
+                return []
+            
+            # 각 문제의 상세 정보 가져오기
+            questions = []
+            for qid in qids:
+                try:
+                    question = self.short_term_memory.get_question(qid)
+                    solution = self.short_term_memory.get_solution(qid)
+                    
+                    questions.append({
+                        "qid": qid,
+                        "question": question.get("question_text", ""),
+                        "options": question.get("options", []),
+                        "answer": solution.get("model_answer", ""),
+                        "explanation": solution.get("explanation", ""),
+                        "subject": question.get("subject", "unknown"),
+                        "user_answer": solution.get("user_answer", ""),
+                        "is_correct": solution.get("is_correct", False),
+                        "score": solution.get("score", 0.0),
+                        "created_at": question.get("created_at", 0),
+                        "updated_at": question.get("updated_at", 0)
+                    })
+                except Exception as e:
+                    print(f"⚠️ 문제 {qid} 로드 중 오류: {e}")
+                    continue
+            
+            print(f"📖 {len(questions)}개 문제를 숏텀메모리에서 불러왔습니다.")
+            return questions
+            
+        except Exception as e:
+            print(f"❌ 문제 데이터 로드 중 오류: {e}")
+            return []
+
+    def get_weakness_analysis(self, top_k: int = 3) -> Dict[str, Any]:
+        """
+        취약점 분석 결과 가져오기
+        
+        Args:
+            top_k: 상위 취약 과목 개수
+            
+        Returns:
+            취약점 분석 결과
+        """
+        if not self.short_term_memory:
+            return {"error": "숏텀메모리가 초기화되지 않았습니다."}
+        
+        try:
+            return self.short_term_memory.weakness_summary(top_k=top_k)
+        except Exception as e:
+            print(f"❌ 취약점 분석 중 오류: {e}")
+            return {"error": str(e)}
+
+    def clear_short_term_memory(self) -> bool:
+        """숏텀메모리 데이터 삭제"""
+        if not self.short_term_memory:
+            return False
+        
+        try:
+            self.short_term_memory.clear(include_questions=True)
+            print("🧹 숏텀메모리가 삭제되었습니다.")
+            return True
+        except Exception as e:
+            print(f"❌ 숏텀메모리 삭제 중 오류: {e}")
+            return False
 
     def lock_service_session(self, service: str):
         if service in ("teacher", "farmer"):
@@ -170,6 +352,9 @@ class MainRe:
         return {**state, "service_classification": service_classification, "session_data": session}
 
     def run_teacher(self, state: MainReState) -> MainReState:
+        # 최근 저장된 문제들을 불러와서 teacher 입력에 포함
+        recent_questions = self.load_recent_questions(limit=10)
+        
         init: TeacherState = {
             "user_query": state.get("user_query", ""),
             "intent": "",
@@ -178,10 +363,41 @@ class MainRe:
             "history": [], "session": {}, "artifacts": {}, "routing": {},
             "llm_response": "",
         }
+        
+        # 최근 문제 데이터가 있으면 shared에 추가
+        if recent_questions:
+            questions = [q["question"] for q in recent_questions]
+            options = [q["options"] for q in recent_questions]
+            answers = [q["answer"] for q in recent_questions]
+            explanations = [q["explanation"] for q in recent_questions]
+            subjects = [q["subject"] for q in recent_questions]
+            user_answers = [q["user_answer"] for q in recent_questions]
+            
+            init["shared"] = {
+                "question": questions,
+                "options": options,
+                "answer": answers,
+                "explanation": explanations,
+                "subject": subjects,
+                "user_answer": user_answers,
+                "retrieve_answer": "",
+                "wrong_question": [],
+                "weak_type": [],
+                "notes": []
+            }
+            print(f"📖 최근 {len(recent_questions)}개 문제를 teacher 입력에 포함했습니다.")
+        
         res = self.teacher.invoke(init, config={"configurable": {"thread_id": self.thread_id}})
         merged = dict(res)
+        
+        # teacher 실행 후 결과를 숏텀메모리에 저장
+        if merged.get("shared"):
+            saved = self.save_teacher_data(merged)
+            if saved:
+                print("💾 Teacher 실행 결과가 숏텀메모리에 저장되었습니다.")
+        
         # expose key outputs
-        out: MainReState = {**state, "teacher_state": merged}
+        out: MainReState = {**state, "teacher_state": merged, "loaded_questions": recent_questions}
         for k in ("final_response", "artifacts", "routing"):
             if k in merged:
                 out[k] = merged[k]
@@ -612,8 +828,50 @@ def main():
                 print("사용법: /service teacher|farmer")
                 continue
             if cmd == "help":
-                print("명령: /new, /clear, /service <teacher|farmer>, /exit")
+                print("명령: /new, /clear, /service <teacher|farmer>, /memory <load|save|clear|weakness>, /exit")
                 continue
+            if cmd == "memory":
+                if arg == "load":
+                    questions = orch.load_recent_questions(limit=10)
+                    if questions:
+                        print(f"📖 최근 {len(questions)}개 문제를 불러왔습니다:")
+                        for i, q in enumerate(questions[:5], 1):  # 최대 5개만 표시
+                            print(f"  {i}. {q['question'][:50]}... (과목: {q['subject']})")
+                        if len(questions) > 5:
+                            print(f"  ... 외 {len(questions)-5}개")
+                    else:
+                        print("📝 저장된 문제가 없습니다.")
+                    continue
+                elif arg == "save":
+                    # 현재 teacher 상태에서 데이터 저장
+                    if hasattr(orch, 'last_teacher_state') and orch.last_teacher_state:
+                        saved = orch.save_teacher_data(orch.last_teacher_state)
+                        if saved:
+                            print("💾 현재 teacher 데이터가 저장되었습니다.")
+                        else:
+                            print("❌ 저장에 실패했습니다.")
+                    else:
+                        print("❌ 저장할 teacher 데이터가 없습니다.")
+                    continue
+                elif arg == "clear":
+                    if orch.clear_short_term_memory():
+                        print("🧹 숏텀메모리가 삭제되었습니다.")
+                    else:
+                        print("❌ 삭제에 실패했습니다.")
+                    continue
+                elif arg == "weakness":
+                    weakness = orch.get_weakness_analysis(top_k=3)
+                    if "error" not in weakness:
+                        print("📊 취약점 분석 결과:")
+                        for i, (subject, avg_score, attempts) in enumerate(weakness["weak_subjects"], 1):
+                            print(f"  {i}. {subject}: 평균 점수 {avg_score:.2f} (시도: {attempts}회)")
+                        print(f"  총 문제 수: {weakness['total_questions']}")
+                    else:
+                        print(f"❌ 취약점 분석 실패: {weakness['error']}")
+                    continue
+                else:
+                    print("사용법: /memory <load|save|clear|weakness>")
+                    continue
             print("알 수 없는 명령입니다. /help 를 입력하세요.")
             continue
 

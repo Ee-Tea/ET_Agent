@@ -9,7 +9,7 @@ FROM langchain/langgraph-api:3.12-wolfi
 # -- Adding local package . --
 ADD . /deps/LLM-T
 # -- End of local package . --
-ENV PYTHONPATH="/deps/LLM_T"
+ENV PYTHONPATH="/deps/LLM-T"
 
 ENV LANGSERVE_GRAPHS='{"agent":"teacher.graph:graph"}'
 
@@ -20,12 +20,6 @@ ENV LANGSERVE_GRAPHS='{"agent":"teacher.graph:graph"}'
 RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e /deps/*
 
 # -- End of local dependencies install --
-
-ENV LANGSERVE_GRAPHS='{"agent": "/deps/LLM-T/teacher/graph.py:graph"}'
-
-
-
-
 
 
 

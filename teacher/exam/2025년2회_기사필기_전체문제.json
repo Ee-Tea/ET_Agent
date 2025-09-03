@@ -1,0 +1,1194 @@
+{
+  "exam_title": "2025년2회_기사필기_전체문제",
+  "total_questions": 99,
+  "questions": [
+    {
+      "question": "럼바우 (Rumbaugh) 의 객체지향 분석 절차를 가장 바르게 나열한 것은?",
+      "options": [
+        "객체 모형 → 동적 모형 → 기능 모형",
+        "객체 모형 → 기능 모형 → 동적 모형",
+        "기능 모형 → 동적 모형 → 객체 모형",
+        "기능 모형 → 객체 모형 → 동적 모형"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "UI 의 종류로 멀티 터치 (Multi-touch), 동작 인식(Gesture Recognition) 등 사용자의 자연스러운 움직임을 인식하여 서로 주고받는 정보를 제공하는 사용자 인터페이스를 의미하는 것은?",
+      "options": [
+        "GUKGraphical User Interface)",
+        "OUI(Organic User Interface)",
+        "NUI(Natural User Interface)",
+        "CLK(Command Line Interface)"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "소프트웨어 설계에서 사용되는 대표적인 추상화 (Abstraction) 기법 이 아닌 것은?",
+      "options": [
+        "자료 추상화",
+        "제어 추상화",
+        "과정 추상화",
+        "강도 추상화"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "다음 설명에 해당하는 도표는 ? 시스템의 기능을 여러 개의 고유 모듈들로 분할하여 이들 간의 인터페이스를 계층 구조로 표현한 것으로 , 가시적 도표 (Visual Table of Contents), 총체적 도표 (Overview Diagram), 세부적 도표 (Detail Diagram) 가 있다 .",
+      "options": [
+        "Flow Chart",
+        "Burn-down Chart",
+        "Visual Diagram",
+        "HIPO Chart"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "요구사항 분석이 어려운 이유가 아닌 것은 ?",
+      "options": [
+        "개발자와 사용자 간의 지식이나 표현의 차이가 커서 상호 이해 가 쉽지 않다.",
+        "사용자의 요구는 예외가 거의 없어 열거와 구조화가 어렵지 않다.",
+        "사용자의 요구사항이 모호하고 불명확하다.",
+        "소프트웨어 개발 과정 중에 요구사항이 계속 변할 수 있다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "자료 흐름도 (DFD) 의 각 요소별 표기 형태의 연결이 옳지 않은 것은?",
+      "options": [
+        "Process : 원",
+        "Data Flow : 화살표",
+        "Data Store : 삼각형",
+        "Terminator : 사각형기출문제 & 정답 및 해설 2 회 정보처리기사 필기 용도로만 사용할 수 있습니다 . 허락 없이 복제하거나 없습니다 ."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "익스트림 프로그래밍 (XP) 의 5 가지 가치로 거리가 먼 것은 ?",
+      "options": [
+        "용기",
+        "의사소통",
+        "정형 분석",
+        "피드백"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "UI 의 설계 지침으로 틀린 것은 ?",
+      "options": [
+        "이해하기 편하고 쉽게 사용할 수 있는 환경을 제공해야 한다.",
+        "주요 기능을 메인 화면에 노출하여 조작이 쉽도록 하여야 한다.",
+        "치명적인 오류에 대한 부정적인 사항은 사용자가 인지할 수 없도록 한다.",
+        "사용자의 직무 , 연령 , 성별 등 다양한 계층을 수용하여야 한다 ."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "UI 를 설계할 때 사용자 측면에서의 요구사항으로 , 사용자가 원하는 목표를 달성하기 위해 수행할 내용을 기술하는 것은?",
+      "options": [
+        "프로토타입",
+        "레이아웃",
+        "유스케이스",
+        "스토리보드"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "다음 중 SOLID 원칙이라고 불리는 객체지향 설계 원칙에 속하지 않는 것은?",
+      "options": [
+        "ISP(Interface Segregation Principle)",
+        "DIP(Dependency Inversion Principle)",
+        "LSP(Liskov Substitution Principle)",
+        "SSO(Single Sign On)"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "객체지향 분석 방법론 중 Jacobson 방법에 해당하는 것은 ?",
+      "options": [
+        "E-R 다이어그램을 사용하여 객체의 행위를 데이터 모델링하 는데 초점을 둔 방법이다.",
+        "객체 , 동적 , 기능 모델로 나누어 수행하는 방법이다 .",
+        "미시적 개발 프로세스와 거시적 개발 프로세스를 모두 사용하 는 방법이다.",
+        "Use-Case 를 강조하여 사용하는 방법이다 ."
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "한 모듈 내의 각 구성 요소들이 공통의 목적을 달성하기 위하여 서로 얼마나 관련이 있는지의 기능적 연관의 정도를 나타내는 것은?",
+      "options": [
+        "Cohesion",
+        "Coupling",
+        "Structure",
+        "Unity"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "소프트웨어 공학에서 모델링 (Modeling) 과 관련한 설명으로 틀린 것은?",
+      "options": [
+        "개발팀이 응용문제를 이해하는 데 도움을 줄 수 있다.",
+        "유지보수 단계에서만 모델링 기법을 활용한다.",
+        "개발될 시스템에 대하여 여러 분야의 엔지니어들이 공통된 개 념을 공유하는 데 도움을 준다.",
+        "절차적인 프로그램을 위한 자료 흐름도는 프로세스 위주의 모 델링 방법이다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "GoF(Gangs of Four) 디자인 패턴 중 생성 패턴으로 옳은 것은 ?",
+      "options": [
+        "Singleton Pattern",
+        "Adapter Pattern",
+        "Decorator Pattern",
+        "State Pattern"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "요구사항 명세 기법에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "비정형 명세 기법은 사용자의 요구를 표현할 때 자연어를 기반 으로 서술한다.",
+        "비정형 명세 기법은 사용자의 요구를 표현할 때 Z 비정형 명세 기법을 사용한다.",
+        "정형 명세 기법은 사용자의 요구를 표현할 때 수학적인 원리와 표기법을 이용한다.",
+        "정형 명세 기법은 비정형 명세 기법에 비해 표현이 간결하다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "GoF(Gang of Four) 디자인 패턴을 생성 , 구조 , 행동 패턴의 세 그룹으로 분류할 때 , 구조 패턴이 아닌 것은 ?",
+      "options": [
+        "Adapter 패턴",
+        "Bridge 패턴",
+        "Builder 패턴",
+        "Proxy 패턴"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "UML 에서 활용되는 다이어그램 중 , 시스템의 동작을 표현하는 행위 (Behavioral) 다이어그램에 해당하지 않는 것은 ?",
+      "options": [
+        "유스케이스 다이어그램(Use Case Diagram)",
+        "시퀀스 다이어그램(Sequence Diagram)",
+        "활동 다이어그램(Activity Diagram)",
+        "배치 다이어그램(Deployment Diagram)"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "분산 시스템에서의 미들웨어 (Middleware) 와 관련한 설명으로 틀린 것은?",
+      "options": [
+        "분산 시스템에서 다양한 부분을 관리하고 통신하며 데이터를 교환하게 해주는 소프트웨어로 볼 수 있다.",
+        "위치 투명성 (Location Transparency) 을 제공한다 .",
+        "분산 시스템의 여러 컴포넌트가 요구하는 재사용 가능한 서비 스의 구현을 제공한다.",
+        "애플리케이션과 사용자 사이에서만 분산 서비스를 제공한다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "결합도 (Coupling) 에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "데이터 결합도 (Data Coupling) 는 두 모듈이 매개 변수로 자료 를 전달할 때 자료 구조 형태로 전달되어 이용될 때 데이터가 결합되어 있다고 한다.",
+        "내용 결합도 (Content Coupling) 는 하나의 모듈이 직접적으로 다른 모듈의 내용을 참조할 때 두 모듈은 내용적으로 결합되어 있다고 한다.",
+        "공통 결합도 (Common Coupling) 는 두 모듈이 동일한 전역 데 이터를 접근한다면 공통 결합되어 있다고 한다.",
+        "결합도 (Coupling) 는 두 모듈 간의 상호작용 , 또는 의존도 정도 를 나타내는 것이다."
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "소프트웨어 개발 방법 중 요구사항 분석 (Requirements Analysis) 과 거리가 먼 것은?",
+      "options": [
+        "비용과 일정에 대한 제약 설정",
+        "타당성 조사",
+        "요구사항 정의 문서화",
+        "설계 명세서 작성 제 2 과목 소프트웨어 개발"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "EAI(Enterprise Application Integration) 의 구축 유형으로 옳지 않은 것은?",
+      "options": [
+        "Point-to-Point",
+        "Hub & Spoke",
+        "Message Bus",
+        "Tree"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "소프트웨어 형상 관리의 의미로 적절한 것은 ?",
+      "options": [
+        "비용에 관한 사항을 효율적으로 관리하는 것",
+        "개발 과정의 변경 사항을 관리하는 것",
+        "테스트 과정에서 소프트웨어를 통합하는 것",
+        "개발 인력을 관리하는 것"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "소프트웨어 품질 측정을 위해 개발자 관점에서 고려해야 할 항목으로 거리가 먼 것은?",
+      "options": [
+        "정확성",
+        "무결성",
+        "사용성",
+        "간결성"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "알파 , 베타 테스트와 가장 밀접한 연관이 있는 테스트 단계는 ?",
+      "options": [
+        "단위 테스트",
+        "인수 테스트",
+        "통합 테스트",
+        "시스템 테스트"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "제품 소프트웨어 패키징 도구 활용 시 고려사항이 아닌 것은 ?",
+      "options": [
+        "제품 소프트웨어의 종류에 적합한 암호화 알고리즘을 고려한 다.",
+        "추가로 다양한 이기종 연동을 고려한다.",
+        "사용자 편의성을 위한 복잡성 및 비효율성 문제를 고려한다.",
+        "내부 콘텐츠에 대한 보안은 고려하지 않는다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "다음 트리를 Preorder 운행법으로 운행할 경우 가장 먼저 탐색되는 것은?",
+      "options": [
+        "A",
+        "B",
+        "D",
+        "G"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "인터페이스 보안을 위해 네트워크 영역에 적용될 수 있는 솔루션과 거리가 먼 것은?",
+      "options": [
+        "IPSec",
+        "SSL",
+        "SMTP",
+        "S-HTTP"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "저작권 관리 구성 요소에 대한 설명이 틀린 것은 ?",
+      "options": [
+        "콘텐츠 제공자 (Contents Provider) : 콘텐츠를 제공하는 저작 권자",
+        "콘텐츠 분배자 (Contents Distributor) : 콘텐츠를 메타 데이터 와 함께 배포 가능한 단위로 묶는 기능",
+        "클리어링 하우스 (Clearing House) : 키 관리 및 라이선스 발급 관리",
+        "DRM 컨트롤러 : 배포된 콘텐츠의 이용 권한을 통제"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "소프트웨어 설치 매뉴얼에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "설치 과정에서 표시될 수 있는 예외상황에 관련 내용을 별도로 구분하여 설명한다.",
+        "설치 시작부터 완료할 때까지의 전 과정을 빠짐없이 순서대로 설명한다.",
+        "설치 매뉴얼은 개발자 기준으로 작성한다.",
+        "설치 매뉴얼에는 목차 , 개요 , 기본사항 등이 기본적으로 포함되 어야 한다."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "다음 중 블랙박스 검사 기법은 ?",
+      "options": [
+        "경계값 분석",
+        "조건 검사",
+        "기초 경로 검사",
+        "루프 검사"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "스택에 대한 설명으로 틀린 것은",
+      "options": [
+        "입출력이 한쪽 끝으로만 제한된 리스트이다.",
+        "Head(front) 와 Tail(rear) 의 2 개 포인터를 갖고 있다 .",
+        "LIFO 구조이다 .",
+        "더 이상 삭제할 데이터가 없는 상태에서 데이터를 삭제하면 언더플로 (Underflow) 가 발생한다 ."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "디지털 저작권 관리 (DRM) 에 사용되는 기술 요소가 아닌 것은 ?",
+      "options": [
+        "키 관리",
+        "방화벽",
+        "암호화",
+        "크랙방지"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "버전 관리 항목 중 저장소에 새로운 버전의 파일로 갱신하는 것을 의미하는 용어는?",
+      "options": [
+        "형상 감사(Configuration Audit)",
+        "롤백 (Rollback)",
+        "단위 테스트(Unit Test)",
+        "체크인(Check-In)"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "정렬된 N 개의 데이터를 처리하는 데 O(Nlog N) 의 시간이 소요되는 2 정렬 알고리즘은?",
+      "options": [
+        "합병 정렬",
+        "버블 정렬",
+        "선택 정렬",
+        "삽입 정렬"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "클린 코드 작성 원칙에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "코드의 중복을 최소화 한다.",
+        "코드가 다른 모듈에 미치는 영향을 최대화하도록 작성한다.",
+        "누구든지 코드를 쉽게 읽을 수 있도록 작성한다.",
+        "간단하게 코드를 작성한다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "테스트 케이스 자동 생성 도구를 이용하여 테스트 데이터를 찾아내는 방법이 아닌 것은?",
+      "options": [
+        "스터브 (Stub) 와 드라이버 (Driver)",
+        "입력 도메인 분석",
+        "랜덤 (Random) 테스트",
+        "자료 흐름도"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "순서가 A, B, C, D 로 정해진 입력 자료를 스택에 입력한 후 출력한 결과로 불가능한 것은?",
+      "options": [
+        "D, C, B, A",
+        "B, C, D, A",
+        "C, B, A, D",
+        "D, B, C, A"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "프로젝트에 내재된 위험 요소를 인식하고 그 영향을 분석하여 이를 관리하는 활동으로서 , 프로젝트를 성공시키기 위하여 위험 요소를 사전에 예측 , 대비하는 모든 기술과 활동을 포함하는 것은 ?",
+      "options": [
+        "Critical Path Method",
+        "Risk Analysis",
+        "Work Breakdown Structure",
+        "Waterfall Model"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "인터페이스 간의 통신을 위해 이용되는 데이터 포맷이 아닌 것은 ?",
+      "options": [
+        "AJTML",
+        "JSON",
+        "XML",
+        "YAML"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "정형 기술 검토 (FTR) 의 지침으로 틀린 것은 ?",
+      "options": [
+        "의제를 제한한다.",
+        "논쟁과 반박을 제한한다.",
+        "문제 영역을 명확히 표현한다.",
+        "참가자의 수를 제한하지 않는다.제 3 과목 데이터베이스 구축"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 개발"
+    },
+    {
+      "question": "트랜잭션의 특성 중 다음 설명에 해당하는 것은 ? 트랜잭션의 연산은 데이터베이스에 모두 반영되든지 아니 면 전혀 반영되지 않아야 한다.",
+      "options": [
+        "Durability",
+        "Share",
+        "Consistency",
+        "Atomicity"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "애트리뷰트가 가질 수 있는 원자값들의 집합을 의미하는 것은 ?",
+      "options": [
+        "도메인",
+        "튜플",
+        "엔티티",
+        "다형성"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "데이터베이스 시스템에서 삽입 , 갱신 , 삭제 등의 이벤트가 발생할 때마다 관련 작업이 자동으로 수행되는 절차형 SQL 은 ?",
+      "options": [
+        "트리거(Trigger)",
+        "무결성(Integrity)",
+        "잠금(Lock)",
+        "복귀(Rollback)"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "STUDENT 테이블에 독일어과 학생 50 명 , 중국어과 학생 30 명 , 영어영문학과 학생 50 명의 정보가 저장되어 있을 때 , 다음 두 SQL 문 의 실행 결과 튜플 수는 ? ( 단 , DEPT 컬럼은 학과명 ) ⓐ SELECT DEPT FROM STUDENT; ⓑ SELECT DISTINCT DEPT FROM STUDENT;",
+      "options": [
+        "ⓐ 3, ⓑ 3",
+        "ⓐ 50, ⓑ 3",
+        "ⓐ 130, ⓑ 3",
+        "ⓐ 130, ⓑ 130"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "관계대수의 순수 관계 연산자가 아닌 것은 ?",
+      "options": [
+        "Select",
+        "Cartesian Product",
+        "Division",
+        "Project"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "다음에 해당하는 함수 종속의 추론 규칙은 ? X → Y 이고 Y → Z 이면 X → Z 이다 .",
+      "options": [
+        "분해 규칙",
+        "이행 규칙",
+        "반사 규칙",
+        "결합 규칙"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "뷰 (View) 의 장점이 아닌 것은 ?",
+      "options": [
+        "뷰 자체로 인덱스를 가짐",
+        "데이터 보안 용이",
+        "논리적 독립성 제공",
+        "사용자 데이터 관리 용이"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "데이터베이스 설계 시 물리적 설계 단계에서 수행하는 사항이 아닌 것은?",
+      "options": [
+        "저장 레코드 양식 설계",
+        "레코드 집중의 분석 및 설계",
+        "접근 경로 설계",
+        "목표 DBMS 에 맞는 스키마 설계"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "릴레이션에 있는 모든 튜플에 대해 유일성은 만족시키지만 최소성은 만족시키지 못하는 키는?",
+      "options": [
+        "후보키",
+        "",
+        "",
+        ""
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "정규화의 필요성으로 거리가 먼 것은 ?",
+      "options": [
+        "데이터 구조의 안정성 최대화",
+        "중복 데이터의 활성화",
+        "수정 , 삭제 시 이상 현상의 최소화",
+        "테이블 불일치 위험의 최소화"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "릴레이션 R1 에 속한 애튜리뷰트의 조합인 외래키를 변경하려면 이를 참조하고 있는 릴레이션 R2 의 기본키도 변경해야 하는데 이를 무엇이라 하는가?",
+      "options": [
+        "정보 무결성",
+        "고유 무결성",
+        "널 제약성",
+        "참조 무결성"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "정규화를 거치지 않아 발생하게 되는 이상 (anomaly) 현상의 종류에 대한 설명으로 옳지 않은 것은?",
+      "options": [
+        "삭제 이상이란 릴레이션에서 한 튜플을 삭제할 때 의도와는 상관없는 값들로 함께 삭제되는 연쇄 삭제 현상이다.",
+        "삽입 이상이란 릴레이션에서 데이터를 삽입할 때 의도와는 상 관없이 원하지 않는 값들로 함께 삽입되는 현상이다.",
+        "갱신 이상이란 릴레이션에서 튜플에 있는 속성값을 갱신할 때 일부 튜플의 정보만 갱신되어 정보에 모순이 생기는 현상이다.",
+        "종속 이상이란 하나의 릴레이션에 하나 이상의 함수적 종속성 이 존재하는 현상이다."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "개체 - 관계 모델 (E-R) 의 그래픽 표현으로 옳지 않은 것은 ?",
+      "options": [
+        "개체 타입 - 사각형",
+        "속성 - 원형",
+        "관계 타입 – 마름모",
+        "연결 - 삼각형"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "DDL(Data Define Language) 의 명령어 중 스키마 , 도메인 , 인덱스 등을 정의할 때 사용하는 SQL 문은 ?",
+      "options": [
+        "ALTER",
+        "SELECT",
+        "CREATE",
+        "INSERT"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "로킹 단위 (Locking Granularity) 에 대한 설명으로 옳은 것은 ?",
+      "options": [
+        "로킹 단위가 크면 병행성 수준이 낮아진다.",
+        "로킹 단위가 크면 병행 제어 기법이 복잡해진다.",
+        "로킹 단위가 작으면 로크 (lock) 의 수가 적어진다 .",
+        "로킹은 파일 단위로 이루어지며 , 레코드와 필드는 로킹 단위가 될 수 없다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "테이블 R 과 S 에 대한 SQL 문이 실행되었을 때 , 실행 결과로 옳은 것은? R S A B A B     SELECT A FROM R 1 A 1 A      UNION ALL 3 B 2 B       SELECT A FROM S;",
+      "options": [
+        "1",
+        "3 2",
+        "1 3",
+        "1 3 1 2"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "관계해석에서 ‘ 모든 것에 대하여의 ’ 의미를 나타내는 논리 기호는 ?",
+      "options": [
+        "∃",
+        "∈",
+        "",
+        ""
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "DELETE 명령에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "DELETE 명령에 대한 설명으로 틀린 것은 ?",
+        "",
+        "",
+        ""
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "관계 데이터 모델에서 릴레이션 (Relation) 에 포함되어 있는 튜플 (Tuple) 의 수를 무엇이라고 하는가 ?",
+      "options": [
+        "Degree",
+        "Cardinality",
+        "Attribute",
+        "Cartesian product"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "SQL 의 명령을 사용 용도에 따라 DDL, DML, DCL 로 구분할 경우 , 그 성격이 나머지 셋과 다른 것은?",
+      "options": [
+        "SELECT",
+        "UPDATE",
+        "",
+        ""
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "데이터베이스 구축"
+    },
+    {
+      "question": "오류 제어에 사용되는 자동 반복 요청 방식 (ARQ) 이 아닌 것은 ?",
+      "options": [
+        "Stop-and-wait ARQ",
+        "Go-back-N ARO",
+        "Selective-Repeat ARQ",
+        "Non-Acknowledge ARQ"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "OSI 7 계층 중 네트워크 계층에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "패킷을 발신지로부터 최종 목적지까지 전달하는 책임을 진다.",
+        "한 노드로부터 다른 노드로 프레임을 전송하는 책임을 진다.",
+        "패킷에 발신지와 목적지의 논리 주소를 추가한다.",
+        "라우터 또는 교환기는 패킷 전달을 위해 경로를 지정하거나 교환 기능을 제공한다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음 C 언어 프로그램이 실행되었을 때 , 실행 결과는 ? #include <stdio.h> int main(int argc, char* argv[]) { int a = 5, b = 3, c = 12; int t1, t2, t3; t1 = a && b; t2 = a || b; t3 = !c; printf(\"%d\", t1 + t2 + t3); return 0; }",
+      "options": [
+        "０",
+        "２",
+        "５",
+        "14"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "OSI 7 계층 중 프로토콜 데이터 단위 (PDU) 가 메시지 (Message) 가 아닌 것은?",
+      "options": [
+        "전송 계층",
+        "세션 계층",
+        "표현 계층",
+        "응용 계층"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음 Python 프로그램이 실행되었을 때 , 실행 결과는 ? strA = 'Information Technology' strL = list() for i in range(0, len(strA), 2): strL.append(strA[i]) for j in range(len(strL) - 1, 0, -2): print(strL[j], end='')",
+      "options": [
+        "gnTir",
+        "riTng",
+        "ot hl",
+        "lh to"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "프로세스 적재 정책과 관련한 설명으로 틀린 것은 ?",
+      "options": [
+        "반복 , 스택 , 부프로그램은 시간 지역성 (Temporal Locality) 과 관련이 있다.",
+        "공간 지역성 (Spatial Locality) 은 프로세스가 어떤 페이지를 참조했다면 이후 가상주소 공간상 그 페이지와 인접한 페이지 들을 참조할 가능성이 높음을 의미한다.",
+        "일반적으로 페이지 교환에 보내는 시간보다 프로세스 수행에 보내는 시간이 더 크면 스레싱 (Thrashing) 이 발생한다 .",
+        "스레싱 (Thrashing) 현상을 방지하기 위해서는 각 프로세스가 필요로 하는 프레임을 제공할 수 있어야 한다."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음은 정수 배열 a 에 0 부터 9 까지의 무작위 수를 저장하는 Java 코드이다 . 괄호에 들어갈 알맞은 코드는 무엇인가 ? import ( ).*; public class Test { public static void main(String[] args) { Random rand = new Random( ); int a[] = new int[6]; for(int i = 0; i < 6; i++) a[i] = rand.nextInt(10); } }",
+      "options": [
+        "java.lang",
+        "java.util",
+        "java.io",
+        "java.net"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "리눅스 Bash 쉘 (Shell) 에서 export 와 관련한 설명으로 틀린 것은 ?",
+      "options": [
+        "변수를 출력하고자 할 때는 export 를 사용해야 한다 .",
+        "export 가 매개변수 없이 쓰일 경우 현재 설정된 환경변수들이 출력된다.",
+        "사용자가 생성하는 변수는 export 명령어로 표시하지 않는 한 현재 쉘에 국한된다.",
+        "변수를 export 시키면 전역 (Global) 변수처럼 되어 끝까지 기 억된다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음 Java 프로그램이 실행되었을 때의 결과는 ? public class Test { public static void main(String[] args) { int x = 7, y = 0; while(x-- > 0) { if (x%3 == 0) continue; y++; } System.out.print(y); } }",
+      "options": [
+        "0",
+        "4",
+        "5",
+        "7"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "TCP/IP 프로토콜에서 TCP 가 해당하는 계층은 ?",
+      "options": [
+        "데이터 링크 계층",
+        "네트워크 계층",
+        "트랜스포트 계층",
+        "세션 계층"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "Java 에서 사용되는 출력 함수가 아닌 것은 ?",
+      "options": [
+        "System.out.print( )",
+        "System.out.println( )",
+        "System.out.printing( )",
+        "System.out.printf( )"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음의 페이지 참조 열 (Page reference) 에 대해 페이지 교체 기법으 로 선입선출 알고리즘을 사용할 경우 페이지 부재 (Page Fault) 횟수 는 ? ( 단 , 할당된 페이지 프레임 수는 3 이고 , 처음에는 모든 프레임이 비어 있다.) < 페이지 참조열 > 7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2, 1, 2, 0, 1, 7, 0",
+      "options": [
+        "13",
+        "14",
+        "15",
+        "20"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "배치 프로그램의 자동 수행 주기 중 사용자가 특정 조건을 설정해 두고 해당 조건이 충족될 때만 수행되도록 하는 것은?",
+      "options": [
+        "정기 배치",
+        "이벤트성 배치",
+        "On-Demand 배치",
+        "사용자 배치"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음 Python 코드 출력문의 결과는 ? print(4, 1, 2, sep=',', end='') print(3, 5, sep='/')",
+      "options": [
+        "4,1,23/5",
+        "4 1 23/5",
+        "4,1,2",
+        "4 1 2 3/5 3 5"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "JAVA 의 예외 (exception) 와 관련한 설명으로 틀린 것은 ?",
+      "options": [
+        "문법 오류로 인해 발생한 것",
+        "오동작이나 결과에 악영향을 미칠 수 있는 실행 시간 동안에 발생한 오류",
+        "배열의 인덱스가 그 범위를 넘어서는 경우 발생하는 오류",
+        "존재하지 않는 파일을 읽으려고 하는 경우에 발생하는 오류"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음은 파이썬으로 만들어진 반복문 코드이다 . 이 코드의 결과는 ? while(True) : print('A') print('B') break print('C') print('D')",
+      "options": [
+        "A, B 출력이 반복된다 .",
+        "A, B, C 까지만 출력된다 .",
+        "A, B, C 출력이 반복된다 .",
+        "A, B, D 까지만 출력된다 ."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "사용자 수준에서 지원되는 스레드 (thread) 가 커널에서 지원되는 스레드에 비해 가지는 장점으로 옳은 것은?",
+      "options": [
+        "한 프로세스가 운영체제를 호출할 때 전체 프로세스가 대기할 필요가 없으므로 시스템 성능을 높일 수 있다.",
+        "동시에 여러 스레드가 커널에 접근할 수 있으므로 여러 스레드 가 시스템 호출을 동시에 사용할 수 있다.",
+        "각 스레드를 개별적으로 관리할 수 있으므로 스레드의 독립적 인 스케줄링이 가능하다.",
+        "커널 모드로의 전환 없이 스레드 교환이 가능하므로 오버헤드 가 줄어든다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "다음 중 페이지 교체 (Page Replacement) 알고리즘이 아닌 것은 ?",
+      "options": [
+        "LRU",
+        "OPT",
+        "NUR",
+        "SCF"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "프레임워크 (Framework) 에 대한 설명으로 옳은 것은 ?",
+      "options": [
+        "소프트웨어 구성에 필요한 기본 구조를 제공함으로써 재사용이 가능하게 해준다.",
+        "",
+        "",
+        ""
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "단편화 (Fragmentation) 와 재결합 (Reassembly) 에 대한 설명으로 옳지 않은 것은?",
+      "options": [
+        "단편화는 송신 측에서 전송할 데이터를 전송에 알맞은 일정 크기의 작은 블록으로 자르는 작업을 의미한다.",
+        "재결합은 수신 측에서 단편화된 블록을 원래의 데이터로 모으 는 것이다.",
+        "단편화를 통해 세분화된 데이터 블록을 프레임이라고 한다.",
+        "단편화를 하면 전송 시간이 단축되고 , 효과적인 오류 제어가 가능하다. 제 5 과목 : 정보시스템 구축 관리"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "프로그래밍 언어 활용"
+    },
+    {
+      "question": "TCP/IP 기반 네트워크에서 동작하는 발행 - 구독 기반의 메시징 프로토콜로 최근 IoT 환경에서 자주 사용되고 있는 프로토콜은 ?",
+      "options": [
+        "MLFQ",
+        "MQTT",
+        "Zigbee",
+        "MTSP"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "다음 설명에 해당하는 소프트웨어 개발 방법론은 무엇인가 ? ㆍ기존의 시스템이나 소프트웨어를 구성하는 컴포넌트를 조 합하여 하나의 새로운 애플리케이션을 만드는 방법론이다. ㆍ컴포넌트의 재사용 (Reusability) 이 가능하여 시간과 노력 을 절감할 수 있다.",
+      "options": [
+        "구조적 방법론",
+        "정보공학 방법론",
+        "Agile 방법론",
+        "CBD 방법론"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "빅데이터 분석 기술 중 대량의 데이터를 분석하여 데이터 속에 내재되어 있는 변수 사이의 상호 관계를 규명하여 일정한 패턴을 찾아내는 기법은?",
+      "options": [
+        "Data Mining",
+        "Wm-Bus",
+        "Digital Twin",
+        "Zigbee"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "다음 내용이 설명하는 스토리지 시스템은 ? ㆍ하드디스크와 같은 데이터 저장장치를 호스트버스 어댑 터에 직접 연결하는 방식 ㆍ저장장치와 호스트 기기 사이에 네트워크 디바이스가 있지 말아야 하고 직접 연결하는 방식으로 구성",
+      "options": [
+        "DAS",
+        "NAS",
+        "N-SCREEN",
+        "NFC"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "물리적인 사물과 컴퓨터에 동일하게 표현되는 가상의 모델로 , 실제 물리적인 자산 대신 소프트웨어로 가상화함으로써 실제 자산의 특성에 대한 정확한 정보를 얻을 수 있고 , 자산 최적화 , 돌발사고 최소화 , 생산성 증가 등 설계부터 제조 , 서비스에 이르는 모든 과정의 효율성을 향상시킬 수 있는 모델은?",
+      "options": [
+        "최적화",
+        "실행 시간",
+        "디지털 트윈",
+        "N-Screen"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "컴퓨터 사용자의 키보드 움직임을 탐지해 ID, 패스워드 등 개인의 중요한 정보를 몰래 빼가는 해킹 공격은?",
+      "options": [
+        "Key Logger Attack",
+        "Worm",
+        "Rollback",
+        "Zombie Worm"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "기존 무선 랜의 한계 극복을 위해 등장하였으며 , 대규모 디바이스의 네트워크 생성에 최적화되어 차세대 이동통신 , 홈네트워킹 , 공공 안전 등의 특수목적에 사용되는 새로운 방식의 네트워크 기술을 의미하는 것은?",
+      "options": [
+        "Mesh Network",
+        "Virtual Private Network",
+        "Local Area Network",
+        "Software Defined Perimeter"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "접근통제에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "데이터가 저장된 객체와 이를 사용하려는 주체 사이의 정보 흐름을 제한하는 것이다.",
+        "데이터에 대해 통제함으로써 자원의 불법적인 접근 및 파괴를 예방한다.",
+        "임의 접근통제는 주체와 객체의 등급을 비교하여 접근 권한을 부여하는 방식이다.",
+        "역할기반 접근통제는 사용자의 역할에 따라 접근 권한을 부여 하는 방식이다."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "시스템에 저장되는 패스워드들은 Hash 또는 암호화 알고리즘의 결과 값으로 저장된다 . 이때 암호 공격을 막기 위해 똑같은 패스워드 들이 다른 암호 값으로 저장되도록 추가되는 값을 의미하는 것은?",
+      "options": [
+        "Pass flag",
+        "Bucket",
+        "Opcode",
+        "Salt"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "소프트웨어 개발 프레임워크를 적용할 경우 기대효과로 거리가 먼 것은?",
+      "options": [
+        "품질 보증",
+        "기술 종속성",
+        "개발 용이성",
+        "변경 용이성"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "소프트웨어 개발 방법론 중 애자일 (Agile) 방법론의 특징과 가장 거리가 먼 것은?",
+      "options": [
+        "각 단계의 결과가 완전히 확인된 후 다음 단계 진행",
+        "소프트웨어 개발에 참여하는 구성원들 간의 의사소통 중시",
+        "환경 변화에 대한 즉시 대응",
+        "프로젝트 상황에 따른 주기적 조정"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "크래커가 침입하여 백도어를 만들어 놓거나 , 설정 파일을 변경했을 때 분석하는 도구는?",
+      "options": [
+        "tripwire",
+        "tcpdump",
+        "cron",
+        "netcat"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "다음 내용이 설명하는 것은 ? ㆍ블록체인 (Blockchain) 개발 환경을 클라우드로 서비스 하는 개념 ㆍ블록체인 네트워크에 노드의 추가 및 제거가 용이 ㆍ블록체인의 기본 인프라를 추상화하여 블록체인 응용프 로그램을 만들 수 있는 클라우드 컴퓨팅 플랫폼",
+      "options": [
+        "OTT",
+        "BaaS",
+        "SDDC",
+        "Wi-SUN"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "다음 설명에 해당하는 비용산정 기법은 ? ㆍ조직 내에 있는 경험이 많은 두 명 이상의 전문가에게 비용 산정을 의뢰하는 기법이다. ㆍ가장 편리하고 신속하게 비용을 산정할 수 있으며 , 의뢰 자로부터 믿음을 얻을 수 있다. ㆍ개인적이고 주관적일 수 있다.",
+      "options": [
+        "전문가 감정 기법",
+        "델파이 기법",
+        "LOC 기법",
+        "Putnam 모형"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "전자 칩과 같은 소프트웨어 부품 , 즉 블록모듈을 ( ) 만들어서 끼워 맞추는 방법으로 소프트웨어를 완성시키는 재사용 방법은?",
+      "options": [
+        "합성 중심",
+        "생성 중심",
+        "분리 중심",
+        "구조 중심"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "코드 오류로 발생할 수 있는 보안 약점 중 널 포인터 (Null Pointer) 역참조가 발생하지 않도록 프로그래머가 수행해야 하는 일로 가장 옳은 것은?",
+      "options": [
+        "반환된 메모리에 접근할 수 없도록 주소를 저장하고 있는 포인 터를 초기화한다.",
+        "변수 선언 시 할당된 메모리를 초기화한다.",
+        "포인터를 이용하기 전에 널 값을 갖고 있는지 검사한다.",
+        "자원 반환 코드가 누락되었는지 확인한다."
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "시스템의 사용자가 로그인하여 명령을 내리는 과정에 대한 시스템의 동작 중 다음 설명에 해당하는 것은? ㆍ자신의 신원 (Identity) 을 시스템에 증명하는 과정이다 . ㆍ아이디와 패스워드를 입력하는 과정이 가장 일반적인 예 시라고 볼 수 있다.",
+      "options": [
+        "Aging",
+        "Accounting",
+        "Authorization",
+        "Authentication"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "프로젝트 일정 관리 시 사용하는 PERT 차트에 대한 설명에 해당하는 것은?",
+      "options": [
+        "각 작업들이 언제 시작하고 언제 종료되는지에 대한 일정을 막대 도표를 이용하여 표시한다.",
+        "시간선 (Time-Line) 차트라고도 한다 .",
+        "수평 막대의 길이는 각 작업의 기간을 나타낸다.",
+        "작업들 간의 상호 관련성 , 결정 경로 , 경계 시간 , 자원 할당 등을 제시한다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    },
+    {
+      "question": "하둡 (Hadoop) 과 관계형 데이터베이스 간에 데이터를 전송할 수 있도록 설계된 도구는?",
+      "options": [
+        "Apnic",
+        "Topology",
+        "Sqoop",
+        "SDB-"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "정보시스템 구축 관리"
+    }
+  ]
+}

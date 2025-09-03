@@ -1,0 +1,247 @@
+{
+  "exam_title": "2024년3회_기사필기_전체문제",
+  "total_questions": 10,
+  "questions": [
+    {
+      "question": "사용자 인터페이스 (UI) 중 명령과 출력이 텍스트 형태로만 이루어지 는 인터페이스를 무엇이라 하는가?",
+      "options": [
+        "NUI",
+        "GUI",
+        "CLI",
+        "OUI"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "XP(eXtreme Programming) 에 대한 설명으로 옳지 않은 것은 ?",
+      "options": [
+        "릴리즈 기간을 짧게 반복하여 고객의 요구 변화에 빠르게 대응한다.",
+        "코 드들은 하나의 작업이 마무리될 때마다 지속적으로 통합한다.",
+        "테스트가 지속적으로 진행될 수 있도록 테스트 자동화 도구를 사용한다.",
+        "개발 책임자가 모든 책임을 가지므로 팀원들은 책임 없이 자유로운 개발이 가능하다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "자료 흐름도 (Data Flow Diagram) 의 구성 요소로 옳은 것은 ?",
+      "options": [
+        "process, data flow, data store, comment",
+        "process, data flow, data store, terminator",
+        "data flow, data store, terminator, data dictionary",
+        "process, data store, terminator, mini-spec"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "분산 시스템에서의 미들웨어 (Middleware) 와 관련한 설명으로 틀린 것은?",
+      "options": [
+        "분산 시스템에서 다양한 부분을 관리하고 통신하며 데이터를 교환하게 해주는 소프트웨어로 볼 수 있다.",
+        "위치 투명성 (Location Transparency) 을 제공한다 .",
+        "분산 시스템의 여러 컴포넌트가 요구하는 재사용 가능한 서비스의 구현을 제공한다.",
+        "애플리케이션과 사용자 사이에서만 분산 서비스를 제공한다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "디자인 패턴 사용의 장٠단점에 대한 설명으로 거리가 먼 것은?",
+      "options": [
+        "소프트웨어 구조 파악이 용이하다.",
+        "객체지향 설계 및 구현의 생산성을 높이는데 적합하다.",
+        "재사용을 위한 개발 시간이 단축된다.",
+        "절차형 언어와 함께 이용될 때 효율이 극대화된다."
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "UML 확장 모델에서 스테레오 타입 객체를 표현할 때 사용하는 기호로 맞는 것은?",
+      "options": [
+        "UML 확장 모델에서 스테레오 타입 객체를 표현할 때 사용하는 기호로 맞는 것은?",
+        "<< >>",
+        "(( ))",
+        "{{ }}",
+        "[[ ]]"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "소프트웨어 설계 시 구축된 플랫폼의 성능 특성 분석에 사용되는 측정 항목이 아닌 것은?",
+      "options": [
+        "응답 시간(Response Time)",
+        "서버 튜닝(Server Tuning)",
+        "가용성(Availability)",
+        "사용률(Utilization)"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "사용자의 요구사항을 정확히 파악하기 위해 실제 개발될 소프트웨어에 대한 견본품을 만들어 최종 결과물을 예측하는 모형은?",
+      "options": [
+        "나선형 모형",
+        "애자일 모형",
+        "프로토타입 모형",
+        "폭포수 모형"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "객체지향 분석 방법론 중 Coad-Yourdon 방법에 해당하는 것은 ?",
+      "options": [
+        "E-R 다이어그램을 사용하여 객체의 행위를 데이터 모델링하는데 초점을 둔 방법이다.",
+        "객체 , 동적 , 기능 모델로 나누어 수행하는 방법이다 .",
+        "미시적 개발 프로세스와 거시적 개발 프로세스를 모두 사용하는 방법이다.",
+        "Use-Case 를 강조하여 사용하는 방법이다 ."
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "객체지향 기법에서 동일한 형의 특성을 갖는 객체들을 모아 구성한 것으로 , 클래스들 사이의 ‘is instance of’ 관계로 설명되는 연관성을 나타내는 용어는?",
+      "options": [
+        "일반화",
+        "분류화",
+        "연관화",
+        "집단화"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "UML 모델에서 한 사물의 명세가 바뀌면 다른 사물에 영향을 주며 , 일반적으로 한 클래스가 다른 클래스를 오퍼레이션의 매개 변수로 사용하는 경우에 나타나는 관계는?",
+      "options": [
+        "Association",
+        "Dependency",
+        "Realization",
+        "Generalization"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "Rayleigh-Norden 곡선의 노력 분포도를 이용한 프로젝트 비용 산정 기법은?",
+      "options": [
+        "Putnam 모형",
+        "델파이 모형",
+        "COCOMO 모형",
+        "기능점수 모형"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "애자일 (Agile) 프로세스 모델에 대한 설명으로 틀린 것은 ?",
+      "options": [
+        "변화에 대한 대응보다는 자세한 계획을 중심으로 소프트웨어를 개발한다.",
+        "프로세스와 도구 중심이 아닌 개개인과의 상호소통을 통해 의견을 수렴한다.",
+        "협상과 계약보다는 고객과의 협력을 중시한다.",
+        "문서 중심이 아닌 , 실행 가능한 소프트웨어를 중시한다 ."
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "객체지향 소프트웨어 설계 시 디자인 패턴을 구성하는 요소로서 가장 거리가 먼 것은?",
+      "options": [
+        "실제 적용된 사례",
+        "문제 및 배경",
+        "개발자의 성명",
+        "재사용 가능한 샘플코드"
+      ],
+      "answer": "3",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "아키텍처 설계 과정이 올바른 순서로 나열된 것은 ?",
+      "options": [
+        "㉮ → ㉯ → ㉰ → ㉱ → ㉲",
+        "㉲ → ㉮ → ㉯ → ㉱ → ㉰",
+        "㉮ → ㉲ → ㉯ → ㉱ → ㉰",
+        "㉮ → ㉯ → ㉰ → ㉲ → ㉱"
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "클래스 (Class) 에 대한 다음 설명에서 괄호 ( ㉠ , ㉡ ) 에 들어갈 알맞은 용어는?",
+      "options": [
+        "㉠ - 제약조건 , ㉡ - 속성",
+        "㉠ - 속성 , ㉡ - 오퍼레이션",
+        "㉠ - 오퍼레이션 , ㉡ - 제약조건",
+        "㉠ - 속성 , ㉡ - 관계"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "폭포수 모형의 특징으로 거리가 먼 것은 ?",
+      "options": [
+        "순차적인 접근방법을 이용한다.",
+        "나선형 모형의 단점을 보완하기 위한 모형이다.",
+        "단계적 정의와 산출물이 명확하다.",
+        "모형의 적용 경험과 성공사례가 많다."
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "CASE(Computer-Aided Software Engineering) 의 원천 기술이 아닌 것은?",
+      "options": [
+        "구조적 기법",
+        "프로토타이핑 기술",
+        "정보 저장소 기술",
+        "일괄처리 기술"
+      ],
+      "answer": "4",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "다음은 어떤 프로그램 구조를 나타낸다 . 모듈 F 에서의 fan-in 과 fan-out 의 수는 얼마인가 ?",
+      "options": [
+        "fan-in :2, fan-out :3",
+        "fan-in :3, fan-out :2",
+        "fan-in :1, fan-out :2",
+        "fan-in :2, fan-out :1"
+      ],
+      "answer": "2",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    },
+    {
+      "question": "HIPO(Hierarchy Input Process Output) 에 대한 설명으로 거리가 먼 것은?",
+      "options": [
+        "상향식 소프트웨어 개발을 위한 문서화 도구이다.",
+        "HIPO 차트 종류에는 가시적 도표 , 총체적 도표 , 세부적 도표가 있다.",
+        "기능과 자료의 의존 관계를 동시에 표현할 수 있다.",
+        "보기 쉽고 이해하기 쉽다."
+      ],
+      "answer": "1",
+      "explanation": "",
+      "subject": "소프트웨어 설계"
+    }
+  ]
+}

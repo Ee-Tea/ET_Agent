@@ -1165,7 +1165,7 @@ class Teacher:
                         explanations = []
                         subjects = []
                         
-                        for q in result["all_questions"]:
+                        for q in (result.get("all_questions") or []):
                             if isinstance(q, dict):
                                 questions.append(q.get("question", ""))
                                 options.append(q.get("options", []))
@@ -1205,7 +1205,7 @@ class Teacher:
                         explanations = []
                         subjects = []
                         
-                        for q in result["questions"]:
+                        for q in (result.get("questions") or []):
                             if isinstance(q, dict):
                                 questions.append(q.get("question", ""))
                                 options.append(q.get("options", []))
@@ -1245,7 +1245,7 @@ class Teacher:
                         explanations = []
                         subjects = []
                         
-                        for q in result["all_questions"]:
+                        for q in (result.get("all_questions") or []):
                             if isinstance(q, dict):
                                 questions.append(q.get("question", ""))
                                 options.append(q.get("options", []))

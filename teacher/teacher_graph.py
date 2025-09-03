@@ -1768,7 +1768,7 @@ class Teacher:
                 print("⚠️ 문제집 PDF 생성할 문제가 없습니다.")
                 return new_state
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            from .agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
             base_dir = os.path.abspath(
@@ -1854,7 +1854,7 @@ class Teacher:
                 print("⚠️ 답안집 PDF 생성할 문제가 없습니다.")
                 return new_state
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            from .agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
             base_dir = os.path.abspath(
@@ -1960,7 +1960,7 @@ class Teacher:
                 "range": {"start_index": start, "end_index": end},
             }
 
-            from agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
+            from .agents.solution.comprehensive_pdf_generator import ComprehensivePDFGenerator
             generator = ComprehensivePDFGenerator()
 
             base_dir = os.path.abspath(os.path.join(

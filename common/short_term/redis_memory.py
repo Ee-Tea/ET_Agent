@@ -1,8 +1,14 @@
 # redis_memory.py  (et_agent/common/short_term/redis_memory.py)
 import json
+import os
+import time
 import redis
+<<<<<<< HEAD
+from urllib.parse import urlparse
+=======
 import time
 import hashlib
+>>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
 from typing import Any, Dict, List, Optional
 
 # 길이 제한/TTL 설정 (필요에 맞게 조정)
@@ -36,11 +42,25 @@ except Exception:
 
 
 class RedisLangGraphMemory:
+<<<<<<< HEAD
+    """Redis 기반 단기 메모리.
+
+    환경변수(.env) 우선 순위:
+      1) REDIS_URL=redis://[:password]@host:port/db
+      2) REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_SSL, REDIS_SOCKET_TIMEOUT
+
+    포트/호스트 기본값 결정 로직:
+      - 컨테이너 내부( /.dockerenv 존재 )이면 기본 host='redis', port=6379
+      - 로컬 개발이면 host='localhost', port=6380 (docker-compose 포트 매핑 가정)
+
+    사용자가 매개변수 redis_host / redis_port 를 직접 넘기면 가장 높은 우선순위.
+=======
     """
     통합된 Redis 기반 숏텀 메모리
     - 기존 LangGraph 메모리 기능 (shared, history)
     - 문제 중심 스키마 (질문/풀이 분리 저장, 중복 검사)
     - 부분 선택 실행, 취약점 분석, 맞춤형 문제 생성 지원
+>>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
     """
     
     def __init__(
@@ -48,14 +68,23 @@ class RedisLangGraphMemory:
         user_id: str,
         service: str,
         chat_id: str,
-        redis_host: str = "localhost",
-        redis_port: int = 6380,
+        redis_host: Optional[str] = None,
+        redis_port: Optional[int] = None,
         ttl_seconds: Optional[int] = DEFAULT_TTL,
+        redis_url: Optional[str] = None,
+        **kwargs: Any,
     ):
         self.user_id = user_id
         self.service = service
         self.chat_id = chat_id
         self.ttl_seconds = ttl_seconds
+<<<<<<< HEAD
+        self.redis = self._init_client(
+            redis_host=redis_host,
+            redis_port=redis_port,
+            redis_url=redis_url,
+        )
+=======
         self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         
         # 문제 중심 스키마를 위한 네임스페이스
@@ -63,6 +92,7 @@ class RedisLangGraphMemory:
         
         # LangGraph checkpointer를 위한 버전 관리
         self._version_key = f"{self.user_id}:{self.service}:{self.chat_id}:version"
+>>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
 
     # ==================== 기존 LangGraph 메모리 기능 ====================
     
@@ -144,6 +174,61 @@ class RedisLangGraphMemory:
         except Exception:
             pass
 
+    # ---------- 초기화/클라이언트 ----------
+    @staticmethod
+    def _detect_container() -> bool:
+        try:
+            return os.path.exists("/.dockerenv")
+        except Exception:
+            return False
+
+    def _init_client(
+        self,
+        redis_host: Optional[str],
+        redis_port: Optional[int],
+        redis_url: Optional[str] = None,
+        retries: int = 3,
+        delay: float = 0.5,
+    ) -> redis.Redis:
+        url = redis_url or os.getenv("REDIS_URL")
+        if url:
+            parsed = urlparse(url)
+            password = parsed.password or os.getenv("REDIS_PASSWORD")
+            db = int(parsed.path.lstrip("/") or 0)
+            host = parsed.hostname
+            port = parsed.port or 6379
+        else:
+            in_container = self._detect_container()
+            default_host = "redis" if in_container else "localhost"
+            default_port = 6379 if in_container else 6380
+            host = redis_host or os.getenv("REDIS_HOST") or default_host
+            port = int(redis_port or os.getenv("REDIS_PORT") or default_port)
+            password = os.getenv("REDIS_PASSWORD") or None
+            db = int(os.getenv("REDIS_DB") or 0)
+        ssl_flag = os.getenv("REDIS_SSL", "false").lower() in {"1", "true", "yes"}
+        socket_timeout_raw = os.getenv("REDIS_SOCKET_TIMEOUT")
+        socket_timeout = float(socket_timeout_raw) if socket_timeout_raw else None
+        client_kwargs: Dict[str, Any] = dict(
+            host=host,
+            port=port,
+            db=db,
+            password=password,
+            decode_responses=True,
+            ssl=ssl_flag,
+        )
+        if socket_timeout is not None:
+            client_kwargs["socket_timeout"] = socket_timeout
+        last_err: Optional[Exception] = None
+        for attempt in range(1, retries + 1):
+            try:
+                client = redis.Redis(**client_kwargs)
+                client.ping()
+                return client
+            except Exception as e:
+                last_err = e
+                time.sleep(delay * attempt)
+        raise RuntimeError(f"Redis 연결 실패: {last_err}")
+
     @property
     def k_shared(self) -> str:
         return self._k("shared")
@@ -156,7 +241,7 @@ class RedisLangGraphMemory:
     def _load_shared(self) -> Dict[str, Any]:
         raw = self.redis.get(self.k_shared)
         if not raw:
-            return json.loads(json.dumps(SHARED_DEFAULTS))  # deepcopy
+            return json.loads(json.dumps(SHARED_DEFAULTS))
         try:
             data = json.loads(raw)
             tmp = {"shared": data}

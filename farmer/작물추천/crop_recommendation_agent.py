@@ -32,7 +32,7 @@ load_dotenv(find_dotenv())
 
 MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "root:milvus")
-MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "hongyoungjun")
+MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "crop_info")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -646,6 +646,42 @@ def build_graph():
     
     return g.compile()
 
+def run(state: dict) -> dict:
+    """
+    오케스트레이터에서 호출되는 메인 실행 함수
+    
+    Args:
+        state: 오케스트레이터에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 응답
+    """
+    try:
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 작물추천 관련 질문을 해주세요."}
+        
+        print(f"[작물추천_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 빌드 및 실행
+        app = build_graph()
+        final_state = app.invoke({"question": query})
+        
+        # 결과 추출
+        answer = final_state.get("answer", "답변 생성에 실패했습니다.")
+        
+        print(f"[작물추천_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
+    except Exception as e:
+        error_msg = f"작물추천 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[작물추천_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
+
 if __name__ == "__main__":
     import argparse
     
@@ -653,10 +689,6 @@ if __name__ == "__main__":
     parser.add_argument("-q", "--query", type=str, help="한 번만 실행할 질문 (예: -q '주말농장에 키울 작물 추천해줘')")
     args = parser.parse_args()
     
-
-    
-
-
     app = build_graph()
 
     if args.query:

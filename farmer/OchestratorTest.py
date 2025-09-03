@@ -3,7 +3,7 @@ import requests
 import re
 import json
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import InMemorySaver
+
 from langchain_core.runnables import RunnableLambda
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -82,9 +82,6 @@ class Farmer:
         # 메모리 시스템 초기화
         self._init_memory_system()
         
-        # 체크포인터 초기화
-        self.checkpointer = InMemorySaver()
-        
         # 에이전트 함수들 로드
         self._load_agent_functions()
         
@@ -95,46 +92,121 @@ class Farmer:
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
     
     def _init_memory_system(self):
-        """메모리 시스템 초기화"""
+        """메모리 시스템 초기화 - Redis만 사용"""
+        # Redis 연결 상태 확인 및 메모리 시스템 초기화
+        self.redis_connected = False
         try:
-            # Redis 메모리 시스템 시도
+            # Farmer 전용 Redis 메모리 시스템 시도
             sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-            from common.short_term.redis_memory import RedisLangGraphMemory
+            from common.short_term.farmer_redis import FarmerRedisMemory
             
             # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
             os.environ['REDIS_PORT'] = '6380'
-            self.memory = RedisLangGraphMemory(user_id=self.user_id, service=self.service, chat_id=self.chat_id)
-            print("✅ Redis 메모리 시스템 초기화 완료")
+            self.memory = FarmerRedisMemory(
+                user_id=self.user_id, 
+                service=self.service, 
+                chat_id=self.chat_id,
+                redis_port=6380
+            )
+            
+            # Redis 연결 테스트
+            if self.memory.connected:
+                test_state = {"test": "connection"}
+                self.memory.save(test_state, test_state)
+                self.memory.load(test_state)
+                
+                self.redis_connected = True
+                print("✅ Farmer Redis 메모리 시스템 초기화 완료 - 대화 맥락 유지 가능")
+                
+                # 메모리 통계 출력
+                stats = self.memory.get_memory_stats()
+                print(f"📊 메모리 상태: {stats}")
+            else:
+                raise Exception("Redis 연결 실패")
+                
         except Exception as e:
             print(f"⚠️ Redis 연결 실패: {e}")
-            print("📝 메모리 기반으로 실행합니다.")
-            # 간단한 메모리 기반 메모리 클래스
-            class SimpleMemory:
-                def load(self, state): 
-                    return state
-                def save(self, state, _): 
-                    return state
-            self.memory = SimpleMemory()
+            print("📝 메모리 시스템 없음 - 단일 질문 처리 모드")
+            self.redis_connected = False
+            self.memory = None
     
     def load_state(self, state: RouterState) -> RouterState:
         """그래프 시작 시 메모리에서 상태를 불러와 state에 병합"""
-        if (state.get("session") or {}).get("loaded"):
+        # Redis 연결 상태에 따른 처리
+        if self.redis_connected:
+            print("[상태 초기화] Farmer Redis 메모리 시스템 - 대화 맥락 유지")
+        else:
+            print("[상태 초기화] Redis 미연결 - 단일 질문 처리 모드 (문맥 무시)")
+            # Redis 미연결 시 항상 깨끗한 상태로 초기화
+            return self._initialize_clean_state(state)
+        
+        session_info = state.get("session", {})
+        if session_info.get("loaded"):
             return state
-        loaded = self.memory.load(state)
-        loaded.setdefault("session", {})
-        loaded["session"]["loaded"] = True
-        return loaded
+        
+        try:
+            # 메모리 시스템에서 상태 불러오기 (자동으로 맥락 포함)
+            loaded = self.memory.load(state)
+            loaded.setdefault("session", {})
+            loaded["session"]["loaded"] = True
+            loaded["session"]["redis_connected"] = self.redis_connected
+            
+            print("[메모리 로드] Farmer Redis 메모리에서 상태 불러오기 완료")
+            
+            # 대화 맥락 정보 출력
+            context = self.memory.get_conversation_context(limit=3)
+            if context:
+                print(f"[대화 맥락] {context[:100]}...")
+            
+            # 작물 추천 맥락 정보 출력
+            crop_context = self.memory.get_crop_recommendation_context(limit=2)
+            if crop_context:
+                print(f"[작물 추천 맥락] {crop_context[:100]}...")
+            
+            return loaded
+        except Exception as e:
+            print(f"⚠️ 메모리 로드 실패: {e}")
+            return self._initialize_clean_state(state)
+    
+    def _initialize_clean_state(self, state: RouterState) -> RouterState:
+        """완전히 깨끗한 상태로 초기화 (Redis 미연결 시)"""
+        # 모든 상태 초기화
+        state.clear()
+        state["session"] = {"loaded": True, "new_question": True, "redis_connected": False}
+        state["query"] = []
+        state["selected_agents"] = []
+        state["question_parts"] = {}
+        state["execution_order"] = []
+        state["crop_info"] = []
+        state["selected_crop"] = []
+        state["agent_results"] = {}
+        state["output"] = []
+        state["routing"] = {}
+        state["error_info"] = {}
+        return state
     
     def persist_state(self, state: RouterState) -> RouterState:
         """그래프 리프 종료 후 메모리에 반영"""
+        # Redis 미연결 시 상태 저장 건너뛰기
+        if not self.redis_connected:
+            print("[메모리 저장] Redis 미연결 - 상태 저장 건너뛰기 (단일 질문 처리 모드)")
+            return state
+        
         try:
+            # 메모리 시스템에 상태 저장 (맥락 포함)
             self.memory.save(state, state)
+            print("[메모리 저장] Farmer Redis 메모리에 상태 저장 완료")
+            
         except Exception as e:
-            print(f"⚠️ 상태 저장 실패: {e}")
+            print(f"⚠️ Redis 상태 저장 실패: {e}")
         return state
     
     def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> RouterState:
-        """워크플로우 재개 기능"""
+        """워크플로우 재개 기능 - Redis 미연결 시 사용 불가"""
+        if not self.redis_connected:
+            print("❌ Redis 미연결 상태 - 워크플로우 재개 불가")
+            raise Exception("Redis 미연결 상태에서는 워크플로우 재개가 불가능합니다.")
+        
         if config is None:
             config = {"configurable": {"thread_id": "default"}}
         
@@ -158,7 +230,7 @@ class Farmer:
             resume_command = Command(resume=resume_data)
             print(f"📤 Command(resume) 전송: {resume_command}")
             
-            # 체크포인터가 설정된 그래프로 재개
+            # 그래프로 재개
             result = self.graph.invoke(resume_command, config)
             print("✅ 워크플로우 재개 완료")
             return result
@@ -191,17 +263,48 @@ class Farmer:
         
         return state
     
+    def clear_memory(self):
+        """메모리 전체 삭제"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'clear_memory'):
+            self.memory.clear_memory()
+            print("✅ Farmer 메모리 삭제 완료")
+        else:
+            print("⚠️ Redis 미연결 상태 - 메모리 삭제 불가")
+    
+    def get_memory_stats(self):
+        """메모리 사용 통계 조회"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'get_memory_stats'):
+            return self.memory.get_memory_stats()
+        else:
+            return {"connected": False, "type": "None"}
+    
+    def get_conversation_context(self, limit: int = 5):
+        """대화 맥락 조회"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'get_conversation_context'):
+            return self.memory.get_conversation_context(limit)
+        else:
+            return ""
+    
+    def get_crop_recommendation_context(self, limit: int = 3):
+        """작물 추천 맥락 조회"""
+        if self.redis_connected and self.memory and hasattr(self.memory, 'get_crop_recommendation_context'):
+            return self.memory.get_crop_recommendation_context(limit)
+        else:
+            return ""
+
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
-        from 작물추천.crop65pdfllm import run as crop_recommend_run
-        from 재배방법.crop_overall import run as crop_cultivation_run
+        from 작물추천.crop_recommendation_agent import run as crop_recommend_run
+        from 재배방법.CG_agent_edit import run as crop_cultivation_run
         from 재해대응.DisasterAgent import run as disaster_run
+        from WeatherAgent import run as weather_run
         from sales.SalesAgent import run as market_run
         
         self.agent_functions = {
             "작물추천_agent": crop_recommend_run,
             "작물재배_agent": crop_cultivation_run,
             "재해_agent": disaster_run,
+            "날씨_agent": weather_run,
             "판매처_agent": market_run
         }
     
@@ -275,6 +378,10 @@ class Farmer:
             "폭염, 한파, 가뭄, 집중호우, 홍수 등 자연재해 및 이상기후로 인한 피해를 예방하고 대응하는 방법을 안내합니다. 재해 발생 전 대비, 재해 발생 중의 조치, 재해 후 작물 복구 및 피해 최소화 방안을 다룹니다."
             "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
         ),
+        "날씨_agent": (
+            "현재 날씨, 단기예보, 중기예보, 기상특보 등 실시간 기상 정보를 제공합니다. 기상청 API를 통해 정확한 날씨 데이터를 바탕으로 농업에 필요한 기상 정보를 안내합니다."
+            "※ 핵심 키워드: '날씨', '기온', '강수', '예보', '하늘상태', '바람', '습도', '오늘 날씨', '내일 날씨'"
+        ),
         "판매처_agent": (
             "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 실시간 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
@@ -285,7 +392,13 @@ class Farmer:
     def simple_agent_selector(self, user_question):
         """
         사용자 질문을 분석하여 필요한 에이전트를 선택하는 함수
+        메모리 시스템이 자동으로 대화 맥락을 관리합니다.
         """
+        # 메모리 시스템 상태 확인
+        if self.redis_connected:
+            print("[에이전트 선택] Farmer Redis 메모리 시스템 - 대화 맥락 자동 관리")
+        else:
+            print("[에이전트 선택] 메모리 시스템 없음 - 단일 질문 처리")
         selection_prompt = f"""
         다음 질문을 분석하여 필요한 에이전트를 선택해주세요.
         
@@ -296,7 +409,9 @@ class Farmer:
         
         3) 재해_agent: {self.agent_descriptions["재해_agent"]}
         
-        4) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
+        4) 날씨_agent: {self.agent_descriptions["날씨_agent"]}
+        
+        5) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
         
         질문: "{user_question}"
         
@@ -451,11 +566,6 @@ class Farmer:
         except Exception as e:
             return f"에이전트 실행 중 오류: {e}"
 
-
-
-
-
-
     def select_single_crop_from_recommendations(self, crop_recommendations):
         """
         작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
@@ -512,23 +622,29 @@ class Farmer:
             # 유효한 입력인 경우 루프 종료
             break
 
-        # 모든 상태 초기화
-        state["crop_info"] = []
-        state["selected_crop"] = []
-        state["selected_agents"] = []
-        state["question_parts"] = {}
-        state["execution_order"] = []
-        state["agent_results"] = {} # 에이전트별 결과 딕셔너리 초기화
-        state["output"] = []
-
-        # 유효한 입력인 경우 상태에 저장하고 다음 단계로 (리스트로 저장)
+        # Redis 미연결 시 새로운 질문 플래그 설정 (문맥 무시)
+        if not self.redis_connected:
+            state.setdefault("session", {})
+            state["session"]["new_question"] = True
+            print(f"[Redis 미연결] 단일 질문 처리 모드 - 문맥 무시")
+        else:
+            # Redis 연결 시 기존 로직 유지
+            state.setdefault("session", {})
+            state["session"]["new_question"] = True
+        
+        # 새로운 질문 저장
         state["query"] = [user_input]
         print(f"\n[질문] {user_input}")
+        print(f"[새로운 질문 처리 시작]")
         
         return state
 
     @traceable(name="node_agent_select")
     def node_agent_select(self, state: RouterState) -> RouterState:
+        # 메모리 시스템 상태 표시
+        memory_type = "Farmer Redis" if self.redis_connected else "None"
+        print(f"\n[에이전트 선택] 메모리 시스템: {memory_type}")
+        
         # 기존 복잡한 로직을 단순화된 함수로 교체
         result = self.simple_agent_selector(state["query"][0] if state["query"] else "")
         # 기존 selected_agents 덮어쓰기 (중복 방지)
@@ -677,6 +793,36 @@ class Farmer:
         print(f"[✅ 판매처_agent 병렬 실행 완료]")
         print(f"[📤 응답 원본] {answer[:200]}...")
         return state
+
+    @traceable(name="node_weather_agent")
+    def node_weather_agent(self, state: RouterState) -> RouterState:
+        """날씨_agent 전용 노드"""
+        if "날씨_agent" not in state.get("selected_agents", []):
+            return state
+        
+        print(f"\n=== 🌤️ 날씨_agent 병렬 실행 ===")
+        
+        # 질문 부분 가져오기
+        question_parts = state.get("question_parts", {})
+        if question_parts and "날씨_agent" in question_parts:
+            question_part = question_parts["날씨_agent"]
+        else:
+            question_part = state["query"][0] if state["query"] else ""
+        
+        print(f"[📝 담당 질문] {question_part}")
+        
+        # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
+        # (날씨는 지역과 시간이 중요하므로)
+        
+        # 에이전트 실행
+        answer = self.execute_agent_with_boundaries("날씨_agent", question_part)
+        
+        # 전용 키에 답변 저장
+        state["agent_results"]["날씨_agent"] = answer
+        
+        print(f"[✅ 날씨_agent 병렬 실행 완료]")
+        print(f"[📤 응답 원본] {answer[:200]}...")
+        return state
         
     # 병렬 처리 노드 (개선된 비동기 처리)
     @traceable(name="node_parallel_agents")
@@ -817,6 +963,7 @@ class Farmer:
         workflow.add_node("parallel_execution", self.node_parallel_agents)
         workflow.add_node("crop_grow_agent", self.node_crop_grow_agent)
         workflow.add_node("disaster_agent", self.node_disaster_agent)
+        workflow.add_node("weather_agent", self.node_weather_agent)
         workflow.add_node("sales_agent", self.node_sales_agent)
 
         workflow.add_node("merge_output", self.node_merge_output)
@@ -839,6 +986,8 @@ class Farmer:
                     return "crop_grow_agent"
                 elif agent == "재해_agent":
                     return "disaster_agent"
+                elif agent == "날씨_agent":
+                    return "weather_agent"
                 elif agent == "판매처_agent":
                     return "sales_agent"
 
@@ -856,6 +1005,7 @@ class Farmer:
                 "crop_recommend": "crop_recommend",
                 "crop_grow_agent": "crop_grow_agent",
                 "disaster_agent": "disaster_agent", 
+                "weather_agent": "weather_agent",
                 "sales_agent": "sales_agent",
                 "parallel_execution": "parallel_execution",
 
@@ -875,11 +1025,13 @@ class Farmer:
         # 병렬 에이전트 실행
         workflow.add_edge("parallel_execution", "crop_grow_agent")
         workflow.add_edge("parallel_execution", "disaster_agent")
+        workflow.add_edge("parallel_execution", "weather_agent")
         workflow.add_edge("parallel_execution", "sales_agent")
         
         # 모든 에이전트 노드에서 병합 노드로
         workflow.add_edge("crop_grow_agent", "merge_output")
         workflow.add_edge("disaster_agent", "merge_output")
+        workflow.add_edge("weather_agent", "merge_output")
         workflow.add_edge("sales_agent", "merge_output")
 
         
@@ -889,17 +1041,10 @@ class Farmer:
         
         workflow.set_entry_point("load_state")
         
-        return workflow.compile(checkpointer=self.checkpointer)
+        return workflow.compile()
 
     def run_orchestrator_langgraph(self):
         graph = self.create_workflow()
-        try:
-            graph_image_path = "ochestrator_workflow.png"
-            with open(graph_image_path, "wb") as f:
-                f.write(graph.get_graph().draw_mermaid_png())
-            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        except Exception as e:
-            print(f"그래프 시각화 중 오류 발생: {e}")
 
         while True:
             try:
@@ -937,6 +1082,14 @@ class Farmer:
 def run_orchestrator_langgraph():
     """기존 실행 방식과의 호환성을 위한 함수"""
     farmer = Farmer(user_id="default_user", service="farmer", chat_id="default_chat")
+    # graph = farmer.create_workflow()
+    # try:
+    #     graph_image_path = "ochestrator_workflow.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(graph.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류 발생: {e}")
     farmer.run_standalone()
 
 if __name__ == "__main__":

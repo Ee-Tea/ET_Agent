@@ -933,6 +933,8 @@ class Farmer:
                 continue
 
 
+
+
 # 기존 실행 방식과의 호환성을 위한 전역 함수들
 def run_orchestrator_langgraph():
     """기존 실행 방식과의 호환성을 위한 함수"""

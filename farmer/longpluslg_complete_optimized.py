@@ -2,7 +2,7 @@
 """
 통합 기상 전문가 그래프:
 - 라이브 특보(wrn_met_data.php) + 단기육상예보(fct_afs_dl.php)
-- 중기 육상예보 주간(fct_afs_wl.php) [CSV 권역 매핑 기반]  ← 통합 추가
+- 권역 육상예보 주간(fct_afs_wl.php) [CSV 권역 매핑 기반]  ← 통합 추가
 - API-only retrieve (벡터DB 미사용, in-memory FAISS 유사도)
 - 2차 검증 노드 제거
 - 예보관 톤(개요/상세/영향-위험도/권고) 프롬프트
@@ -86,6 +86,9 @@ KMA_TIMEOUT = int(os.getenv("KMA_TIMEOUT", "30"))
 WHEATHER_API_KEY_HUB=REDACTED("WHEATHER_API_KEY_HUB")
 USE_KMA_LIVE = os.getenv("USE_KMA_LIVE", "true").lower() in ("1", "true", "yes")
 FORCE_DISABLE_KMA_LIVE = False
+
+# 통합 지역코드 CSV 설정
+UNIFIED_REGIONS_CSV = os.getenv("UNIFIED_REGIONS_CSV", "all_regions_combined.csv")
 
 TAVILY_API_KEY=REDACTED("TAVILY_API_KEY")
 TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
@@ -215,18 +218,43 @@ def _read_map_csv(path: Optional[str]) -> List[tuple]:
         pairs.append((code, name))
     return pairs
 
-def _load_region_maps_from_two_csvs():
+def _load_unified_region_map():
+    """통합 CSV에서 지역코드 매핑 로드"""
     REGION_MAP.clear()
     REGION_NAME_INDEX.clear()
-    paths = [os.getenv("KMA_ADVISORY_MAP_CSV"), os.getenv("KMA_FCT_MAP_CSV")]
-    for p in paths:
-        for code, name in _read_map_csv(p):
-            REGION_MAP[code] = name
-            REGION_NAME_INDEX.setdefault(_norm_name(name), []).append(code)
-    used = ", ".join([p for p in paths if p]) or "N/A"
-    print(f"✅ 지역코드 매핑 로드: {len(REGION_MAP)}개 (from: {used})")
+    
+    if not os.path.exists(UNIFIED_REGIONS_CSV):
+        print(f"⚠️ 통합 CSV 파일이 없습니다: {UNIFIED_REGIONS_CSV}")
+        return
+    
+    try:
+        # pandas로 읽기 (더 안정적)
+        df = pd.read_csv(UNIFIED_REGIONS_CSV, encoding='utf-8-sig')
+        
+        # 컬럼 자동 감지
+        code_col, name_col = _pick_cols(df)
+        
+        if not code_col or not name_col:
+            print("❌ CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
+            return
+        
+        print(f"✅ CSV 컬럼 감지: 코드={code_col}, 이름={name_col}")
+        
+        # 데이터 로드
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip()
+            name = str(row[name_col]).strip()
+            
+            if code and name and code.lower() != "nan" and name.lower() != "nan":
+                REGION_MAP[code] = name
+                REGION_NAME_INDEX.setdefault(_norm_name(name), []).append(code)
+        
+        print(f"✅ 통합 CSV 로드 완료: {len(REGION_MAP)}개 지역 (파일: {UNIFIED_REGIONS_CSV})")
+        
+    except Exception as e:
+        print(f"❌ 통합 CSV 로드 실패: {e}")
 
-_load_region_maps_from_two_csvs()
+_load_unified_region_map()
 
 def resolve_region(token: str) -> str:
     if not token: return "N/A"
@@ -383,22 +411,22 @@ def should_fetch_forecasts(q: str, days_from_today: int) -> bool:
     weather_keywords = ["날씨", "기온", "강수", "하늘", "바람", "예보"]
     return any(keyword in q for keyword in weather_keywords)
 
-def should_fetch_mid_forecasts(q: str, days_from_today: int) -> bool:
-    """중기예보 데이터를 가져올지 결정"""
+def should_fetch_region_forecasts(q: str, days_from_today: int) -> bool:
+    """권역예보 데이터를 가져올지 결정"""
     if not ENABLE_CONDITIONAL_API_CALLS:
         return True
     
-    # 4일 이전이면 중기예보 의미 없음
+    # 4일 이전이면 권역예보 의미 없음
     if days_from_today < 4:
         return False
     
-    # 10일 이후면 중기예보 범위 벗어남
+    # 10일 이후면 권역예보 범위 벗어남
     if days_from_today > 10:
         return False
     
-    # 중기예보 관련 키워드가 있어야 함
-    mid_keywords = ["중기", "주간", "장기", "전망", "예보"]
-    return any(keyword in q for keyword in mid_keywords)
+    # 권역예보 관련 키워드가 있어야 함
+    region_keywords = ["권역", "주간", "장기", "전망", "예보"]
+    return any(keyword in q for keyword in region_keywords)
 
 # =========[ 병렬 처리 함수들 ]=========
 def safe_api_call(func, *args, **kwargs):
@@ -451,11 +479,11 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                         fetch_short_land_records
                     )
             
-            # 중기 데이터 (4일 이후일 때만)
-            if days_from_today >= 4 and should_fetch_mid_forecasts(q, days_from_today):
+            # 권역 데이터 (4일 이후일 때만)
+            if days_from_today >= 4 and should_fetch_region_forecasts(q, days_from_today):
                 region_code = get_region_code(region)
                 if region_code:
-                    futures[f'mid_forecasts_{i}'] = executor.submit(
+                    futures[f'region_forecasts_{i}'] = executor.submit(
                         safe_api_call,
                         fetch_mid_week_land,
                         reg_id=region_code,
@@ -465,7 +493,7 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                     )
         
         # 결과 수집
-        results = {"advisories": [], "forecasts": [], "mid_forecasts": []}
+        results = {"advisories": [], "forecasts": [], "region_forecasts": []}
         for name, future in futures.items():
             try:
                 result = future.result(timeout=API_TIMEOUT)
@@ -474,8 +502,8 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                         results["advisories"].extend(result)
                     elif name.startswith('forecasts_'):
                         results["forecasts"].extend(result)
-                    elif name.startswith('mid_forecasts_'):
-                        results["mid_forecasts"].extend(result)
+                    elif name.startswith('region_forecasts_'):
+                        results["region_forecasts"].extend(result)
             except Exception as e:
                 print(f"❌ 병렬 처리 실패 ({name}): {e}")
         
@@ -506,17 +534,17 @@ def fetch_weather_data_sequential(sub_questions: List[Dict[str, Any]]) -> Dict[s
                 forecasts = fetch_short_land_records() if WHEATHER_API_KEY_HUB else []
                 results["forecasts"].extend(forecasts)
         
-        # 중기 데이터
-        if days_from_today >= 4 and should_fetch_mid_forecasts(q, days_from_today):
+        # 권역 데이터
+        if days_from_today >= 4 and should_fetch_region_forecasts(q, days_from_today):
             region_code = get_region_code(region)
             if region_code:
-                mid_forecasts = fetch_mid_week_land(
+                region_forecasts = fetch_mid_week_land(
                     reg_id=region_code,
                     target_date=date,
                     tmfc_range_days=3,
                     widen_days=0
                 ) if WHEATHER_API_KEY_HUB else []
-                results["mid_forecasts"].extend(mid_forecasts)
+                results["region_forecasts"].extend(region_forecasts)
     
     return results
 
@@ -836,19 +864,19 @@ def _format_for_llm(src: str, payload_json: str, human: str) -> str:
         risk = _risk_level_from_forecast(sky, prob, temp)
         return f"{line}\n[RISKS] 위험도(간이): {risk}\n[FORECAST_TYPE] {forecast_type}\n[NOTE] {human}"
         
-    elif src == "mid_forecast":
+    elif src == "region_forecast":
         line = (
             f"[{src}] 지역:{p.get('region_name','N/A')} | 대상:{p.get('forecast_time','N/A')} "
             f"| 하늘:{(p.get('sky_text') or 'N/A')} | 강수형:{(p.get('precip_type') or 'N/A')} | 강수확률:{(p.get('precip_prob') or 'N/A')}"
         )
-        # 중기는 온도 수치 없음 → 위험도는 강수/현상 위주로 보수적으로
+        # 권역은 온도 수치 없음 → 위험도는 강수/현상 위주로 보수적으로
         risk = "보통" if (p.get('precip_type') not in (None,"","없음") or str(p.get('precip_prob','')).isdigit()) else "약"
-        return f"{line}\n[RISKS] 위험도(간이): {risk}\n[FORECAST_TYPE] 중기예보\n[NOTE] {human}"
+        return f"{line}\n[RISKS] 위험도(간이): {risk}\n[FORECAST_TYPE] 권역예보\n[NOTE] {human}"
         
     return f"[{src}] {human}"
 
-# =========[ 중기예보(wl) 전용: CSV 권역/질의 해석 ]=========
-MID_REGIONS_CSV = os.getenv("MID_REGIONS_CSV", "mid_regions.csv")
+# =========[ 권역예보(wl) 전용: CSV 권역/질의 해석 ]=========
+REGION_REGIONS_CSV = UNIFIED_REGIONS_CSV  # 통합 CSV 사용
 MAX_RETRIES = 3
 BACKOFF = 1.5
 MERGE_BY_DAY = (os.getenv("MERGE_BY_DAY", "true").lower() in ("1", "true", "yes"))
@@ -920,30 +948,48 @@ def normalize_spaces(s: str) -> str:
     return re.sub(r"\s+", "", s or "")
 
 # --- CSV 로딩 ---
-def MID_load_all_from_csv(path: str) -> Dict[str, str]:
+def REGION_load_all_from_csv(path: str) -> Dict[str, str]:
+    """통합 CSV에서 권역예보용 권역 정보 로드"""
     if not os.path.exists(path):
         raise FileNotFoundError(f"권역 CSV를 찾을 수 없습니다: {path}")
-    mapping: Dict[str, str] = {}
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rid = (row.get("reg_id") or "").strip()
-            rname = (row.get("reg_name") or "").strip()
-            if rid and rname and rid not in mapping:
-                mapping[rid] = rname
-    if not mapping:
-        raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
-    return mapping
+    
+    try:
+        # pandas로 읽기 (더 안정적)
+        df = pd.read_csv(path, encoding='utf-8-sig')
+        
+        # 컬럼 자동 감지
+        code_col, name_col = _pick_cols(df)
+        
+        if not code_col or not name_col:
+            raise ValueError("CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
+        
+        mapping: Dict[str, str] = {}
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip()
+            name = str(row[name_col]).strip()
+            
+            if code and name and code.lower() != "nan" and name.lower() != "nan":
+                mapping[code] = name
+        
+        if not mapping:
+            raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
+        
+        return mapping
+        
+    except Exception as e:
+        print(f"❌ CSV 로딩 실패: {e}")
+        raise
 
-MID_REGION_CODE_RE = re.compile(r"^11[A-Z](\d)?0{4,5}$")
-def MID_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
-    region_map = {rid: nm for rid, nm in all_map.items() if MID_REGION_CODE_RE.match(rid)}
+# 통합 CSV의 다양한 지역코드 형식 지원
+REGION_REGION_CODE_RE = re.compile(r"^(11[A-Z](\d)?0{4,5}|L\d{7}|S\d{7})$")
+def REGION_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
+    region_map = {rid: nm for rid, nm in all_map.items() if REGION_REGION_CODE_RE.match(rid)}
     if not region_map:
         known = ["11B00000","11D10000","11D20000","11C20000","11C10000","11F20000","11F10000","11H20000","11H10000","11G00000"]
         region_map = {rid: all_map[rid] for rid in known if rid in all_map}
     return region_map
 
-def MID_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
+def REGION_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
     alias: Dict[str, str] = {}
     norm = lambda x: re.sub(r"\s+", "", x or "")
     def add(a: str, full: str):
@@ -963,33 +1009,58 @@ def MID_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
             if "영동" in full: add("영동", full); add("강원영동", full)
     return alias
 
-MID_ALL_MAP: Dict[str, str] = {}
-MID_LAND_MAP: Dict[str, str] = {}
+REGION_ALL_MAP: Dict[str, str] = {}
+REGION_LAND_MAP: Dict[str, str] = {}
 REGION_ALIASES: Dict[str, str] = {}
-if os.path.exists(MID_REGIONS_CSV):
-    MID_ALL_MAP = MID_load_all_from_csv(MID_REGIONS_CSV)
-    MID_LAND_MAP = MID_split_region_only(MID_ALL_MAP)
-    REGION_ALIASES = MID_build_alias_map(MID_LAND_MAP)
-    print(f"✅ 중기 CSV 로드: 전체 {len(MID_ALL_MAP)}개 / 권역 {len(MID_LAND_MAP)}개 (파일: {MID_REGIONS_CSV})")
+if os.path.exists(REGION_REGIONS_CSV):
+    REGION_ALL_MAP = REGION_load_all_from_csv(REGION_REGIONS_CSV)
+    REGION_LAND_MAP = REGION_split_region_only(REGION_ALL_MAP)
+    REGION_ALIASES = REGION_build_alias_map(REGION_LAND_MAP)
+    print(f"✅ 권역 CSV 로드: 전체 {len(REGION_ALL_MAP)}개 / 권역 {len(REGION_LAND_MAP)}개 (파일: {REGION_REGIONS_CSV})")
 else:
-    print("⚠️ 중기 CSV 파일이 없어 중기 권역 매핑을 건너뜁니다. (MID_REGIONS_CSV)")
+    print("⚠️ 권역 CSV 파일이 없어 권역 매핑을 건너뜁니다. (REGION_REGIONS_CSV)")
 
-MID_FAMILY_RULES = [
+REGION_FAMILY_RULES = [
+    # 기존 11X 형식
     (r"^11B",  "11B00000"), (r"^11D1", "11D10000"), (r"^11D2", "11D20000"),
     (r"^11C1", "11C10000"), (r"^11C2", "11C20000"), (r"^11F1", "11F10000"),
     (r"^11F2", "11F20000"), (r"^11H1", "11H10000"), (r"^11H2", "11H20000"),
     (r"^11G",  "11G00000"),
+    # 통합 CSV의 L, S 형식 추가
+    (r"^L100", "L1000000"), (r"^L101", "L1010000"), (r"^L102", "L1020000"),
+    (r"^L103", "L1030000"), (r"^L104", "L1040000"), (r"^L105", "L1050000"),
+    (r"^L106", "L1060000"), (r"^L107", "L1070000"), (r"^L108", "L1080000"),
+    (r"^S100", "S1000000"), (r"^S110", "S1100000"), (r"^S120", "S1200000"),
+    (r"^S130", "S1300000"), (r"^S140", "S1400000"), (r"^S150", "S1500000"),
+    (r"^S160", "S1600000"), (r"^S170", "S1700000"), (r"^S180", "S1800000"),
 ]
 
-def MID_normalize_mid_reg_code(code_like: str) -> Optional[str]:
+def REGION_normalize_region_reg_code(code_like: str) -> Optional[str]:
     c = (code_like or "").strip()
     if not c: return None
-    if c in MID_LAND_MAP: return c
-    for pat, target in MID_FAMILY_RULES:
-        if re.match(pat, c): return target if target in MID_LAND_MAP else target
+    
+    # 직접 매칭
+    if c in REGION_LAND_MAP: return c
+    
+    # 패턴 매칭
+    for pat, target in REGION_FAMILY_RULES:
+        if re.match(pat, c): 
+            return target if target in REGION_LAND_MAP else target
+    
+    # 통합 CSV의 다양한 형식 지원
+    # L 형식: L1000000 -> L1000000, L1010200 -> L1010000
+    if c.startswith('L') and len(c) >= 6:
+        base_code = c[:4] + '0000'
+        if base_code in REGION_LAND_MAP: return base_code
+    
+    # S 형식: S1000000 -> S1000000, S1100000 -> S1100000
+    if c.startswith('S') and len(c) >= 6:
+        base_code = c[:4] + '0000'
+        if base_code in REGION_LAND_MAP: return base_code
+    
     return None
 
-def MID_extract_datetime_from_question(q: str) -> Optional[datetime]:
+def REGION_extract_datetime_from_question(q: str) -> Optional[datetime]:
     qn = normalize_spaces(q); now = now_kst()
     if any(k in qn for k in ["오늘","현재","지금"]): return now
     if "내일" in qn: return now + timedelta(days=1)
@@ -1015,29 +1086,46 @@ def MID_extract_datetime_from_question(q: str) -> Optional[datetime]:
         except ValueError: return None
     return None
 
-def MID_is_mid_term_date(date: Optional[datetime]) -> Tuple[bool, Optional[int]]:
+def REGION_is_region_term_date(date: Optional[datetime]) -> Tuple[bool, Optional[int]]:
     if date is None: return (False, None)
     delta = (date.date() - now_kst().date()).days
     return (3 < delta <= 10, delta)
 
-def MID_extract_region_from_question(q: str) -> str:
+def REGION_extract_region_from_question(q: str) -> str:
     qn = normalize_spaces(q)
-    m = re.search(r"(11[A-Z]\d{5,})", qn)
-    if m:
-        cand = MID_normalize_mid_reg_code(m.group(1))
-        if cand: return MID_LAND_MAP.get(cand, cand)
-    for _code, name in MID_LAND_MAP.items():
+    
+    # 통합 CSV의 다양한 지역코드 패턴 지원
+    patterns = [
+        r"(11[A-Z]\d{5,})",  # 기존 11X 형식
+        r"(L\d{7})",         # L 형식
+        r"(S\d{7})",         # S 형식
+    ]
+    
+    for pattern in patterns:
+        m = re.search(pattern, qn)
+        if m:
+            cand = REGION_normalize_region_reg_code(m.group(1))
+            if cand: return REGION_LAND_MAP.get(cand, cand)
+    
+    # 지역명 매칭
+    for _code, name in REGION_LAND_MAP.items():
         if normalize_spaces(name) in qn: return name
+    
+    # 별칭 매칭
     for alias, full in REGION_ALIASES.items():
         if alias in qn: return full
-    for code, name in MID_LAND_MAP.items():
+    
+    # 수도권 특별 처리
+    for code, name in REGION_LAND_MAP.items():
         if "서울" in name and "인천" in name and ("경기" in name or "경기도" in name):
             return name
-    first_code = next(iter(MID_LAND_MAP.keys())) if MID_LAND_MAP else None
-    return MID_LAND_MAP.get(first_code, "수도권") if first_code else "수도권"
+    
+    # 기본값
+    first_code = next(iter(REGION_LAND_MAP.keys())) if REGION_LAND_MAP else None
+    return REGION_LAND_MAP.get(first_code, "수도권") if first_code else "수도권"
 
-def MID_region_name_to_code(region_full_name: str) -> Optional[str]:
-    for code, nm in MID_LAND_MAP.items():
+def REGION_region_name_to_code(region_full_name: str) -> Optional[str]:
+    for code, nm in REGION_LAND_MAP.items():
         if nm == region_full_name: return code
     return None
 
@@ -1059,7 +1147,7 @@ def request_with_retries(url: str, timeout: int, retries: int, backoff: float) -
             if i < retries: time.sleep(backoff * i)
     raise last or RuntimeError("request failed")
 
-def MID_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
+def REGION_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
     s = (line or "").strip()
     if not s or s.startswith("#") or s.startswith("7777END"): return None
     if s.endswith("="): s = s[:-1]
@@ -1075,7 +1163,7 @@ def MID_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
         rest.append(c)
     return {"reg_id": reg_id, "tmfc": tmfc or "", "tmef": tmef or "", "wf": " ".join(rest).strip(), "conf": "", "rn_st": "", "sky_code": "", "pre_code": ""}
 
-def MID_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def REGION_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     day_map: Dict[str, Dict[str, Optional[Dict[str, str]]]] = {}
     for it in latest_rows:
         tmef = it.get("tmef", "")
@@ -1132,7 +1220,7 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
         latest: Dict[str, Dict[str, str]] = {}
         want_d8 = target_date.strftime("%Y%m%d")
         for ln in text.splitlines():
-            item = MID_parse_wl_line(ln)
+            item = REGION_parse_wl_line(ln)
             if not item: continue
             if item.get("reg_id") != reg_id: continue
             tmef = item.get("tmef", "")
@@ -1142,9 +1230,9 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
                 latest[tmef] = item
         if not latest: return []
         rows = [latest[k] for k in sorted(latest.keys())]
-        if merge_day: rows = MID_merge_by_day(rows)
+        if merge_day: rows = REGION_merge_by_day(rows)
         docs: List[Dict[str, str]] = []
-        region_name = MID_LAND_MAP.get(reg_id, reg_id)
+        region_name = REGION_LAND_MAP.get(reg_id, reg_id)
         for it in rows:
             is_day_level = len(it.get("tmef","")) == 8
             target_label = (fmt_kst_any(it["tmef"]) if not is_day_level else
@@ -1156,14 +1244,14 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
             if rn.isdigit(): bits.append(f"강수확률 {rn}%")
             summary = " · ".join(bits) if bits else (wf or "예보문 없음")
             payload = {
-                "source": "KMA_MID_WEEK_LAND",
+                "source": "KMA_REGION_WEEK_LAND",
                 "region_id": reg_id, "region_name": region_name,
                 "announce_time": it.get("tmfc",""),
                 "forecast_time": it.get("tmef",""),
                 "sky_text": wf, "precip_type": conf, "precip_prob": rn,
                 "sky_code": it.get("sky_code",""), "pre_code": it.get("pre_code",""),
             }
-            human = f"{region_name} 중기예보(주간) — 발표 {fmt_kst_any(payload['announce_time'])}, 대상 {target_label}: {summary}"
+            human = f"{region_name} 권역예보(주간) — 발표 {fmt_kst_any(payload['announce_time'])}, 대상 {target_label}: {summary}"
             docs.append({"json": json.dumps(payload, ensure_ascii=False, separators=(',', ':')), "human": human})
         return docs
     except requests.exceptions.HTTPError as e:
@@ -1460,12 +1548,12 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     live_enabled = _should_use_live(q)
     
     # 질문에서 날짜 추출하여 4일 이후면 라이브 데이터 제외
-    question_date = MID_extract_datetime_from_question(q)
+    question_date = REGION_extract_datetime_from_question(q)
     days_from_today = get_days_from_today(question_date) if question_date else 0
     
     # 오늘+4일부터는 라이브 데이터(특보/단기) 사용 안 함
     if days_from_today >= 4:
-        print(f"ℹ️ 질문 날짜가 {days_from_today}일 후로, 라이브 데이터 제외하고 중기예보만 사용")
+        print(f"ℹ️ 질문 날짜가 {days_from_today}일 후로, 라이브 데이터 제외하고 권역예보만 사용")
         live_enabled = False
 
     scored: List[tuple] = []
@@ -1514,47 +1602,47 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     else:
         print("ℹ️ 라이브 기준 미충족 (질문에 실시간 키워드 없음)")
 
-    # --- 중기예보 (오늘+4~10일) ---
+    # --- 권역예보 (오늘+4~10일) ---
     try:
-        if MID_LAND_MAP:  # CSV가 있을 때만
-            q_date = MID_extract_datetime_from_question(q)
-            ok_mid, delta = MID_is_mid_term_date(q_date)
-            if ok_mid:
-                region_name = MID_extract_region_from_question(q)
-                region_code = MID_region_name_to_code(region_name)
+        if REGION_LAND_MAP:  # CSV가 있을 때만
+            q_date = REGION_extract_datetime_from_question(q)
+            ok_region, delta = REGION_is_region_term_date(q_date)
+            if ok_region:
+                region_name = REGION_extract_region_from_question(q)
+                region_code = REGION_region_name_to_code(region_name)
                 m = re.search(r"(11[A-Z]\d{5,})", normalize_spaces(q))
                 if m:
-                    cand = MID_normalize_mid_reg_code(m.group(1))
-                    if cand: region_code, region_name = cand, MID_LAND_MAP.get(cand, region_name)
+                    cand = REGION_normalize_region_reg_code(m.group(1))
+                    if cand: region_code, region_name = cand, REGION_LAND_MAP.get(cand, region_name)
                 if region_code:
-                    mid_docs = fetch_mid_week_land(reg_id=region_code, target_date=q_date,
+                    region_docs = fetch_mid_week_land(reg_id=region_code, target_date=q_date,
                                                    tmfc_range_days=3, widen_days=0, disp="1", help_flag="0",
                                                    merge_day=MERGE_BY_DAY)
-                    if mid_docs:
-                        human = [d["human"] for d in mid_docs]
+                    if region_docs:
+                        human = [d["human"] for d in region_docs]
                         embs = embed_texts(human)
                         idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
                         qv = embed_texts([q])[0]
-                        topk = min(5, len(mid_docs))
+                        topk = min(5, len(region_docs))
                         D, I = idx.search(np.array([qv], dtype="float32"), topk)
                         for s, i in zip(D[0], I[0]):
                             if i == -1: continue
-                            ctx = _format_for_llm("mid_forecast", mid_docs[i]['json'], mid_docs[i]['human'])
-                            scored.append((float(s) + 1.0, ctx, "mid_forecast"))
+                            ctx = _format_for_llm("region_forecast", region_docs[i]['json'], region_docs[i]['human'])
+                            scored.append((float(s) + 1.0, ctx, "region_forecast"))
                 else:
-                    print("⚠️ 중기 권역 코드를 찾지 못했습니다.")
+                    print("⚠️ 권역 코드를 찾지 못했습니다.")
             else:
                 if delta is not None:
-                    print(f"ℹ️ 중기 대상 아님(오늘 기준 {delta:+d}일).")
+                    print(f"ℹ️ 권역 대상 아님(오늘 기준 {delta:+d}일).")
     except Exception as e:
-        print(f"❌ 중기예보 처리 오류: {e}")
+        print(f"❌ 권역예보 처리 오류: {e}")
 
     # --- 스코어 정규화 & dedup ---
     normalized: List[tuple] = []
     by_src = {
         "live_advisory": [h for h in scored if h[2]=="live_advisory"],
         "live_forecast": [h for h in scored if h[2]=="live_forecast"],
-        "mid_forecast":  [h for h in scored if h[2]=="mid_forecast"],
+        "region_forecast":  [h for h in scored if h[2]=="region_forecast"],
     }
     for src, hits in by_src.items():
         if not hits: continue

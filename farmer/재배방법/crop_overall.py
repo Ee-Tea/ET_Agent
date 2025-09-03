@@ -409,20 +409,25 @@ def build_query_graph():
     return query_builder.compile()
 
 # --- 7. 메인 실행 로직 ---
-def run(state: Dict[str, Any]) -> Dict[str, Any]:
+def run(state: dict) -> dict:
     """
-    오케스트레이터에서 호출되는 메인 함수
-    작물재배_agent로 실행될 때 사용
+    OchestratorTest.py에서 호출되는 작물재배 에이전트 실행 함수
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 답변
     """
     try:
-        # 오케스트레이터에서 전달받은 상태에서 질문 추출
+        # 질문 추출
         query = state.get("query", "")
         if not query:
-            return {"pred_answer": "질문이 전달되지 않았습니다."}
+            return {"agent_answer": "질문이 제공되지 않았습니다. 작물재배 관련 질문을 해주세요."}
         
-        print("작물재배_agent 실행 중...")
-        print(f"질문: {query}")
-        print("--------------------------------------------------")
+        print(f"[작물재배_agent] 질문 처리 시작: {query}")
         
         # 통합 벡터 DB 로드
         print("통합 벡터 DB를 로드하는 중...")
@@ -432,7 +437,7 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
         vectorstore = setup_result.get("vectorstore")
         
         if not vectorstore:
-            return {"pred_answer": "벡터 DB 로드에 실패했습니다."}
+            return {"agent_answer": "벡터 DB 로드에 실패했습니다."}
         
         print("벡터 DB 로드 완료!")
         
@@ -440,26 +445,17 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
         rag_app = build_query_graph()
         final_state = rag_app.invoke({"question": query, "vectorstore": vectorstore})
         
-        # 결과 추출
-        answer = final_state.get('answer', "죄송합니다. 답변을 생성하지 못했습니다.")
+        # 답변 추출
+        answer = final_state.get('answer', "답변을 생성할 수 없습니다.")
         
-        print("--------------------------------------------------")
-        print("작물재배_agent 실행 완료!")
+        print(f"[작물재배_agent] 답변 생성 완료: {len(answer)}자")
         
-        # 오케스트레이터가 기대하는 형식으로 반환
-        return {
-            "pred_answer": answer,
-            "context": final_state.get('context', ''),
-            "classification": final_state.get('classification', ''),
-            "retrieval_sufficiency": final_state.get('retrieval_sufficiency', ''),
-            "keywords": final_state.get('keywords', ''),
-            "api_result": final_state.get('api_result', '')
-        }
+        return {"agent_answer": answer}
         
     except Exception as e:
-        error_msg = f"작물재배_agent 실행 중 오류가 발생했습니다: {e}"
-        print(error_msg)
-        return {"pred_answer": error_msg}
+        error_msg = f"작물재배 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[작물재배_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
 
 if __name__ == "__main__":
     print("🌱 농작물 챗봇 에이전트 시작...")

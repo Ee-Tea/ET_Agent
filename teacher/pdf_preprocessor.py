@@ -121,6 +121,7 @@ class PDFPreprocessor:
             r'([^\s]+\.pdf)',  # 기본 .pdf 파일 경로
             r'([C-Z]:[\\\/][^\\\/\s]*\.pdf)',  # Windows 절대 경로
             r'([\.\/][^\\\/\s]*\.pdf)',  # 상대 경로
+            r'\b([a-zA-Z0-9가-힣_\-\s]+\.pdf)\b',  # 공백으로 구분된 PDF 파일명
         ]
         
         pdf_paths = []
@@ -128,7 +129,36 @@ class PDFPreprocessor:
             matches = re.findall(pattern, text, re.IGNORECASE)
             pdf_paths.extend(matches)
         
-        return list(set(pdf_paths))  # 중복 제거
+        # 중복 제거 및 파일 존재 여부 확인
+        unique_paths = list(set(pdf_paths))
+        valid_paths = []
+        
+        for path in unique_paths:
+            # 파일명에서 불필요한 공백 제거
+            clean_path = path.strip()
+            
+            # 현재 디렉토리에서 파일 찾기
+            if os.path.exists(clean_path):
+                valid_paths.append(clean_path)
+                print(f"📄 PDF 파일 발견: {clean_path}")
+            else:
+                # teacher/solution/pdf_outputs 디렉토리에서 찾기
+                pdf_outputs_path = os.path.join("teacher", "solution", "pdf_outputs", clean_path)
+                if os.path.exists(pdf_outputs_path):
+                    valid_paths.append(pdf_outputs_path)
+                    print(f"📄 pdf_outputs에서 PDF 파일 발견: {pdf_outputs_path}")
+                else:
+                    # 현재 디렉토리의 하위 디렉토리들에서 찾기
+                    for root, dirs, files in os.walk("."):
+                        if clean_path in files:
+                            full_path = os.path.join(root, clean_path)
+                            valid_paths.append(full_path)
+                            print(f"📄 하위 디렉토리에서 PDF 파일 발견: {full_path}")
+                            break
+                    else:
+                        print(f"⚠️ PDF 파일을 찾을 수 없음: {clean_path}")
+        
+        return valid_paths
     
     def extract_problem_range(self, text: str) -> Optional[Dict]:
         """문제 번호 범위 추출"""

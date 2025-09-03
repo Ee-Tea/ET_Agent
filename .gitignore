@@ -1,3 +1,6 @@
+# AWS Milvus keys
+keys/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -245,3 +248,14 @@ data/
 data/**
 *.rdb
 *.aof
+keys/
+*.pem
+data\redis\
+data/redis/
+
+.env(suby)
+.env(**
+#추가
+data/
+docker-compose.yml
+volumes/

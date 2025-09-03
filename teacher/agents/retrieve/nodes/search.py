@@ -1,6 +1,7 @@
 from langchain.tools import Tool
 from langchain_community.utilities import WikipediaAPIWrapper
 from ddgs import DDGS
+from .milvus_search import milvus_tool
 
 wiki_tool = Tool(
     name="Wikipedia Search",

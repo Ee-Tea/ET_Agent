@@ -36,8 +36,8 @@ API_KEY = os.getenv("OPENAI_API_KEY=REDACTED not API_KEY:
 
 # 모델 & 토큰 한도
 MODEL = os.getenv("OPENAI_VISION_MODEL", "o4-mini")  # 예: "o4-mini" 또는 "gpt-4o-mini"
-MAX_OUTPUT_TOKENS_DEFAULT = int(os.getenv("MAX_OUTPUT_TOKENS", "1200"))
-MAX_OUTPUT_TOKENS_FALLBACK = 2000  # 길이 초과 시에만 사용
+MAX_OUTPUT_TOKENS_DEFAULT = int(os.getenv("MAX_OUTPUT_TOKENS", "4000"))  # 기본값 증가
+MAX_OUTPUT_TOKENS_FALLBACK = 6000  # 길이 초과 시 더 높게 설정
 # 추가: JSON만 출력하도록 강하게 요구하는 힌트
 STRICT_JSON_HINT = (
     "출력은 오직 하나의 JSON 객체만! 앞뒤 설명/코드블록/백틱 금지. "
@@ -209,13 +209,104 @@ def call_gpt_on_images(image_paths: List[str]) -> Dict[str, Any]:
         resp = _create_with_resilience(contents, max_output_tokens=MAX_OUTPUT_TOKENS_FALLBACK, use_schema=True)
 
     text = _extract_output_text(resp)
+    
+    print(f"🔍 [img2json] LLM 응답 길이: {len(text)}")
+    print(f"🔍 [img2json] LLM 응답 시작: {text[:100]}...")
+    print(f"🔍 [img2json] LLM 응답 끝: {text[-100:] if len(text) > 100 else text}")
 
-    # json_schema 또는 json_object인 경우 파싱
-    data = json.loads(text)
+    # JSON 파싱 시도 (강화된 오류 처리)
+    try:
+        # json_schema 또는 json_object인 경우 파싱
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"⚠️ [img2json] JSON 파싱 실패: {e}")
+        print(f"🔍 [img2json] 문제가 있는 텍스트: {text[max(0, e.pos-50):e.pos+50]}")
+        
+        # JSON 복구 시도
+        try:
+            print(f"🔧 [img2json] JSON 복구 시작...")
+            
+            # 1단계: 기본적인 JSON 구조 복구
+            if text.count('"') % 2 != 0:  # 따옴표가 홀수개
+                last_quote = text.rfind('"')
+                if last_quote > 0:
+                    text = text[:last_quote+1]
+                    print(f"🔧 [img2json] 따옴표 불균형 복구: {text}")
+            
+            # 2단계: 중괄호 불균형 복구
+            if text.count('{') != text.count('}'):
+                if text.count('{') > text.count('}'):
+                    text += '}' * (text.count('{') - text.count('}'))
+                else:
+                    text = '{' * (text.count('}') - text.count('{')) + text
+                print(f"🔧 [img2json] 중괄호 불균형 복구: {text}")
+            
+            # 3단계: 대괄호 불균형 복구
+            if text.count('[') != text.count(']'):
+                if text.count('[') > text.count(']'):
+                    text += ']' * (text.count('[') - text.count(']'))
+                else:
+                    text = '[' * (text.count(']') - text.count('[')) + text
+                print(f"🔧 [img2json] 대괄호 불균형 복구: {text}")
+            
+            # 4단계: 불완전한 객체/배열 완성
+            if text.endswith('{"number":'):
+                text += '"1","question":"","options":["","","",""]}]}'
+                print(f"🔧 [img2json] 불완전한 객체 완성: {text}")
+            elif text.endswith('{"problems":['):
+                text += '{"number":"1","question":"","options":["","","",""]}]}'
+                print(f"🔧 [img2json] 불완전한 배열 완성: {text}")
+            elif text.endswith('{"problems":'):
+                text += '[{"number":"1","question":"","options":["","","",""]}]}'
+                print(f"🔧 [img2json] 불완전한 구조 완성: {text}")
+            
+            # 5단계: 최종 검증 및 파싱
+            print(f"🔧 [img2json] 최종 복구된 텍스트: {text}")
+            data = json.loads(text)
+            print(f"✅ [img2json] JSON 복구 성공")
+            
+        except json.JSONDecodeError as e2:
+            print(f"❌ [img2json] JSON 복구 실패: {e2}")
+            print(f"🔍 [img2json] 복구 실패한 텍스트: {text}")
+            
+            # 6단계: 완전히 새로운 기본 구조 생성
+            try:
+                # 문제가 있는 경우 기본 문제 1개 생성
+                data = {
+                    "problems": [
+                        {
+                            "number": "1",
+                            "question": "이미지에서 문제를 추출하지 못했습니다. JSON 파싱 오류가 발생했습니다.",
+                            "options": ["오류 발생", "파싱 실패", "응답 불완전", "토큰 한도 초과"],
+                            "skipped": True,
+                            "reason": f"JSON 파싱 오류: {str(e)}"
+                        }
+                    ],
+                    "error": f"JSON 파싱 실패: {str(e)}",
+                    "raw_response": text[:500]
+                }
+                print(f"🔧 [img2json] 기본 구조 생성 완료")
+                return data
+                
+            except Exception as e3:
+                print(f"❌ [img2json] 기본 구조 생성도 실패: {e3}")
+                # 최후의 수단: 빈 구조 반환
+                data = {
+                    "problems": [],
+                    "error": f"모든 복구 시도 실패: {str(e)}",
+                    "raw_response": text[:500]
+                }
+                return data
 
     # json_object 폴백 시에도 최소 형태 보장
     if "problems" not in data or not isinstance(data["problems"], list):
-        raise RuntimeError("모델 응답에 'problems' 배열이 없습니다. 프롬프트/모델을 확인하세요.")
+        print(f"⚠️ [img2json] 'problems' 배열이 없음, 기본값 사용")
+        data = {
+            "problems": [],
+            "error": "모델 응답에 'problems' 배열이 없습니다",
+            "raw_response": text[:500]
+        }
+    
     return data
 
 def extract_to_file(image_paths: List[str], out_path: str) -> None:

@@ -519,6 +519,38 @@ def _resume(orchestrator: MainRe, cfg, payload: Any):
     print(f"🔁 Resume 호출: payload={payload}")
     return orchestrator.app.invoke(Command(resume=payload), cfg)
 
+# teacher 우선 재개 (중첩된 인터럽트가 메인으로 버블업되는 환경에서 안정성 향상)
+def _resume_teacher_first(orchestrator: MainRe, cfg, payload: Any):
+    try:
+        # try teacher subgraph first
+        Command = None
+        try:
+            from langgraph.types import Command as _Cmd  # type: ignore
+            Command = _Cmd
+        except Exception:
+            try:
+                from langgraph import Command as _Cmd  # type: ignore
+                Command = _Cmd
+            except Exception:
+                from langgraph.checkpoint.memory import Command as _Cmd  # type: ignore
+                Command = _Cmd
+        res = orchestrator.teacher.graph.invoke(Command(resume=payload), cfg)
+        # 표준 dict로 정규화하고 상위 키로도 노출
+        out = dict(res)
+        ts = out
+        merged = {
+            **(out if isinstance(out, dict) else {}),
+            "teacher_state": ts,
+        }
+        return merged
+    except Exception:
+        # fallback to main app resume
+        try:
+            return dict(_resume(orchestrator, cfg, payload))
+        except Exception as e:
+            print(f"⚠️ resume_teacher_first 실패: {e}")
+            return {"error": str(e)}
+
 def _get_snapshot(orchestrator: MainRe, cfg):
     try:
         snap = orchestrator.app.get_state(cfg)
@@ -854,11 +886,60 @@ def main():
         cfg_turn = _make_cfg_new_turn(orch)
         res = orch.app.invoke(init, config=cfg_turn)
         s = dict(res)
-        
+        # 즉시 인터럽트 처리: __interrupt__가 있으면 바로 재개 플로우 실행
+        if s.get("__interrupt__") is not None:
+            while True:
+                try:
+                    mode_in = input("Bot> 출력 방식을 선택하세요 (pdf|form): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n👋 종료합니다."); return
+                if mode_in in ("pdf", "form"):
+                    try:
+                        setattr(orch.teacher, "_pending_output_mode", mode_in)
+                    except Exception:
+                        pass
+                    state = _resume_teacher_first(orch, cfg, mode_in)
+                    # form이면 바로 문항을 시도 표시 후 정답 입력 받아 재개
+                    if mode_in == "form":
+                        vals_after = _get_values(orch, cfg)
+                        shared_vals = (vals_after.get("shared") or (vals_after.get("teacher_state") or {}).get("shared") or {})
+                        qs = shared_vals.get("question") or []
+                        opts = shared_vals.get("options") or []
+                        if not qs:
+                            # 준비가 덜 되었을 수 있으니 한 번 더 form으로 재개하여 상태를 보강
+                            state = _resume_teacher_first(orch, cfg, "form")
+                            vals_after = _get_values(orch, cfg)
+                            shared_vals = (vals_after.get("shared") or (vals_after.get("teacher_state") or {}).get("shared") or {})
+                            qs = shared_vals.get("question") or []
+                            opts = shared_vals.get("options") or []
+                        if qs:
+                            print("📄 문제:")
+                            try:
+                                for i, q in enumerate(qs, 1):
+                                    print(f"  {i}. {q}")
+                                    if i-1 < len(opts) and isinstance(opts[i-1], list):
+                                        print("   보기:")
+                                        print("    - " + " | ".join(str(x) for x in opts[i-1]))
+                            except Exception:
+                                pass
+                            ans_in = input(f"Bot> 정답을 쉼표로 입력하세요 (문항 {len(qs)}개): ").strip()
+                            parts = [p.strip() for p in ans_in.replace(" ", ",").split(",") if p.strip()]
+                            if parts:
+                                try:
+                                    setattr(orch.teacher, "_pending_form_answers", parts)
+                                except Exception:
+                                    pass
+                                state = _resume_teacher_first(orch, cfg, {})
+                    _print_outputs_if_any(dict(state))
+                    break
+                print("Bot> 잘못된 입력입니다. 'pdf' 또는 'form'을 입력하세요.")
+            # 즉시 처리했으므로 다음 루프로 넘어갑니다
+            continue
+
         # teacher 상태 저장 (메모리 명령어용)
         if "teacher_state" in s:
             orch.last_teacher_state = s["teacher_state"]
-        
+
         try:
             top_keys = list(s.keys())[:15]
             print(f"📤 실행 결과 키: {top_keys}{' ...' if len(s)>15 else ''}")
@@ -871,5 +952,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

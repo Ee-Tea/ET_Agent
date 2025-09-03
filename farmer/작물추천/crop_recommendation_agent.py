@@ -32,7 +32,7 @@ load_dotenv(find_dotenv())
 
 MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "root:milvus")
-MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "hongyoungjun")
+MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "crop_info")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -46,6 +46,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus as MilvusVectorStore
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_openai import ChatOpenAI
+
+# =========[ 전역 변수 ]=========
+_vectorstore = None
 from langgraph.graph import StateGraph, END
 from pymilvus import connections
 
@@ -91,7 +94,6 @@ web_prompt = ChatPromptTemplate.from_template(WEB_PROMPT_TMPL)
 
 class GraphState(TypedDict, total=False):
     question: Optional[str]
-    vectorstore: Optional[MilvusVectorStore]
     db_context: Optional[str]
     web_context: Optional[str]
     context: Optional[str]
@@ -314,16 +316,19 @@ def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
 
 def load_milvus_node(state: GraphState) -> Dict[str, Any]:
     print("\n--- 노드: Milvus 로드 ---")
+    global _vectorstore
+    
     if "default" not in connections.list_connections() or not connections.has_connection("default"):
         connections.connect(alias="default", uri=MILVUS_URI, token=MILVUS_TOKEN)
     try:
-        vs = MilvusVectorStore(
+        # Milvus 객체를 전역 변수에 저장 (상태에 저장하지 않음)
+        _vectorstore = MilvusVectorStore(
             embedding_function=embedding_model,
             collection_name=MILVUS_COLLECTION,
             connection_args={"uri": MILVUS_URI, "token": MILVUS_TOKEN},
         )
         print(f"Milvus 로드 완료: {MILVUS_COLLECTION}")
-        return {**state, "vectorstore": vs, "retry_count": 0, "ragas_score": None, "ragas_details": {}}
+        return {**state, "retry_count": 0, "ragas_score": None, "ragas_details": {}}  # vectorstore 제거
     except Exception as e:
         print(f"Milvus 로드 실패: {e}")
         raise ConnectionError("Milvus 벡터스토어 로드 실패")
@@ -331,7 +336,8 @@ def load_milvus_node(state: GraphState) -> Dict[str, Any]:
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
     print("--- 노드: 문서 검색 ---")
     question = state.get("question")
-    vectorstore = state.get("vectorstore")
+    global _vectorstore
+    vectorstore = _vectorstore  # 전역 변수에서 가져오기
     if not question or not vectorstore: raise ValueError("질문 또는 벡터스토어가 누락되었습니다.")
     
     # 검색 쿼리를 더 구체적으로 만들어서 관련성 높은 문서 검색
@@ -530,12 +536,12 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
 
         # 개별 임계값 평가
         faithfulness_sufficient = f_val >= 0.4
-        relevancy_sufficient = r_val >= 0.6
+        relevancy_sufficient = r_val >= 0.5
         is_sufficient = faithfulness_sufficient and relevancy_sufficient
 
         print(f"   - 📈 답변 품질 지표:")
         print(f"     • Faithfulness: {f_val:.3f} (임계값: 0.4) {'✅' if faithfulness_sufficient else '❌'}")
-        print(f"     • Answer Relevancy: {r_val:.3f} (임계값: 0.6) {'✅' if relevancy_sufficient else '❌'}")
+        print(f"     • Answer Relevancy: {r_val:.3f} (임계값: 0.5) {'✅' if relevancy_sufficient else '❌'}")
         print(f"     • 최종 결과: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
 
         # 충분한 경우 최종 출력 처리
@@ -581,10 +587,6 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     
     return {**state, "web_context": web_context}
 
-
-
-
-
 def fallback_answer_node(state: GraphState) -> Dict[str, Any]:
     fallback_msg = "죄송하지만 이 질문에 대한 답변은 제공할 수 없습니다. 다른 질문을 해주세요."
     
@@ -593,12 +595,6 @@ def fallback_answer_node(state: GraphState) -> Dict[str, Any]:
 
     
     return {**state, "answer": fallback_msg, "answer_source": "Fallback"}
-
-
-
-
-
-
 
 def build_graph():
 
@@ -630,12 +626,20 @@ def build_graph():
 
     # 2차 검증 결과에 따라 종료/재시도/대체 답변 결정
     def decide_after_answer_validation(state: GraphState) -> str:
-        if state["is_answer_sufficient"]:
-            return "end"
-        elif state["retry_count"] >= 3:
-            return "fallback"
+        # 웹 검색이 이미 수행된 경우 (web_context가 있음)
+        if state.get("web_context"):
+            if state["is_answer_sufficient"]:
+                return "end"
+            else:
+                return "fallback"
+        # 일반적인 경우
         else:
-            return "retry"
+            if state["is_answer_sufficient"]:
+                return "end"
+            elif state["retry_count"] >= 3:
+                return "fallback"
+            else:
+                return "retry"
 
     g.add_conditional_edges(
         "answer_validation",
@@ -646,6 +650,42 @@ def build_graph():
     
     return g.compile()
 
+def run(state: dict) -> dict:
+    """
+    오케스트레이터에서 호출되는 메인 실행 함수
+    
+    Args:
+        state: 오케스트레이터에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 응답
+    """
+    try:
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 작물추천 관련 질문을 해주세요."}
+        
+        print(f"[작물추천_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 빌드 및 실행
+        app = build_graph()
+        final_state = app.invoke({"question": query})
+        
+        # 결과 추출
+        answer = final_state.get("answer", "답변 생성에 실패했습니다.")
+        
+        print(f"[작물추천_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
+    except Exception as e:
+        error_msg = f"작물추천 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[작물추천_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
+
 if __name__ == "__main__":
     import argparse
     
@@ -653,10 +693,6 @@ if __name__ == "__main__":
     parser.add_argument("-q", "--query", type=str, help="한 번만 실행할 질문 (예: -q '주말농장에 키울 작물 추천해줘')")
     args = parser.parse_args()
     
-
-    
-
-
     app = build_graph()
 
     if args.query:

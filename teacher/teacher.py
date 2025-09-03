@@ -22,11 +22,8 @@ OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 경로는 실제 프로젝트 구조에 맞게 하나만 활성화하세요.
-# from ...common.short_term.redis_memory import RedisLangGraphMemory   # 상대 임포트(패키지 실행 전제)
-# from ..common.short_term.redis_memory import RedisLangGraphMemory   # 절대 임포트(권장)
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 # 메모리는 main에서 중앙집중식으로 관리하므로 Teacher 내부에서는 Redis 메모리를 사용하지 않습니다.
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from .agents.analysis.analysis_agent import AnalysisAgent
 from .agents.score.score_engine import ScoreEngine as score_agent
@@ -34,8 +31,8 @@ from .agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
 from .agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
 # from agents.TestGenerator.generator_backup import InfoProcessingExamAgent as generate_agent
-# from agents.solution.solution_agent import SolutionAgent as solution_agent
-from .agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
+from .agents.solution.solution_agent import SolutionAgent as solution_agent
+# from .agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
 from .teacher_nodes import (
     get_user_answer, parse_generator_input, user_intent,                                    
     route_solution, route_score, route_analysis,
@@ -230,6 +227,17 @@ class Teacher:
             except Exception:
                 select_count = 0
 
+        # 최근 추가된 문항 수가 있고, 명시적 선택이 없으면 최근 추가된 문항들 선택
+        shared = state.get("shared", {})
+        added_count = shared.get("added_count", 0)
+        if not selected_indices and select_count == 0 and added_count > 0:
+            # 최근 추가된 문항들 선택 (마지막 added_count개)
+            total_questions = len(shared.get("question", []))
+            if total_questions > 0:
+                start_idx = max(0, total_questions - added_count)
+                selected_indices = list(range(start_idx, total_questions))
+                print(f"🎯 최근 추가된 {added_count}개 문항 자동 선택: 인덱스 {start_idx}~{total_questions-1}")
+
         # 중복 정리 및 정렬
         selected_indices = sorted(set([i for i in selected_indices if i >= 0]))
         work["selected_indices"] = selected_indices
@@ -308,10 +316,9 @@ class Teacher:
         )
         builder.add_conditional_edges(
             "preprocess",
-            lambda state: "solution" if state.get("artifacts", {}).get("extracted_problem_count", 0) > 0 or state.get("artifacts", {}).get("pdf_added_count", 0) > 0 else "mark_after_generator_solution",
+            lambda state: "solution",  # 항상 solution으로 가서 문제가 없으면 "문제가 없습니다"라고 하고 끝냄
             {
                 "solution": "solution",
-                "mark_after_generator_solution": "mark_after_generator_solution",
             },
         )
         builder.add_edge("mark_after_generator_solution", "generator")
@@ -839,8 +846,14 @@ class Teacher:
         work_sel = (new_state.get("work") or {})
         sel_indices: List[int] = list(work_sel.get("selected_indices", []) or [])
         sel_count: int = int(work_sel.get("select_count", 0) or 0)
-        if total_problems <= 0 and not sel_indices and sel_count <= 0:
-            print("⚠️ 처리할 문제가 없습니다.(선택 없음)")
+        added_count = shared.get("added_count", 0)
+        
+        # 처리할 문제가 없는 경우 (added_count도 고려)
+        if total_problems <= 0 and not sel_indices and sel_count <= 0 and added_count <= 0:
+            print("⚠️ 처리할 문제가 없습니다.")
+            # 사용자에게 친화적인 메시지 추가
+            new_state.setdefault("solution", {})
+            new_state["solution"]["message"] = "풀이할 문제가 없습니다. 먼저 문제를 생성하거나 파일을 업로드해주세요."
             return new_state
 
         # PDF 문제 처리
@@ -954,13 +967,6 @@ class Teacher:
                 
                 try:
                     # solution_agent는 키워드 인수를 받도록 설계됨
-                    # 숏텀 메모리 키를 포함하여 호출
-                    memory_key = f"solution_{start}_{i}"  # 고유한 메모리 키 생성
-                    # 마지막 솔루션 쓰레드 ID를 보관하여 resume 시 사용
-                    try:
-                        self._last_solution_thread_id = memory_key
-                    except Exception:
-                        pass
                     # 상위 그래프 재개로 전달된 사용자 피드백이 있다면 서브그래프 최초 상태에 주입
                     pending_feedback = getattr(self, "_pending_user_feedback", None)
                     if pending_feedback:
@@ -969,7 +975,6 @@ class Teacher:
                         user_problem=q, 
                         user_problem_options=opts, 
                         user_input_txt=state.get("user_query", ""),
-                        memory_key=memory_key,  # 숏텀 메모리 키 전달
                         user_feedback=pending_feedback if pending_feedback else None
                     )
                     print(f"✅ 추출된 문제 풀이 완료")
@@ -1019,7 +1024,6 @@ class Teacher:
                                 "problem_index": i,
                                 "question": q,
                                 "options": opts,
-                                "memory_key": memory_key,
                             },
                         }
                         interrupt(payload)
@@ -1102,10 +1106,85 @@ class Teacher:
                 shared["answer"][idx] = ans
                 shared["explanation"][idx] = exp
 
+        # 최근 추가된 문항에 대한 풀이 (파일/질문에서 추출되지 않았고, 명시적 선택도 없을 때)
+        elif total_problems <= 0 and not sel_indices and sel_count == 0:
+            all_questions = shared.get("question", [])
+            all_options = shared.get("options", [])
+            added_count = shared.get("added_count", 0)
+            
+            if all_questions and added_count > 0:
+                # 최근 추가된 문항들에 대해 풀이
+                total_questions = len(all_questions)
+                start_idx = max(0, total_questions - added_count)
+                recent_indices = list(range(start_idx, total_questions))
+                
+                print(f"🎯 [Solution] 최근 추가된 {added_count}개 문항 풀이: 인덱스 {start_idx}~{total_questions-1}")
+                
+                recent_questions = [all_questions[i] for i in recent_indices]
+                recent_options = [all_options[i] if i < len(all_options) else [] for i in recent_indices]
+                
+                agent = self.solution_runner
+                if agent is None:
+                    raise RuntimeError("solution_runner is not initialized (init_agents=False).")
+
+                generated_answers: List[str] = []
+                generated_explanations: List[str] = []
+
+                for i, (q, opts) in enumerate(zip(recent_questions, recent_options), start=1):
+                    if isinstance(opts, str):
+                        opts = [x.strip() for x in opts.splitlines() if x.strip()]
+                    opts = [str(x).strip() for x in (opts or []) if str(x).strip()]
+                    if not q or not opts:
+                        generated_answers.append("")
+                        generated_explanations.append("")
+                        continue
+                    try:
+                        agent_result = agent.invoke(
+                            user_problem=q,
+                            user_problem_options=opts,
+                            user_input_txt=state.get("user_query", "")
+                        )
+                    except Exception as e:
+                        print(f"❌ SolutionAgent invoke 실행 실패(최근 추가 {i}/{len(recent_questions)}): {e}")
+                        agent_result = None
+
+                    ans, exp = "", ""
+                    if agent_result:
+                        if isinstance(agent_result, dict) and agent_result.get("results"):
+                            r0 = agent_result["results"][0]
+                            ans = r0.get("generated_answer", "")
+                            exp = r0.get("generated_explanation", "")
+                        else:
+                            ans = agent_result.get("generated_answer", "")
+                            exp = agent_result.get("generated_explanation", "")
+                    generated_answers.append(ans or "")
+                    generated_explanations.append(exp or "")
+
+                shared.setdefault("answer", [])
+                shared.setdefault("explanation", [])
+                # 길이 보정
+                while len(shared["answer"]) < len(shared.get("question", [])):
+                    shared["answer"].append("")
+                while len(shared["explanation"]) < len(shared.get("question", [])):
+                    shared["explanation"].append("")
+                # 최근 추가된 문항들에 답변과 해설 반영
+                for idx, (ans, exp) in zip(recent_indices, zip(generated_answers, generated_explanations)):
+                    shared["answer"][idx] = ans
+                    shared["explanation"][idx] = exp
+
         # subject 패딩
         need = len(shared["question"]) - len(shared.get("subject", []))
         if need > 0:
             shared.setdefault("subject", []).extend(["일반"] * need)
+
+        # 전처리에서 추출한 문제가 있을 경우에만 added_count 업데이트
+        if total_problems > 0:
+            # PDF나 추출된 문제를 풀이했으므로 해당 문제 개수만큼 added_count 업데이트
+            shared["added_count"] = total_problems
+            print(f"📝 [Solution] 전처리 추출 문제 풀이 완료 후 added_count 업데이트: {total_problems}")
+        else:
+            # 전처리에서 추출한 문제가 없으면 added_count는 그대로 유지
+            print(f"📝 [Solution] 전처리 추출 문제 없음, added_count 유지: {shared.get('added_count', 0)}")
 
         validate_qas(shared)
 
@@ -1161,7 +1240,7 @@ class Teacher:
                         explanations = []
                         subjects = []
                         
-                        for q in result["all_questions"]:
+                        for q in (result.get("all_questions") or []):
                             if isinstance(q, dict):
                                 questions.append(q.get("question", ""))
                                 options.append(q.get("options", []))
@@ -1201,7 +1280,7 @@ class Teacher:
                         explanations = []
                         subjects = []
                         
-                        for q in result["questions"]:
+                        for q in (result.get("questions") or []):
                             if isinstance(q, dict):
                                 questions.append(q.get("question", ""))
                                 options.append(q.get("options", []))
@@ -1241,7 +1320,7 @@ class Teacher:
                         explanations = []
                         subjects = []
                         
-                        for q in result["all_questions"]:
+                        for q in (result.get("all_questions") or []):
                             if isinstance(q, dict):
                                 questions.append(q.get("question", ""))
                                 options.append(q.get("options", []))
@@ -1275,6 +1354,17 @@ class Teacher:
                     
                     # generation state에 결과 저장
                     new_state["generation"].update(agent_result)
+                    
+                    # 새로 추가된 문제 개수를 added_count로 설정
+                    # (기존 문제 개수는 제외하고 새로 생성된 문제만 카운트)
+                    new_questions_count = 0
+                    if "all_questions" in result:
+                        new_questions_count = len(result.get("all_questions", []))
+                    elif "questions" in result:
+                        new_questions_count = len(result.get("questions", []))
+                    
+                    shared["added_count"] = new_questions_count
+                    print(f"📝 [Generator] 새로 추가된 문제 개수: {new_questions_count}")
                     
                     print(f"✅ [Generator] 문제 생성 완료: 총 {len(shared.get('question', []))}개 문제")
                 else:

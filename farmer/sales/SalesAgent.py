@@ -10,8 +10,7 @@ import os
 import pandas as pd
 from konlpy.tag import Okt
 import re
-from langchain_groq import ChatGroq
-# from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
@@ -35,11 +34,7 @@ milvus_port = os.getenv("MILVUS_PORT", "19530")
 collection_name = "market_price_docs"
 
 # LLM 및 프롬프트 설정
-llm = ChatGroq(model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-               temperature=0.7,
-               api_key=openai_api_key)
-# gpt-4o-mini
-# llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY=REDACTED GraphState(TypedDict):
+llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY=REDACTED GraphState(TypedDict):
     query: str
     question_classification: str
     context: Dict[str, Any]
@@ -296,7 +291,7 @@ def execute_milvus_search(query: str) -> list[str]:
 
         results = search_market_docs(query, collection, top_k=3)
         connections.disconnect("default")
-        return results
+        return results 
     except Exception as e:
         print(f"❌ Milvus 연결 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
@@ -567,7 +562,7 @@ def node_judge_recommendation_graph(state: GraphState) -> GraphState:
     needs_web_search = False
     missing_info_types = []
     
-    # 1회 재분석 후에도 검증이 실패한 경우에만 웹 검색 고려
+    # 1회 재분석 후에도 검증이 실패한 경우 웹 검색 고려
     if retry_count >= 1 and not all_valid:
         # 검증 실패 시 어떤 정보가 부족한지 분석
         for validation_name, (is_valid, issues) in validations.items():
@@ -1010,19 +1005,14 @@ def judge_branch(state: GraphState) -> str:
         return END
     
     if state.get("is_recommend_ok"):
-        return "ragas_validation"  # RAGAS 검증으로 이동
+        return "ragas_validation"  # 자가 검증 통과 시 RAGAS 검증으로 이동
     
-    # 재분석 횟수가 1회 미만인 경우
+    # 자가 검증 실패 시: 1회 재시도 후 웹 검색
     if state["retry_count"] < 1:
-        return "reanalyze"
-    
-    # 재분석 횟수가 1회 이상인 경우
-    # 웹 검색이 필요하고 아직 수행되지 않았다면 웹 검색 실행
-    if state.get("needs_web_search") and not state.get("used_web_search"):
+        return "reanalyze"  # 1회 재시도 (피드백으로 재응답 생성)
+    else:
+        # 1회 재시도 후에도 실패하면 웹 검색
         return "web_search_supplement"
-    
-    # 재시도가 모두 소진되었거나 웹 검색을 이미 수행한 경우 RAGAS 검증으로 이동
-    return "ragas_validation"
 
 graph.add_conditional_edges(
     "llm_summarize",
@@ -1043,7 +1033,7 @@ graph.add_conditional_edges(
     }
 )
 graph.add_edge("web_search_supplement", "llm_summarize")  # 웹 검색 후 LLM으로
-graph.add_edge("reanalyze", "llm_summarize")
+graph.add_edge("reanalyze", "llm_summarize")  # 재분석 후 LLM으로
 graph.add_edge("ragas_validation", "output")  # RAGAS 검증 후 output으로
 graph.add_edge("output", END)
 
@@ -1101,7 +1091,7 @@ if __name__ == "__main__":
     #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     # except Exception as e:
     #     print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "경주에서 알배기 배추 팔고 싶은데, 판매처 위치랑 알배기배추 가격 알려줘"})
+    result_state = app.invoke({"query": "경주에 위치한 농산물 직매장 정보를 알려주고 알배기배추 가격도 알려줘봐"})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

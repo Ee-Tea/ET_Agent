@@ -20,11 +20,6 @@ except Exception:
         "answer": [],
         "explanation": [],
         "subject": [],
-        "wrong_question": [],
-        "weak_type": [],
-        "notes": [],
-        "user_answer": [],
-        "retrieve_answer": "",
     }
     def ensure_shared(state: Dict[str, Any]) -> Dict[str, Any]:
         state = dict(state or {})

@@ -10,8 +10,8 @@ from typing import Dict, List, Any, Optional, TypedDict
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from common.short_term.redis_memory import RedisLangGraphMemory
-from teacher.teacher import Teacher
-from farmer.farmer import Farmer
+from teacher.teacher import Teacher, TeacherState
+from farmer.farmer import Farmer, RouterState
 
 
 class MainState(TypedDict):

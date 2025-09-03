@@ -652,7 +652,7 @@ Your JSON response:"""
 
     def _save_to_json(self, exam_result: Dict[str, Any], filename: str = None) -> str:
         """시험 결과를 JSON 파일로 저장"""
-        save_dir = "C:\\ET_Agent\\teacher\\TestGenerator\\test"
+        save_dir = "C:\\LLM-T\\teacher\\TestGenerator\\test"
         os.makedirs(save_dir, exist_ok=True)
         
         if filename is None:
@@ -681,7 +681,7 @@ def example_usage():
     try:
         # 에이전트 초기화
         agent = InfoProcessingExamAgent(
-            data_folder="C:\\ET_Agent\\teacher\\TestGenerator\\data"
+            data_folder="C:\\LLM-T\\teacher\\TestGenerator\\data"
         )
         
         print(f"에이전트명: {agent.name}")
@@ -730,7 +730,7 @@ def interactive_menu():
     """에이전트를 활용한 대화형 메뉴 시스템"""
     try:
         agent = InfoProcessingExamAgent(
-            data_folder="C:\\ET_Agent\\teacher\\TestGenerator\\data"
+            data_folder="C:\\LLM-T\\teacher\\TestGenerator\\data"
         )
         
         print(f"\n{agent.name} 초기화 완료")

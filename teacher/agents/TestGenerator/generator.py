@@ -876,7 +876,7 @@ class InfoProcessingExamAgent(BaseAgent):
 
     # 파일 저장 함수는 기존과 동일(중복 정의는 마지막 정의가 유효)
     def _save_to_json(self, exam_result: Dict[str, Any], filename: str = None) -> str:
-        save_dir = "C:\\ET_Agent\\teacher\\TestGenerator\\test"
+        save_dir = "C:\\LLM-T\\teacher\\TestGenerator\\test"
         os.makedirs(save_dir, exist_ok=True)
 
         if filename is None:

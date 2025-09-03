@@ -168,7 +168,7 @@ if __name__ == "__main__":
     agent_to_run = sys.argv[1]
     file_path = sys.argv[2]
     
-    print("🎓 ET_Agent Teacher System")
+    print("🎓 LLM-T Teacher System")
     print("=" * 40)
     
     orchestrator = Orchestrator()

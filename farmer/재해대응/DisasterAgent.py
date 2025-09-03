@@ -455,6 +455,9 @@ def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
         print(f"   - ⚠️ RAGAS 결과 파싱 실패 ({metric_name}): {e}")
         return None
 
+# =========[ 전역 변수 ]=========
+_vectorstore = None
+
 # =========[ LangGraph 노드 ]=========
 def load_store_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 벡터스토어 연결 (LangChain-Milvus)")
@@ -467,7 +470,10 @@ def load_store_node(state: GraphState) -> Dict[str, Any]:
         collection_name=COLLECTION_NAME,
         connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
     )
-    return {**state, "store_obj": vectorstore, "retry_count": 0}
+    # Milvus 객체를 상태에 저장하지 않고 전역 변수로 관리
+    global _vectorstore
+    _vectorstore = vectorstore
+    return {**state, "retry_count": 0}
 
 def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 시간/상대시점 해석(KST 기준)")
@@ -481,7 +487,7 @@ def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 검색 (메타데이터 필터링 활용)")
     q = state.get("question_resolved", state.get("question", ""))
-    vectorstore = state["store_obj"]
+    vectorstore = _vectorstore
 
     region = extract_region_from_question(q)
     results_with_score = []
@@ -821,13 +827,13 @@ def build_graph():
     g.add_edge("fallback_answer", END)
 
     app = g.compile()
-    try:
-        graph_image_path = "agent_workflow_openai.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_openai.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
     return app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========

@@ -115,3 +115,58 @@ bun run dev
 1. LangGraph 에이전트가 포트 8000에서 실행 중인지
 2. OpenAI API 키가 올바르게 설정되었는지
 3. 두 서버가 모두 성공적으로 시작되었는지
+
+이 오류는 LangGraph CLI가 로컬 의존성을 찾을 때 발생하는 문제입니다.
+
+에러 메시지를 보면:
+```
+Error: Local dependency must be a subdirectory of the config file: C:\ET_Agent
+```
+
+`langgraph.json`에서 `"dependencies": ["../../"]`로 설정했는데, LangGraph CLI는 설정 파일(`langgraph.json`)이 있는 디렉토리보다 상위 디렉토리를 참조하는 것을 허용하지 않습니다.
+
+## 해결 방법들:
+
+### 방법 1: 루트의 langgraph.json 사용
+frontend에서 루트의 `langgraph.json`을 사용하도록 설정을 변경하세요.
+
+`C:\ET_Agent\frontend\agent\langgraph.json`을 삭제하고, `C:\ET_Agent\frontend\package.json`의 dev:agent 스크립트를 수정하세요:
+
+```json
+{
+  "scripts": {
+    "dev:agent": "cd ../.. && npx @langchain/langgraph-cli dev --port 8123 --no-browser"
+  }
+}
+```
+
+### 방법 2: 심볼릭 링크 생성 (Windows)
+Windows에서 심볼릭 링크를 생성해서 루트 디렉토리를 frontend/agent 하위로 연결:
+
+```cmd
+cd C:\ET_Agent\frontend\agent
+mklink /D root ..\..\..
+```
+
+그 후 `langgraph.json`을:
+```json
+{
+  "python_version": "3.12",
+  "dockerfile_lines": [],
+  "dependencies": ["./root"],
+  "graphs": {
+    "sample_agent": "./root/main.py:MainOrchestrator"
+  },
+  "env": "../.env"
+}
+```
+
+### 방법 3: 간단한 해결책 (추천)
+frontend/agent 디렉토리에 필요한 파일들을 복사하거나, 루트에서 직접 실행:
+
+```bash
+cd C:\ET_Agent
+npx @langchain/langgraph-cli dev --port 8123 --no-browser
+```
+
+어떤 방법을 시도해보시겠어요?

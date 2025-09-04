@@ -271,6 +271,9 @@ class Teacher:
         builder.add_node("generate_problem_pdf", RunnableLambda(self.generate_problem_pdf))
         builder.add_node("generate_answer_pdf", RunnableLambda(self.generate_answer_pdf))
         builder.add_node("generate_analysis_pdf", RunnableLambda(self.generate_analysis_pdf))
+        
+        # User response generation
+        builder.add_node("generate_response", RunnableLambda(self.generate_response))
         # HITL: PDF vs Form 결정 및 Form 출력 노드 (세분화된 await/commit 노드)
         builder.add_node("await_output_mode", RunnableLambda(self.await_output_mode))
         builder.add_node("decide_output_mode", RunnableLambda(self.decide_output_mode))
@@ -377,17 +380,19 @@ class Teacher:
             {
                 "score": "score",
                 "generate_answer_pdf": "generate_answer_pdf",
+                "persist_state": "persist_state",
             },
         )
         builder.add_edge("score","analysis")
 
-        # retrieve → persist, analysis → generate_analysis_pdf → persist → END
+        # retrieve → persist, analysis → generate_analysis_pdf → persist → generate_response → END
         builder.add_edge("retrieve", "persist_state")
         builder.add_edge("analysis", "generate_analysis_pdf")
         builder.add_edge("generate_analysis_pdf", "persist_state")
         builder.add_edge("generate_problem_pdf", "persist_state")
         builder.add_edge("generate_answer_pdf", "persist_state")
-        builder.add_edge("persist_state", END)
+        builder.add_edge("persist_state", "generate_response")
+        builder.add_edge("generate_response", END)
 
         print("✅ LangGraph 워크플로우 그래프 생성 완료")
         return builder.compile(checkpointer=self.checkpointer)

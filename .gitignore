@@ -307,3 +307,8 @@ data/redis/
 data/
 docker-compose.yml
 volumes/
+# Redis runtime data
+/data/redis/
+*.rdb
+*.aof
+appendonlydir/

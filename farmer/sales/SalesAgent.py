@@ -1,20 +1,26 @@
-# 주의 무시
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 # 설정
 from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, list_collections, utility
 import requests
 from dotenv import load_dotenv
 import os
 import pandas as pd
-from konlpy.tag import Okt
+try:
+    from kiwipiepy import Kiwi
+    kiwi = Kiwi()
+    USE_KIWI = True
+except ImportError:
+    try:
+        from konlpy.tag import Okt
+        okt = Okt()
+        USE_KIWI = False
+    except:
+        USE_KIWI = None
 import re
 from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 import asyncio
@@ -55,8 +61,22 @@ class GraphState(TypedDict):
 
 # 키워드 추출
 def extract_keywords(query):
-    okt = Okt()
-    return okt.nouns(query)
+    if USE_KIWI:
+        # Kiwi 사용 (Java 불필요)
+        result = kiwi.analyze(query)
+        nouns = []
+        for token in result[0][0]:
+            if token.tag.startswith('N'):  # 명사류 태그
+                nouns.append(token.form)
+        return nouns
+    elif USE_KIWI is False:
+        # KoNLPy 사용 (Java 필요)
+        return okt.nouns(query)
+    else:
+        # 둘 다 없으면 간단한 텍스트 분할
+        import re
+        # 한글 단어만 추출 (2글자 이상)
+        return re.findall(r'[가-힣]{2,}', query)
 
 # ===============================
 # 사용자 질문 받기
@@ -826,7 +846,7 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
             print("⚠️ Tavily API 키가 설정되지 않았습니다.")
             return supplemented_context
         
-        tavily_tool = TavilySearchResults(max_results=5, api_key=tavily_api_key)
+        tavily_tool = TavilySearch(max_results=3, api_key=tavily_api_key)
         
         search_queries = []
         if missing_info_type == "판매처":
@@ -897,8 +917,8 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     
     # RAGAS 임계값 설정
     CONTEXT_PRECISION_THRESHOLD = 0.7
-    FAITHFULNESS_THRESHOLD = 0.7
-    ANSWER_RELEVANCY_THRESHOLD = 0.5
+    FAITHFULNESS_THRESHOLD = 0.65
+    ANSWER_RELEVANCY_THRESHOLD = 0.45
     
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import

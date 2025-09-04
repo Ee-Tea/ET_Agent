@@ -91,9 +91,10 @@ function YourMainContent({
   // useCoAgent는 제거하고 필요시 다시 추가
 
   // 테스트 세션 생성 함수 (AI 동적 생성)
-  const createTestSession = async (type: string, title: string, questionCount: number, difficulty: string = 'intermediate', userLevel: string = 'intermediate') => {
+  const createTestSession = async (type: string, questionCount: number, difficulty: string, userLevel: string) => {
     try {
-      // 백엔드 API로 직접 요청
+      const title = `${type} ${questionCount}문제`;
+      
       const response = await fetch('http://localhost:8000/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -107,7 +108,7 @@ function YourMainContent({
       const data = await response.json();
       
       if (data.response) {
-        // 응답에서 문제를 파싱하거나 기본 문제 사용
+        
         const sessionId = `session_${Math.random().toString(36).substr(2, 9)}`;
         const newSession: TestSession = {
           id: sessionId,
@@ -127,12 +128,12 @@ function YourMainContent({
       }
     } catch (error) {
       console.error('Failed to create test session:', error);
-      // 폴백: 기존 하드코딩된 문제 사용
+      // 폴백: 빈 문제 배열로 세션 생성
       const sessionId = `session_${Math.random().toString(36).substr(2, 9)}`;
       const newSession: TestSession = {
         id: sessionId,
         type,
-        title,
+        title: `${type} ${questionCount}문제`,
         currentQuestion: 0,
         answers: {},
         startTime: new Date(),

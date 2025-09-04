@@ -1,7 +1,3 @@
-# 주의 무시
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 # 설정
 from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, list_collections, utility
 import requests
@@ -14,7 +10,7 @@ from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 import asyncio
@@ -823,7 +819,7 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
             print("⚠️ Tavily API 키가 설정되지 않았습니다.")
             return supplemented_context
         
-        tavily_tool = TavilySearchResults(max_results=5, api_key=tavily_api_key)
+        tavily_tool = TavilySearch(max_results=3, api_key=tavily_api_key)
         
         search_queries = []
         if missing_info_type == "판매처":

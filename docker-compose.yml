@@ -115,6 +115,9 @@ services:
       MILVUS_PORT: ${MILVUS_PORT:-19530}
       MILVUS_COLLECTION: problems
       PYTHONPATH: /deps/LLM-T
+
+      LANGGRAPH_GRAPHS: >-
+        [{"id":"agent","import_path":"teacher.graph:graph"}]
       
 
 

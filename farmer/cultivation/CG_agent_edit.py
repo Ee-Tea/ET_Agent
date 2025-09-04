@@ -36,12 +36,20 @@ def get_ragas_metrics():
 load_dotenv()
 OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("TAVILY_API_KEY")
 
-if not OPENAI_API_KEY=REDACTED("오류: OPENAI_API_KEY=REDACTED 파일을 확인해주세요.")
-    exit()
-if not TAVILY_API_KEY:
-    print("오류: TAVILY_API_KEY 환경 변수가 설정되지 않았습니다. .env 파일을 확인해주세요.")
-    exit()
+# (수정) 경고만 출력하고 플래그로 관리
+USE_OPENAI = bool(OPENAI_API_KEY=REDACTED = bool(TAVILY_API_KEY)
 
+if not USE_OPENAI:
+    print("⚠️ OPENAI_API_KEY=REDACTED 호출 시 실패할 수 있습니다.")
+if not USE_TAVILY:
+    print("⚠️ TAVILY_API_KEY 미설정: 웹검색을 비활성화합니다.")
+
+***REMOVED*** 도구 생성 부분도 안전하게
+tavily_tool = None
+if USE_TAVILY:
+    from langchain_tavily import TavilySearch
+    tavily_tool = TavilySearch(max_results=5, api_key=TAVILY_API_KEY)
+    
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME_INFO = "crop_info"

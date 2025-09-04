@@ -1,0 +1,242 @@
+"""
+ET-Agent FastAPI 서버
+실제 ET-Agent 백엔드와 연결된 버전
+"""
+
+import os
+import sys
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
+
+# 프로젝트 루트 경로 추가
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+# ET-Agent 메인 오케스트레이터 import
+try:
+    from main import MainOrchestrator
+    ET_AGENT_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: ET-Agent import failed: {e}")
+    ET_AGENT_AVAILABLE = False
+
+# 전역 변수
+orchestrator = None
+
+# FastAPI 앱 생성
+app = FastAPI(
+    title="ET-Agent API",
+    description="농업 자격증 및 교육 관련 AI 에이전트 API",
+    version="1.0.0"
+)
+
+# CORS 미들웨어 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ET-Agent 초기화 함수
+def initialize_et_agent():
+    """ET-Agent 오케스트레이터 초기화"""
+    global orchestrator
+    
+    if not ET_AGENT_AVAILABLE:
+        print("❌ ET-Agent를 사용할 수 없습니다.")
+        return False
+    
+    try:
+        print("🚀 ET-Agent 초기화 중...")
+        orchestrator = MainOrchestrator(
+            user_id="api_user",
+            chat_id="api_chat"
+        )
+        print("✅ ET-Agent 초기화 완료")
+        return True
+    except Exception as e:
+        print(f"❌ ET-Agent 초기화 실패: {e}")
+        return False
+
+# 앱 시작 시 ET-Agent 초기화
+@app.on_event("startup")
+async def startup_event():
+    """앱 시작 시 실행"""
+    initialize_et_agent()
+
+# Pydantic 모델
+class ChatRequest(BaseModel):
+    message: str
+    user_id: str = "api_user"
+    chat_id: str = "api_chat"
+
+class ChatResponse(BaseModel):
+    response: str
+    service_used: str
+    confidence: float
+    session_id: str
+
+# API 엔드포인트
+@app.get("/")
+async def root():
+    return {
+        "message": "ET-Agent Simple API",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/docs"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "services": {
+            "api": "healthy",
+            "et_agent": "available" if ET_AGENT_AVAILABLE and orchestrator else "unavailable",
+            "orchestrator": "initialized" if orchestrator else "not_initialized"
+        }
+    }
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """ET-Agent 채팅 엔드포인트"""
+    
+    # ET-Agent가 사용 가능한 경우
+    if orchestrator and ET_AGENT_AVAILABLE:
+        try:
+            # ET-Agent 상태 초기화 (MainState 구조에 맞게)
+            initial_state = {
+                "user_query": request.message,
+                "user_id": request.user_id,
+                "chat_id": request.chat_id,
+                "session_key": f"{request.user_id}_{request.chat_id}",
+                "existing_questions": [],
+                "locked_service": None,
+                "short_term_data": {},
+                "is_relevant": True,
+                "classified_service": "",
+                "service_consistent": True,
+                "teacher_result": None,
+                "farmer_result": None,
+                "final_response": ""
+            }
+            
+            # ET-Agent 실행 (체크포인터 설정 포함)
+            config = {
+                "configurable": {
+                    "thread_id": f"api_{request.user_id}_{request.chat_id}",
+                    "checkpoint_id": "api_checkpoint"
+                }
+            }
+            result = orchestrator.graph.invoke(initial_state, config=config)
+            
+            # 응답 구성
+            response_text = result.get("final_response", "응답을 생성할 수 없습니다.")
+            
+            return ChatResponse(
+                response=response_text,
+                service_used="et_agent",
+                confidence=1.0,
+                session_id=f"{request.user_id}:{request.chat_id}"
+            )
+            
+        except Exception as e:
+            print(f"ET-Agent 실행 오류: {e}")
+            # 오류 발생 시 폴백 응답
+            response_text = f"죄송합니다. ET-Agent 처리 중 오류가 발생했습니다: {str(e)}"
+            return ChatResponse(
+                response=response_text,
+                service_used="error",
+                confidence=0.0,
+                session_id=f"{request.user_id}:{request.chat_id}"
+            )
+    
+    # ET-Agent가 사용 불가능한 경우
+    else:
+        response_text = f"""
+안녕하세요! ET-Agent입니다.
+
+받은 메시지: {request.message}
+
+현재 ET-Agent가 초기화되지 않았습니다.
+서버를 재시작하거나 관리자에게 문의하세요.
+
+농업 자격증 관련 질문을 해보세요!
+        """.strip()
+        
+        return ChatResponse(
+            response=response_text,
+            service_used="fallback",
+            confidence=0.5,
+            session_id=f"{request.user_id}:{request.chat_id}"
+        )
+
+@app.post("/chat/teacher", response_model=ChatResponse)
+async def chat_teacher(request: ChatRequest):
+    """Teacher 서비스 시뮬레이션"""
+    
+    response_text = f"""
+📚 Teacher 서비스 응답
+
+질문: {request.message}
+
+현재 Teacher 서비스는 개발 중입니다.
+농업 자격증 관련 질문에 대한 기본 응답을 제공합니다.
+
+예시 질문:
+- "농산업기사 시험 문제를 만들어줘"
+- "토양 관리에 대해 알려줘"
+- "작물 병해충 방제 방법은?"
+    """.strip()
+    
+    return ChatResponse(
+        response=response_text,
+        service_used="teacher",
+        confidence=0.9,
+        session_id=f"{request.user_id}:{request.chat_id}"
+    )
+
+@app.post("/chat/farmer", response_model=ChatResponse)
+async def chat_farmer(request: ChatRequest):
+    """Farmer 서비스 시뮬레이션"""
+    
+    response_text = f"""
+🌱 Farmer 서비스 응답
+
+질문: {request.message}
+
+현재 Farmer 서비스는 개발 중입니다.
+농업 관련 질문에 대한 기본 응답을 제공합니다.
+
+예시 질문:
+- "토마토 재배 방법은?"
+- "적절한 작물을 추천해줘"
+- "시기별 농작업은?"
+    """.strip()
+    
+    return ChatResponse(
+        response=response_text,
+        service_used="farmer",
+        confidence=0.9,
+        session_id=f"{request.user_id}:{request.chat_id}"
+    )
+
+if __name__ == "__main__":
+    print("🚀 ET-Agent Simple API 서버 시작")
+    print("📍 주소: http://localhost:8000")
+    print("📚 API 문서: http://localhost:8000/docs")
+    print("🔍 헬스 체크: http://localhost:8000/health")
+    print("-" * 50)
+    
+    uvicorn.run(
+        "simple_api:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
+

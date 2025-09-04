@@ -42,6 +42,7 @@ dependencies = [
     "langgraph>=0.0.48",
     "langsmith>=0.1.17",
     "langchain-groq>=0.1.3",
+    "langchain-tavily>=0.1.0",
     
     # --- LLM & 검색 API & 트랜스포머 ---
     "groq>=0.9.0",

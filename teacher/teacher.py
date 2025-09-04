@@ -384,7 +384,6 @@ class Teacher:
             {
                 "score": "score",
                 "generate_answer_pdf": "generate_answer_pdf",
-                "persist_state": "persist_state",
             },
         )
         builder.add_edge("score","analysis")

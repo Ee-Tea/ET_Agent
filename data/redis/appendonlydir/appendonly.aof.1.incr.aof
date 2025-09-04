@@ -12392,3 +12392,1379 @@ $4
 PXAT
 $13
 1756955532866
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756955848109
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$8
+question
+$33
+변수의 역할은 무엇인가?
+$7
+options
+$154
+["  1. \ub370\uc774\ud130 \uc800\uc7a5", "  2. \ud504\ub85c\uadf8\ub7a8 \uc2e4\ud589", "  3. \uc5d0\ub7ec \ucc98\ub9ac", "  4. \uc785\ub825 \ucd9c\ub825"]
+$6
+answer
+$1
+1
+$11
+explanation
+$509
+변수는 프로그램에서 데이터를 저장하는 역할을 합니다. 변수는 메모리의 특정 위치에 이름을 붙여서 데이터를 저장하고, 이 데이터를 프로그램 내에서 참조하거나 수정할 수 있게 해줍니다. 따라서 변수는 프로그래밍의 기본적인 요소로, 데이터를 저장하고 관리하는 데 필수적입니다. 다른 보기인 프로그램 실행, 에러 처리, 입력 출력은 변수의 역할과는 직접적인 관련이 없습니다.
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$13
+1756955974977
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$8
+question
+$40
+함수의 주요 목적은 무엇인가?
+$7
+options
+$148
+["  1. \ucf54\ub4dc \uc7ac\uc0ac\uc6a9", "  2. \ub370\uc774\ud130 \uc800\uc7a5", "  3. \uc5d0\ub7ec \ubc1c\uc0dd", "  4. \uc785\ub825 \ucc98\ub9ac"]
+$6
+answer
+$0
+
+$11
+explanation
+$0
+
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$13
+1756955974979
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1015
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", ""], "explanation": ["변수는 프로그램에서 데이터를 저장하는 역할을 합니다. 변수는 메모리의 특정 위치에 이름을 붙여서 데이터를 저장하고, 이 데이터를 프로그램 내에서 참조하거나 수정할 수 있게 해줍니다. 따라서 변수는 프로그래밍의 기본적인 요소로, 데이터를 저장하고 관리하는 데 필수적입니다. 다른 보기인 프로그램 실행, 에러 처리, 입력 출력은 변수의 역할과는 직접적인 관련이 없습니다.", ""], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756955974984
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756955975001
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756958828904
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$8
+question
+$33
+변수의 역할은 무엇인가?
+$7
+options
+$154
+["  1. \ub370\uc774\ud130 \uc800\uc7a5", "  2. \ud504\ub85c\uadf8\ub7a8 \uc2e4\ud589", "  3. \uc5d0\ub7ec \ucc98\ub9ac", "  4. \uc785\ub825 \ucd9c\ub825"]
+$6
+answer
+$0
+
+$11
+explanation
+$0
+
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$13
+1756958844663
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$8
+question
+$40
+함수의 주요 목적은 무엇인가?
+$7
+options
+$148
+["  1. \ucf54\ub4dc \uc7ac\uc0ac\uc6a9", "  2. \ub370\uc774\ud130 \uc800\uc7a5", "  3. \uc5d0\ub7ec \ubc1c\uc0dd", "  4. \uc785\ub825 \ucc98\ub9ac"]
+$6
+answer
+$0
+
+$11
+explanation
+$0
+
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$13
+1756958844664
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$505
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["", ""], "explanation": ["", ""], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756958844671
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756958844692
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756959045974
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756959213604
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$8
+question
+$33
+변수의 역할은 무엇인가?
+$7
+options
+$154
+["  1. \ub370\uc774\ud130 \uc800\uc7a5", "  2. \ud504\ub85c\uadf8\ub7a8 \uc2e4\ud589", "  3. \uc5d0\ub7ec \ucc98\ub9ac", "  4. \uc785\ub825 \ucd9c\ub825"]
+$6
+answer
+$0
+
+$11
+explanation
+$0
+
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$13
+1756959401481
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$8
+question
+$40
+함수의 주요 목적은 무엇인가?
+$7
+options
+$148
+["  1. \ucf54\ub4dc \uc7ac\uc0ac\uc6a9", "  2. \ub370\uc774\ud130 \uc800\uc7a5", "  3. \uc5d0\ub7ec \ubc1c\uc0dd", "  4. \uc785\ub825 \ucc98\ub9ac"]
+$6
+answer
+$0
+
+$11
+explanation
+$0
+
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$13
+1756959401482
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$505
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["", ""], "explanation": ["", ""], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756959401486
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756959401503
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756959547322
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756959837167
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$8
+question
+$33
+변수의 역할은 무엇인가?
+$7
+options
+$154
+["  1. \ub370\uc774\ud130 \uc800\uc7a5", "  2. \ud504\ub85c\uadf8\ub7a8 \uc2e4\ud589", "  3. \uc5d0\ub7ec \ucc98\ub9ac", "  4. \uc785\ub825 \ucd9c\ub825"]
+$6
+answer
+$1
+1
+$11
+explanation
+$508
+변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 값을 저장하고, 필요할 때 해당 값을 참조하거나 수정할 수 있도록 해줍니다. 이는 프로그래밍의 기본적인 개념으로, 변수를 통해 다양한 데이터 타입을 다루고, 프로그램의 흐름에 따라 데이터를 처리할 수 있습니다. 따라서 변수는 데이터 저장의 기능을 수행하며, 이는 프로그래밍 언어 활용의 핵심 요소입니다.
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$13
+1756960168195
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$8
+question
+$40
+함수의 주요 목적은 무엇인가?
+$7
+options
+$148
+["  1. \ucf54\ub4dc \uc7ac\uc0ac\uc6a9", "  2. \ub370\uc774\ud130 \uc800\uc7a5", "  3. \uc5d0\ub7ec \ubc1c\uc0dd", "  4. \uc785\ub825 \ucc98\ub9ac"]
+$6
+answer
+$1
+1
+$11
+explanation
+$566
+함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 명령어의 집합으로, 이를 통해 동일한 코드를 여러 번 작성하지 않고도 필요할 때마다 호출하여 사용할 수 있습니다. 이렇게 함으로써 코드의 중복을 줄이고, 유지보수와 가독성을 향상시킬 수 있습니다. 함수는 입력을 받아 처리하고 결과를 반환하는 구조를 가지고 있어, 다양한 상황에서 재사용이 가능하다는 점에서 코드 재사용의 중요성을 강조합니다.
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$13
+1756960168196
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1581
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 값을 저장하고, 필요할 때 해당 값을 참조하거나 수정할 수 있도록 해줍니다. 이는 프로그래밍의 기본적인 개념으로, 변수를 통해 다양한 데이터 타입을 다루고, 프로그램의 흐름에 따라 데이터를 처리할 수 있습니다. 따라서 변수는 데이터 저장의 기능을 수행하며, 이는 프로그래밍 언어 활용의 핵심 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 명령어의 집합으로, 이를 통해 동일한 코드를 여러 번 작성하지 않고도 필요할 때마다 호출하여 사용할 수 있습니다. 이렇게 함으로써 코드의 중복을 줄이고, 유지보수와 가독성을 향상시킬 수 있습니다. 함수는 입력을 받아 처리하고 결과를 반환하는 구조를 가지고 있어, 다양한 상황에서 재사용이 가능하다는 점에서 코드 재사용의 중요성을 강조합니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756960168199
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756960168207
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$7
+teacher
+$4
+PXAT
+$13
+1756960974934
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$8
+question
+$33
+변수의 역할은 무엇인가?
+$7
+options
+$154
+["  1. \ub370\uc774\ud130 \uc800\uc7a5", "  2. \ud504\ub85c\uadf8\ub7a8 \uc2e4\ud589", "  3. \uc5d0\ub7ec \ucc98\ub9ac", "  4. \uc785\ub825 \ucd9c\ub825"]
+$6
+answer
+$1
+1
+$11
+explanation
+$494
+변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$13
+1756961161914
+*12
+$4
+HSET
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$8
+question
+$40
+함수의 주요 목적은 무엇인가?
+$7
+options
+$148
+["  1. \ucf54\ub4dc \uc7ac\uc0ac\uc6a9", "  2. \ub370\uc774\ud130 \uc800\uc7a5", "  3. \uc5d0\ub7ec \ubc1c\uc0dd", "  4. \uc785\ub825 \ucc98\ub9ac"]
+$6
+answer
+$1
+1
+$11
+explanation
+$596
+함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다.
+$7
+subject
+$27
+프로그래밍언어활용
+*3
+$9
+PEXPIREAT
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+$13
+1756961161915
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756961161917
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756961161933
+*2
+$3
+DEL
+$24
+lock:main_user_main_chat
+*3
+$3
+DEL
+$62
+questions:main_user_main_chat:cda08e2a1cf02d5451d5d502bc5c60fb
+$62
+questions:main_user_main_chat:f690fb682322ed089dc708ca3e3d607c
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756961231790
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756961236727
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756961236824
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756961262493
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756961316204
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756961316227

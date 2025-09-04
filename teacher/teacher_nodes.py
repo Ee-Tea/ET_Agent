@@ -97,11 +97,24 @@ def get_user_answer(user_question: str) -> list:
             # ★ 여기서도 문자열 보장
             return [n.strip() for n in numbers]
         
+        # LLM 응답이 없거나 숫자가 없는 경우, 원본 질문에서 직접 추출
+        print(f"🔍 LLM 응답에서 숫자를 찾지 못함, 원본 질문에서 직접 추출: {user_question}")
+        original_numbers = re.findall(r'\d+', user_question)
+        if original_numbers:
+            print(f"🔍 원본 질문에서 추출한 숫자들: {original_numbers}")
+            return [n.strip() for n in original_numbers]
+        
         # 숫자도 없는 경우 빈 리스트 반환
         return []
         
     except Exception as e:
         print(f"⚠️ 답변 파싱 중 오류 발생: {e}")
+        # 오류 발생 시 원본 질문에서 직접 추출
+        import re
+        original_numbers = re.findall(r'\d+', user_question)
+        if original_numbers:
+            print(f"🔍 오류 발생으로 원본 질문에서 추출한 숫자들: {original_numbers}")
+            return [n.strip() for n in original_numbers]
         return []
 
 def extract_problem_and_options(user_query: str) -> Dict[str, Any]:
@@ -469,19 +482,9 @@ def post_analysis_route(state: Dict[str, Any]) -> str:
 def generate_user_response(state: Dict[str, Any]) -> str:
     """
     사용자에게 실행 결과를 요약해서 답변하는 함수
+    - 검색 답변이 있으면 그대로 포함
+    - 사용자 입력에 따라 변화한 내용만 요약
     """
-    system_prompt = f"""당신은 사용자 친화적인 챗봇입니다. 
-    사용자의 질문과 실행 결과를 바탕으로 친근하고 이해하기 쉽게 답변해주세요.
-    
-    답변 형식:
-    1. 사용자 질문에 대한 간단한 인사
-    2. 실행된 작업들의 요약 (간결하게)
-    3. 주요 결과 요약
-    4. 추가 도움이 필요한 부분이 있다면 안내
-    
-    답변은 한국어로 작성하고, 친근하고 도움이 되는 톤으로 작성해주세요.
-    """
-    
     user_query = state.get("user_query", "")
     intent = state.get("intent", "")
     shared = state.get("shared", {})
@@ -492,73 +495,103 @@ def generate_user_response(state: Dict[str, Any]) -> str:
     retrieval = state.get("retrieval", {})
     artifacts = state.get("artifacts", {})
     
-    # 실행된 작업들 파악
+    # 1. 검색 답변이 있으면 그대로 포함 (retrieve intent)
+    if intent == "retrieve" and retrieval and shared.get("retrieve_answer"):
+        retrieve_answer = shared.get("retrieve_answer", "")
+        print("📝 검색 답변을 그대로 포함하여 응답 생성")
+        return f"안녕하세요! 요청하신 정보를 검색했습니다.\n\n{retrieve_answer}"
+    
+    # 2. 사용자 입력에 따라 변화한 내용만 요약
     executed_tasks = []
     results_summary = []
     
-    if intent == "retrieve" and retrieval:
-        executed_tasks.append("정보 검색")
-        if shared.get("retrieve_answer"):
-            results_summary.append("관련 정보를 검색했습니다")
-    
-    if intent == "generate" and generation:
+    # 문제 생성 (새로운 내용 생성)
+    if intent == "generate" and generation and shared.get("question"):
         executed_tasks.append("문제 생성")
         question_count = len(shared.get("question", []))
         if question_count > 0:
             results_summary.append(f"{question_count}개의 문제를 생성했습니다")
     
-    if intent == "solution" or "solution" in executed_tasks:
+    # 문제 풀이 (새로운 내용 생성)
+    if intent == "solution" and solution and shared.get("answer"):
         executed_tasks.append("문제 풀이")
         answer_count = len(shared.get("answer", []))
         if answer_count > 0:
             results_summary.append(f"{answer_count}개 문제의 답안과 해설을 생성했습니다")
     
-    if intent == "score" or "score" in executed_tasks:
-        executed_tasks.append("채점")
-        correct_count = shared.get("correct_count", 0)
-        total_count = shared.get("total_count", 0)
-        if total_count > 0:
-            accuracy = (correct_count / total_count) * 100
-            results_summary.append(f"채점 결과: {correct_count}/{total_count} 정답 ({accuracy:.1f}%)")
+    # 채점 및 오답 분석 (동시 실행되는 작업들)
+    has_score = score and shared.get("correct_count") is not None
+    has_analysis = analysis and shared.get("weak_type")
     
-    if intent == "analyze" or "analysis" in executed_tasks:
-        executed_tasks.append("오답 분석")
-        weak_types = shared.get("weak_type", [])
-        if weak_types:
-            results_summary.append(f"취약점 분석 완료: {', '.join(map(str, weak_types[:3]))}{'...' if len(weak_types) > 3 else ''}")
+    if has_score or has_analysis:
+        if has_score and has_analysis:
+            executed_tasks.append("채점 및 오답 분석")
+            correct_count = shared.get("correct_count", 0)
+            total_count = shared.get("total_count", 0)
+            weak_types = shared.get("weak_type", [])
+            
+            score_info = f"채점 결과: {correct_count}/{total_count} 정답 ({(correct_count/total_count*100):.1f}%)" if total_count > 0 else "채점 완료"
+            analysis_info = f"취약점 분석: {', '.join(map(str, weak_types[:3]))}{'...' if len(weak_types) > 3 else ''}" if weak_types else "분석 완료"
+            results_summary.append(f"{score_info}, {analysis_info}")
+            
+        elif has_score:
+            executed_tasks.append("채점")
+            correct_count = shared.get("correct_count", 0)
+            total_count = shared.get("total_count", 0)
+            if total_count > 0:
+                accuracy = (correct_count / total_count) * 100
+                results_summary.append(f"채점 결과: {correct_count}/{total_count} 정답 ({accuracy:.1f}%)")
+                
+        elif has_analysis:
+            executed_tasks.append("오답 분석")
+            weak_types = shared.get("weak_type", [])
+            if weak_types:
+                results_summary.append(f"취약점 분석 완료: {', '.join(map(str, weak_types[:3]))}{'...' if len(weak_types) > 3 else ''}")
     
-    # PDF 생성 확인
+    # PDF 생성 확인 (실제로 생성된 경우만)
     generated_pdfs = artifacts.get("generated_pdfs", [])
     if generated_pdfs:
         executed_tasks.append("PDF 생성")
         pdf_count = len(generated_pdfs)
         results_summary.append(f"{pdf_count}개의 PDF 파일을 생성했습니다")
     
-    # 사용자 친화적인 답변 생성
-    user_prompt = f"""사용자 질문: {user_query}
-    
-실행된 작업들: {', '.join(executed_tasks) if executed_tasks else '없음'}
-주요 결과: {'; '.join(results_summary) if results_summary else '결과 없음'}
+    # 3. 변화한 내용이 있으면 요약, 없으면 기본 메시지
+    if executed_tasks:
+        system_prompt = f"""당신은 사용자 친화적인 챗봇입니다. 
+        사용자의 질문과 실행 결과를 바탕으로 친근하고 이해하기 쉽게 답변해주세요.
+        
+        답변 형식:
+        1. 사용자 질문에 대한 간단한 인사
+        2. 실행된 작업들의 요약 (간결하게)
+        3. 주요 결과 요약
+        4. 추가 도움이 필요한 부분이 있다면 안내
+        
+        답변은 한국어로 작성하고, 친근하고 도움이 되는 톤으로 작성해주세요.
+        """
+        
+        user_prompt = f"""사용자 질문: {user_query}
+        
+실행된 작업들: {', '.join(executed_tasks)}
+주요 결과: {'; '.join(results_summary)}
 
 위 정보를 바탕으로 실행된 내용을 요약해서 친절하게 알려주세요."""
 
-    try:
-        response = client.chat.completions.create(
-            model=OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=LLM_TEMPERATURE
-        )
-        
-        result = response.choices[0].message.content.strip()
-        return result if result else "작업이 완료되었습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
-        
-    except Exception as e:
-        print(f"답변 생성 중 오류: {e}")
-        # 기본 답변 반환
-        if executed_tasks:
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=LLM_TEMPERATURE
+            )
+            
+            result = response.choices[0].message.content.strip()
+            return result if result else f"안녕하세요! {', '.join(executed_tasks)} 작업을 완료했습니다. {'; '.join(results_summary)}"
+            
+        except Exception as e:
+            print(f"답변 생성 중 오류: {e}")
             return f"안녕하세요! {', '.join(executed_tasks)} 작업을 완료했습니다. {'; '.join(results_summary)}"
-        else:
-            return "안녕하세요! 요청하신 작업을 처리했습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
+    else:
+        # 변화한 내용이 없으면 기본 메시지
+        return "안녕하세요! 요청하신 작업을 처리했습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."

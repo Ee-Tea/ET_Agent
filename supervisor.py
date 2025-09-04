@@ -411,8 +411,7 @@ class MainOrchestrator:
             # Farmer 상태 준비 (기존 데이터 + 숏텀 메모리 데이터)
             farmer_state = {
                 "query": state["user_query"],
-                "selected_crop": farmer_data.get("selected_crop", ""),
-                "crop_info": farmer_data.get("crop_info", "")
+                "selected_crop": farmer_data.get("selected_crop", "")
             }
             
             # Farmer 그래프 실행
@@ -849,14 +848,13 @@ class MainOrchestrator:
             
             # Farmer 데이터 업데이트
             farmer_data = {
-                "selected_crop": farmer_result.get("selected_crop", ""),
-                "crop_info": farmer_result.get("crop_info", "")
+                "selected_crop": farmer_result.get("selected_crop", "")
             }
             
             short_term_data["farmer"] = farmer_data
             self.save_short_term_memory(short_term_data)
             
-            print(f"💾 Farmer 숏텀 메모리 저장: selected_crop={farmer_data['selected_crop']}, crop_info={farmer_data['crop_info'][:100]}...")
+            print(f"💾 Farmer 숏텀 메모리 저장: selected_crop={farmer_data['selected_crop']}")
             
         except Exception as e:
             print(f"❌ Farmer 숏텀 메모리 저장 실패: {e}")

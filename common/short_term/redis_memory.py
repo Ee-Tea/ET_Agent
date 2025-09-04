@@ -782,6 +782,7 @@ class RedisLangGraphMemory:
             "question": questions,
             "options": options,
             "subject": subjects
+
         }
     
     # --------------------------

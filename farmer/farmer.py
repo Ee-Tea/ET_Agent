@@ -15,6 +15,7 @@ from langsmith import traceable
 from dotenv import load_dotenv
 import os, sys
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import traceback
@@ -418,11 +419,8 @@ class Farmer:
         try:
             agent_state = {"query": agent_prompt}
             
-            # 날씨 에이전트는 비동기 함수이므로 await 사용
-            if agent_name == "날씨_agent":
-                agent_result = await agent_func(agent_state)
-            else:
-                agent_result = agent_func(agent_state)
+            # 모든 에이전트가 비동기 함수이므로 await 사용
+            agent_result = await agent_func(agent_state)
                 
             answer = agent_result.get("agent_answer", "답변 생성 실패")
             return answer
@@ -534,8 +532,29 @@ class Farmer:
         
         print(f"담당 질문: {question_part}")
         
-        # 명확한 경계가 설정된 프롬프트로 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("작물추천_agent", question_part))
+        # 명확한 경계가 설정된 프롬프트로 실행 (스레드 격리)
+        
+        def run_agent_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self.execute_agent_with_boundaries("작물추천_agent", question_part))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                return f"에이전트 실행 실패: {e}"
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_agent_in_thread()
+        
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        
+        answer = result_container[0]
         
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
@@ -574,8 +593,29 @@ class Farmer:
             question_part = f"{selected_crop} {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
 
-        # 에이전트 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("작물재배_agent", question_part))
+        # 에이전트 실행 (스레드 격리)
+        
+        def run_agent_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self.execute_agent_with_boundaries("작물재배_agent", question_part))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                return f"에이전트 실행 실패: {e}"
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_agent_in_thread()
+        
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        
+        answer = result_container[0]
         
         # 전용 키에 답변 저장
         state["agent_results"]["작물재배_agent"] = answer
@@ -607,8 +647,29 @@ class Farmer:
             question_part = f"{selected_crop} 재배 중, {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
         
-        # 에이전트 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("재해_agent", question_part))
+        # 에이전트 실행 (스레드 격리)
+        
+        def run_agent_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self.execute_agent_with_boundaries("재해_agent", question_part))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                return f"에이전트 실행 실패: {e}"
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_agent_in_thread()
+        
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        
+        answer = result_container[0]
         
         # 전용 키에 답변 저장
         state["agent_results"]["재해_agent"] = answer
@@ -640,8 +701,29 @@ class Farmer:
             question_part = f"{selected_crop} {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
         
-        # 에이전트 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("판매처_agent", question_part))
+        # 에이전트 실행 (스레드 격리)
+        
+        def run_agent_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self.execute_agent_with_boundaries("판매처_agent", question_part))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                return f"에이전트 실행 실패: {e}"
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_agent_in_thread()
+        
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        
+        answer = result_container[0]
         
         # 전용 키에 답변 저장
         state["agent_results"]["판매처_agent"] = answer
@@ -670,13 +752,29 @@ class Farmer:
         # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
         # (날씨는 지역과 시간이 중요하므로)
         
-        # 에이전트 비동기 실행 (동기 함수 내에서 비동기 처리)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            answer = loop.run_until_complete(self.execute_agent_with_boundaries("날씨_agent", question_part))
-        finally:
-            loop.close()
+        # 에이전트 비동기 실행 (스레드 격리)
+        
+        def run_agent_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self.execute_agent_with_boundaries("날씨_agent", question_part))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                return f"에이전트 실행 실패: {e}"
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_agent_in_thread()
+        
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        
+        answer = result_container[0]
         
         # 전용 키에 답변 저장
         state["agent_results"]["날씨_agent"] = answer

@@ -2,6 +2,8 @@ import os
 import sys
 import re
 import pandas as pd
+import asyncio
+import threading
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, TypedDict
 
@@ -16,7 +18,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
-from langchain_tavily import TavilySearch
+from tavily import TavilyClient
 from langchain.retrievers import EnsembleRetriever
 
 from datasets import Dataset
@@ -107,7 +109,7 @@ VALIDATION_PROMPT = """
 답변:
 """
 
-tavily_tool = TavilySearch(max_results=5, api_key=TAVILY_API_KEY)
+tavily_tool = TavilyClient(api_key=TAVILY_API_KEY)
 
 # 전역 retriever 변수 (직렬화 문제 해결을 위해)
 _global_retriever = None
@@ -223,15 +225,56 @@ def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any
         
         if not is_sufficient:
             print("🌐 웹 검색으로 정보 보충 중...")
-            search_results = tavily_tool.invoke({"query": question})
-            web_sources = [{"url": res["url"], "content": res["content"]} for res in search_results]
+            try:
+                # TavilyClient 사용 - search 메서드 호출
+                response = tavily_tool.search(query=question, max_results=5)
+                
+                # TavilyClient 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
+                if isinstance(response, dict) and "results" in response:
+                    results = response["results"]
+                    web_sources = []
+                    for res in results:
+                        if isinstance(res, dict):
+                            web_sources.append({
+                                "url": res.get("url", "N/A"), 
+                                "content": res.get("content", res.get("snippet", ""))
+                            })
+                else:
+                    # 예상치 못한 응답 형식
+                    print(f"⚠️ 예상치 못한 Tavily 응답 형식: {type(response)}")
+                    web_sources = [{"url": "N/A", "content": "웹 검색 응답 형식 오류"}]
+                    
+            except Exception as e:
+                print(f"⚠️ Tavily 검색 오류: {e}")
+                web_sources = [{"url": "N/A", "content": f"웹 검색 실패 - {str(e)}"}]
+            
             print("✅ 웹 검색 완료.")
 
     # 2. 'general' 주제에 대한 웹 검색 (기존 로직 유지)
     if "general" in topics:
         print("🌐 '일반' 주제에 대한 웹 검색 중...")
-        search_results = tavily_tool.invoke({"query": question})
-        web_sources.extend([{"url": res["url"], "content": res["content"]} for res in search_results])
+        try:
+            # TavilyClient 사용 - search 메서드 호출
+            response = tavily_tool.search(query=question, max_results=5)
+            
+            # TavilyClient 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
+            if isinstance(response, dict) and "results" in response:
+                results = response["results"]
+                for res in results:
+                    if isinstance(res, dict):
+                        web_sources.append({
+                            "url": res.get("url", "N/A"), 
+                            "content": res.get("content", res.get("snippet", ""))
+                        })
+            else:
+                # 예상치 못한 응답 형식
+                print(f"⚠️ 예상치 못한 Tavily 응답 형식: {type(response)}")
+                web_sources.extend([{"url": "N/A", "content": "웹 검색 응답 형식 오류"}])
+                
+        except Exception as e:
+            print(f"⚠️ Tavily 검색 오류: {e}")
+            web_sources.extend([{"url": "N/A", "content": f"웹 검색 실패 - {str(e)}"}])
+        
         print("✅ 웹 검색 완료.")
     
     return {**state, "db_context": db_context, "db_sources": db_sources, "web_sources": web_sources}
@@ -320,10 +363,10 @@ ragas_embeddings = HuggingFaceEmbeddings(
     model_name="jhgan/ko-sroberta-multitask"
 )
 
-# --- RAGAS 평가 함수 추가 ---
+# --- RAGAS 평가 함수 추가 (asyncio.gather 병렬 처리) ---
 def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     """
-    주어진 질문, 답변, 맥락으로 RAGAS 평가를 실행합니다.
+    주어진 질문, 답변, 맥락으로 RAGAS 평가를 실행합니다. (asyncio.gather 병렬 처리)
     """
     print("\n--- RAGAS 자동 평가 시작 ---")
     faithfulness, answer_relevancy , ContextUtilization, LLMContextPrecisionWithoutReference = get_ragas_metrics()
@@ -348,22 +391,145 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
             llm=ragas_llm,
             embeddings=ragas_embeddings
         )
+        # 🚀 asyncio.gather를 사용한 직접 병렬 처리
+        async def evaluate_faithfulness():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                from ragas.metrics import Faithfulness
+                
+                faithfulness_scorer = Faithfulness(llm=LangchainLLMWrapper(ragas_llm))
+                faithfulness_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                return ("faithfulness", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                return ("faithfulness", 0.0)
+        
+        async def evaluate_answer_relevancy():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                from ragas.embeddings import LangchainEmbeddingsWrapper
+                from ragas.metrics import ResponseRelevancy
+                
+                answer_relevancy_scorer = ResponseRelevancy(
+                    llm=LangchainLLMWrapper(ragas_llm), 
+                    embeddings=LangchainEmbeddingsWrapper(ragas_embeddings)
+                )
+                relevancy_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
+                return ("answer_relevancy", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                return ("answer_relevancy", 0.0)
+        
+        async def evaluate_context_utilization():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                from ragas.metrics import ContextUtilization
+                
+                context_utilization_scorer = ContextUtilization(llm=LangchainLLMWrapper(ragas_llm))
+                context_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await context_utilization_scorer.single_turn_ascore(context_sample)
+                return ("context_utilization", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Context Utilization 평가 실패: {e}")
+                return ("context_utilization", 0.0)
+        
+        async def evaluate_context_precision():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                
+                context_precision_scorer = LLMContextPrecisionWithoutReference(llm=LangchainLLMWrapper(ragas_llm))
+                context_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await context_precision_scorer.single_turn_ascore(context_sample)
+                return ("context_precision", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Context Precision 평가 실패: {e}")
+                return ("context_precision", 0.0)
+        
+        # 스레드 격리로 4개 모두 병렬 실행
+        def run_parallel_ragas_in_thread():
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    # 4개 평가를 동시에 실행 (진짜 병렬 처리)
+                    results = new_loop.run_until_complete(
+                        asyncio.gather(
+                            evaluate_faithfulness(),
+                            evaluate_answer_relevancy(),
+                            evaluate_context_utilization(),
+                            evaluate_context_precision(),
+                            return_exceptions=True
+                        )
+                    )
+                    
+                    # 결과 수집
+                    scores = {}
+                    for result in results:
+                        if isinstance(result, Exception):
+                            print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                            continue
+                        metric_name, score = result
+                        scores[metric_name] = score
+                    
+                    return scores
+                finally:
+                    new_loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                print(f"   - ⚠️ 스레드 내 병렬 RAGAS 평가 실패: {e}")
+                return {"faithfulness": 0.0, "answer_relevancy": 0.0, "context_utilization": 0.0, "context_precision": 0.0}
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_parallel_ragas_in_thread()
+        
+        print("   - 🔥 Faithfulness, Answer Relevancy, Context Utilization & Context Precision 4개 병렬 평가 시작!")
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        print("   - ✅ 4개 병렬 평가 완료!")
+        
+        scores = result_container[0]
+        if scores is None:
+            raise Exception("RAGAS 평가 실패")
+        
         print("✅ RAGAS 평가 완료.")
         
-        pd.set_option('display.max_columns', None)
-        pd.set_option('display.width', None)
-
-        result_df = result.to_pandas()
-        
         print("\n--- RAGAS 평가 점수 ---")
-        if 'faithfulness' in result_df.columns:
-            print(f"faithfulness: {result_df['faithfulness'].iloc[0]:.4f}")
-        if 'answer_relevancy' in result_df.columns:
-            print(f"answer_relevancy: {result_df['answer_relevancy'].iloc[0]:.4f}")
-        if 'context_utilization' in result_df.columns:
-            print(f"context_utilization: {result_df['context_utilization'].iloc[0]:.4f}")
-        if 'llm_context_precision_without_reference' in result_df.columns:
-            print(f"context_precision: {result_df['llm_context_precision_without_reference'].iloc[0]:.4f}")
+        print(f"faithfulness: {scores.get('faithfulness', 0.0):.4f}")
+        print(f"answer_relevancy: {scores.get('answer_relevancy', 0.0):.4f}")
+        print(f"context_utilization: {scores.get('context_utilization', 0.0):.4f}")
+        print(f"context_precision: {scores.get('context_precision', 0.0):.4f}")
+        
+        # DataFrame 형태로 반환 (기존 호환성 유지)
+        result_df = pd.DataFrame({
+            'faithfulness': [scores.get('faithfulness', 0.0)],
+            'answer_relevancy': [scores.get('answer_relevancy', 0.0)],
+            'context_utilization': [scores.get('context_utilization', 0.0)],
+            'context_precision': [scores.get('context_precision', 0.0)]
+        })
         
         print("\n--- 전체 평가 데이터프레임 ---")
         print(result_df)
@@ -376,9 +542,9 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
         return pd.DataFrame({'faithfulness': [0.0], 'answer_relevancy': [0.0], 'context_utilization': [0.0], 'context_precision': [0.0]})
 
 # --- 7. OchestratorTest.py와 호환되는 run 함수 ---
-def run(state: Dict[str, Any]) -> Dict[str, Any]:
+async def run(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    OchestratorTest.py에서 호출되는 메인 실행 함수
+    OchestratorTest.py에서 호출되는 메인 실행 함수 (비동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리

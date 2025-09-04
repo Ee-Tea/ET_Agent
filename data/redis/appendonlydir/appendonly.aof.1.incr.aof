@@ -13768,3 +13768,1124 @@ $32
 chat_history:main_user_main_chat
 $13
 1756961316227
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756961778098
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756961783570
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$122
+{"user_query": "나 김우준 충청도에서 복숭아를 판매 할 사나이", "response": "", "timestamp": 1756958183}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756961783591
+*2
+$6
+SELECT
+$1
+0
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756961993723
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756962146704
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756962204805
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$122
+{"user_query": "나 김우준 충청도에서 복숭아를 판매 할 사나이", "response": "", "timestamp": 1756958183}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$118
+{"user_query": "나 김우준 강원도에서 감자를 판매할 사나이", "response": "", "timestamp": 1756958604}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756962204821
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756962214758
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756962233568
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$122
+{"user_query": "나 김우준 충청도에서 복숭아를 판매 할 사나이", "response": "", "timestamp": 1756958183}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$118
+{"user_query": "나 김우준 강원도에서 감자를 판매할 사나이", "response": "", "timestamp": 1756958604}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$94
+{"user_query": "충청도에서 판매하고 싶어", "response": "", "timestamp": 1756958633}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756962233625
+*5
+$3
+SET
+$24
+lock:main_user_main_chat
+$6
+farmer
+$4
+PXAT
+$13
+1756962234902
+*5
+$3
+SET
+$30
+short_term:main_user_main_chat
+$1597
+{"farmer": {"selected_crop": "", "crop_info": ""}, "teacher": {"questions": ["변수의 역할은 무엇인가?", "함수의 주요 목적은 무엇인가?"], "options": [["  1. 데이터 저장", "  2. 프로그램 실행", "  3. 에러 처리", "  4. 입력 출력"], ["  1. 코드 재사용", "  2. 데이터 저장", "  3. 에러 발생", "  4. 입력 처리"]], "answer": ["1", "1"], "explanation": ["변수의 역할은 데이터를 저장하는 것입니다. 변수는 프로그램 내에서 특정 값을 저장하고, 이 값을 필요할 때마다 참조하거나 수정할 수 있도록 해줍니다. 변수는 메모리의 특정 위치를 가리키며, 이 위치에 저장된 데이터는 프로그램의 실행 중에 동적으로 변경될 수 있습니다. 따라서 변수는 프로그램의 상태를 유지하고, 다양한 연산을 수행하는 데 필수적인 요소입니다.", "함수의 주요 목적은 코드 재사용입니다. 함수는 특정 작업을 수행하는 코드 블록으로, 이를 정의하고 호출함으로써 같은 코드를 여러 번 작성하지 않고도 사용할 수 있게 해줍니다. 이는 프로그램의 유지보수성과 가독성을 높이며, 개발 시간을 단축시키는 데 기여합니다. 함수는 입력을 받아 처리한 후 결과를 반환할 수 있으며, 이러한 구조는 프로그래밍에서 매우 중요한 개념입니다. 따라서 함수의 주요 목적은 코드 재사용이라고 할 수 있습니다."], "subject": ["프로그래밍언어활용", "프로그래밍언어활용"], "added_count": 2}}
+$4
+PXAT
+$13
+1756962297983
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$122
+{"user_query": "나 김우준 충청도에서 복숭아를 판매 할 사나이", "response": "", "timestamp": 1756958183}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$118
+{"user_query": "나 김우준 강원도에서 감자를 판매할 사나이", "response": "", "timestamp": 1756958604}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$94
+{"user_query": "충청도에서 판매하고 싶어", "response": "", "timestamp": 1756958633}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$107
+{"user_query": "충청도에서 복숭아 판매하고 싶ㅇ어", "response": "", "timestamp": 1756958697}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756962297995
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$122
+{"user_query": "나 김우준 충청도에서 복숭아를 판매 할 사나이", "response": "", "timestamp": 1756958183}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$118
+{"user_query": "나 김우준 강원도에서 감자를 판매할 사나이", "response": "", "timestamp": 1756958604}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$94
+{"user_query": "충청도에서 판매하고 싶어", "response": "", "timestamp": 1756958633}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$107
+{"user_query": "충청도에서 복숭아 판매하고 싶ㅇ어", "response": "", "timestamp": 1756958697}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$150
+{"user_query": "올해 태풍이 언제 올까", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756958764}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756962364449
+*2
+$3
+DEL
+$32
+chat_history:main_user_main_chat
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$215
+{"user_query": "데이터베이스 1문제 만들어줘", "response": "❌ 현재 farmer 서비스가 활성화되어 있습니다. 세션을 초기화하려면 'clear'를 입력하세요.", "timestamp": 1756949547}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$101
+{"user_query": "경주에서 당근을 판매하고 싶어", "response": "", "timestamp": 1756949553}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$95
+{"user_query": "프로그래밍 2문제 만들어줘", "response": "", "timestamp": 1756949595}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$85
+{"user_query": "문제 풀이도 알려줘", "response": "", "timestamp": 1756949895}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756949983}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$89
+{"user_query": "답은 2, 3이야 채점해줘", "response": "", "timestamp": 1756950005}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950571}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$137
+{"user_query": "답은 2, 3이야", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756950774}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756950779}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756950958}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951256}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$78
+{"user_query": "문제 풀이해줘", "response": "", "timestamp": 1756951466}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756952374}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955244}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756955801}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756956568}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$77
+{"user_query": "문제풀이해줘", "response": "", "timestamp": 1756957561}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$98
+{"user_query": "경상도에서 사과를 팔고 싶어", "response": "", "timestamp": 1756957636}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$102
+{"user_query": "사과를 기르는 방법을 알고 싶어", "response": "", "timestamp": 1756957716}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$122
+{"user_query": "나 김우준 충청도에서 복숭아를 판매 할 사나이", "response": "", "timestamp": 1756958183}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$118
+{"user_query": "나 김우준 강원도에서 감자를 판매할 사나이", "response": "", "timestamp": 1756958604}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$94
+{"user_query": "충청도에서 판매하고 싶어", "response": "", "timestamp": 1756958633}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$107
+{"user_query": "충청도에서 복숭아 판매하고 싶ㅇ어", "response": "", "timestamp": 1756958697}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$150
+{"user_query": "올해 태풍이 언제 올까", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756958764}
+*3
+$5
+RPUSH
+$32
+chat_history:main_user_main_chat
+$141
+{"user_query": "내일 서울 날씨?", "response": "❌ 이 질문은 저희 서비스 범위를 벗어납니다.", "timestamp": 1756958778}
+*3
+$9
+PEXPIREAT
+$32
+chat_history:main_user_main_chat
+$13
+1756962378126

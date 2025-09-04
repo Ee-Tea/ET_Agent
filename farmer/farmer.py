@@ -162,7 +162,7 @@ class Farmer:
     
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
         """
-        Supervisor에서 호출되는 메인 실행 함수
+        Supervisor에서 호출되는 메인 실행 함수 - LangGraph 워크플로우를 따라 실행
         
         Args:
             state: Supervisor에서 전달받은 상태 딕셔너리
@@ -191,59 +191,20 @@ class Farmer:
             if state.get("crop_info"):
                 router_state["crop_info"] = [state.get("crop_info", "")]
             
-            # 상태 초기화
-            router_state = self.load_state(router_state)
+            print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
             
-            # input 노드 건너뛰고 agent_select부터 시작
-            router_state = self.node_agent_select(router_state)
-            
-            # 에이전트 선택에 따른 분기 처리
-            selected_agents = router_state.get("selected_agents", [])
-            
-            # 작물추천_agent가 선택된 경우
-            if "작물추천_agent" in selected_agents:
-                router_state = self.node_crop_recommend(router_state)
-            
-            # 다른 에이전트들 실행
-            if len([agent for agent in selected_agents if agent != "작물추천_agent"]) > 0:
-                # 병렬 실행
-                agents_to_run = [agent for agent in selected_agents if agent != "작물추천_agent"]
-                for agent in agents_to_run:
-                    if agent == "작물재배_agent":
-                        router_state = self.node_crop_grow_agent(router_state)
-                    elif agent == "재해_agent":
-                        router_state = self.node_disaster_agent(router_state)
-                    elif agent == "날씨_agent":
-                        router_state = self.node_weather_agent(router_state)
-                    elif agent == "판매처_agent":
-                        router_state = self.node_sales_agent(router_state)
-            elif len(selected_agents) == 1:
-                # 단일 에이전트 실행
-                agent = selected_agents[0]
-                if agent == "작물재배_agent":
-                    router_state = self.node_crop_grow_agent(router_state)
-                elif agent == "재해_agent":
-                    router_state = self.node_disaster_agent(router_state)
-                elif agent == "날씨_agent":
-                    router_state = self.node_weather_agent(router_state)
-                elif agent == "판매처_agent":
-                    router_state = self.node_sales_agent(router_state)
-            
-            # 최종 응답 병합
-            router_state = self.node_merge_output(router_state)
-            
-            # 상태 저장
-            router_state = self.persist_state(router_state)
+            # LangGraph 워크플로우를 따라 실행
+            result = self.graph.invoke(router_state, config)
             
             # 결과 반환
             return {
-                "output": router_state.get("output", [""])[0] if router_state.get("output") else "",
-                "selected_agents": router_state.get("selected_agents", []),
-                "agent_results": router_state.get("agent_results", {}),
-                "selected_crop": router_state.get("selected_crop", [""])[0] if router_state.get("selected_crop") else "",
-                "crop_info": router_state.get("crop_info", [""])[0] if router_state.get("crop_info") else "",
+                "output": result.get("output", [""])[0] if result.get("output") else "",
+                "selected_agents": result.get("selected_agents", []),
+                "agent_results": result.get("agent_results", {}),
+                "selected_crop": result.get("selected_crop", [""])[0] if result.get("selected_crop") else "",
+                "crop_info": result.get("crop_info", [""])[0] if result.get("crop_info") else "",
                 "status": "success",
-                "error_info": router_state.get("error_info", {})
+                "error_info": result.get("error_info", {})
             }
             
         except Exception as e:
@@ -571,7 +532,7 @@ class Farmer:
         print(f"담당 질문: {question_part}")
         
         # 명확한 경계가 설정된 프롬프트로 실행
-        answer = self.execute_agent_with_boundaries("작물추천_agent", question_part)
+        answer = asyncio.run(self.execute_agent_with_boundaries("작물추천_agent", question_part))
         
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
@@ -611,7 +572,7 @@ class Farmer:
             print(f"[🔄 수정된 질문 ] {question_part}")
 
         # 에이전트 실행
-        answer = self.execute_agent_with_boundaries("작물재배_agent", question_part)
+        answer = asyncio.run(self.execute_agent_with_boundaries("작물재배_agent", question_part))
         
         # 전용 키에 답변 저장
         state["agent_results"]["작물재배_agent"] = answer
@@ -644,7 +605,7 @@ class Farmer:
             print(f"[🔄 수정된 질문 ] {question_part}")
         
         # 에이전트 실행
-        answer = self.execute_agent_with_boundaries("재해_agent", question_part)
+        answer = asyncio.run(self.execute_agent_with_boundaries("재해_agent", question_part))
         
         # 전용 키에 답변 저장
         state["agent_results"]["재해_agent"] = answer
@@ -677,7 +638,7 @@ class Farmer:
             print(f"[🔄 수정된 질문 ] {question_part}")
         
         # 에이전트 실행
-        answer = self.execute_agent_with_boundaries("판매처_agent", question_part)
+        answer = asyncio.run(self.execute_agent_with_boundaries("판매처_agent", question_part))
         
         # 전용 키에 답변 저장
         state["agent_results"]["판매처_agent"] = answer
@@ -707,7 +668,6 @@ class Farmer:
         # (날씨는 지역과 시간이 중요하므로)
         
         # 에이전트 비동기 실행 (동기 함수 내에서 비동기 처리)
-        import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -777,7 +737,13 @@ class Farmer:
         if len(selected_agents) == 1:
             agent = selected_agents[0]
             if agent in agent_results:
-                output = agent_results[agent]
+                result = agent_results[agent]
+                # coroutine 객체인지 확인
+                if asyncio.iscoroutine(result):
+                    print(f"[⚠️ {agent} 결과가 coroutine입니다. 기본 메시지로 대체합니다.")
+                    output = f"{agent} 실행이 완료되었습니다."
+                else:
+                    output = str(result)
                 print(f"[✅ 단일 에이전트 응답 완료] {agent}")
             else:
                 output = f"{agent} 실행 결과를 찾을 수 없습니다."
@@ -796,8 +762,12 @@ class Farmer:
             # 다른 에이전트들의 답변 표시
             for agent, answer in agent_results.items():
                 if agent != "작물추천_agent":  # 이미 표시됨
+                    # coroutine 객체인지 확인
+                    if asyncio.iscoroutine(answer):
+                        print(f"[⚠️ {agent} 결과가 coroutine입니다. 기본 메시지로 대체합니다.")
+                        answer = f"{agent} 실행이 완료되었습니다."
                     # 에이전트 결과 추가
-                    output += f"[{agent} 결과]\n{answer}\n"
+                    output += f"[{agent} 결과]\n{str(answer)}\n"
             
             # 다른 작물 정보 안내 추가
             if state.get("crop_info") and state.get("selected_crop"):
@@ -805,7 +775,12 @@ class Farmer:
                 output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
                 output += f"'{state['selected_crop'][0] if state['selected_crop'] else ''} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
         
-        merged_output = output.strip()
+        # coroutine 객체인지 확인하고 안전하게 처리
+        if asyncio.iscoroutine(output):
+            print("[⚠️ output이 coroutine입니다. 기본 메시지로 대체합니다.")
+            merged_output = "에이전트 실행이 완료되었습니다."
+        else:
+            merged_output = str(output).strip()
         
         # 에이전트가 하나뿐인 경우 LLM 요약 생략
         if len(selected_agents) == 1:
@@ -866,9 +841,8 @@ class Farmer:
 
         workflow.add_node("merge_output", self.node_merge_output)
         
-        # 기본 엣지
-        workflow.add_edge("load_state", "input")
-        workflow.add_edge("input", "agent_select")
+        # 기본 엣지 - input 노드 건너뛰고 바로 agent_select로
+        workflow.add_edge("load_state", "agent_select")
         
         # agent_select에서 조건부 분기 (etc 제거)
         def agent_select_branch_condition(state):

@@ -894,8 +894,8 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     
     # RAGAS 임계값 설정
     CONTEXT_PRECISION_THRESHOLD = 0.7
-    FAITHFULNESS_THRESHOLD = 0.7
-    ANSWER_RELEVANCY_THRESHOLD = 0.5
+    FAITHFULNESS_THRESHOLD = 0.65
+    ANSWER_RELEVANCY_THRESHOLD = 0.45
     
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import

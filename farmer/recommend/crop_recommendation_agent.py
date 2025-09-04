@@ -6,6 +6,8 @@ import time
 import argparse
 import unicodedata
 import logging
+import asyncio
+import threading
 from typing import List, Dict, Any, Optional, Tuple, TypedDict
 
 import pandas as pd
@@ -42,7 +44,7 @@ if not OPENAI_API_KEY:
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus as MilvusVectorStore
-from langchain_tavily import TavilySearch
+from tavily import TavilyClient
 from langchain_openai import ChatOpenAI
 
 # =========[ 전역 변수 ]=========
@@ -408,9 +410,34 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
 
         print("   - 🔄 RAGAS 평가 실행 중...")
         
-        # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-        import asyncio
-        context_precision_score = asyncio.run(context_precision_scorer.single_turn_ascore(context_sample))
+        # 진짜 병렬 처리: Context Precision만 먼저 시작
+        def run_context_precision_in_thread():
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    result = new_loop.run_until_complete(
+                        context_precision_scorer.single_turn_ascore(context_sample)
+                    )
+                    return float(result) if result is not None else 0.0
+                finally:
+                    new_loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                print(f"   - ⚠️ 스레드 내 Context Precision 평가 실패: {e}")
+                return 0.0
+        
+        # 스레드 시작하고 바로 다음으로 넘어감 (병렬 처리)
+        context_precision_container = [None]
+        def context_precision_target():
+            context_precision_container[0] = run_context_precision_in_thread()
+        
+        context_precision_thread = threading.Thread(target=context_precision_target)
+        context_precision_thread.start()
+        
+        # Context Precision 결과 기다리기
+        context_precision_thread.join()
+        context_precision_score = context_precision_container[0]
         ragas_scores["context_precision"] = float(context_precision_score)
 
     except Exception as e:
@@ -476,92 +503,123 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
     context = state.get("context", "")
     answer = state.get("answer", "")
 
-
-
     # 컨텍스트 및 답변 최적화
     max_context_length = 3000
     optimized_context = context[:max_context_length] if len(context) > max_context_length else context
     max_answer_length = 1200
     optimized_answer = answer[:max_answer_length] if len(answer) > max_answer_length else answer
 
-
-
     try:
         print("   - 📊 RAGAS 답변 품질 평가 중...")
         
         scores = {}
         
-        try:
-            # Faithfulness (SalesRAGAS 방식)
-            faithfulness_scorer = Faithfulness(llm=LangchainLLMWrapper(llm))
-            
-            # SingleTurnSample 생성 (Faithfulness용)
-            faithfulness_sample = SingleTurnSample(
-                user_input=question,
-                response=optimized_answer,
-                retrieved_contexts=[optimized_context] if optimized_context else [""]
-            )
-            
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            faithfulness_score = asyncio.run(faithfulness_scorer.single_turn_ascore(faithfulness_sample))
-            scores['faithfulness'] = float(faithfulness_score)
-            
-        except Exception as e:
-            scores['faithfulness'] = 0.0
+        # 🚀 WeatherAgent 방식: asyncio.gather() 사용
+        async def evaluate_faithfulness():
+            try:
+                faithfulness_scorer = Faithfulness(llm=LangchainLLMWrapper(llm))
+                faithfulness_sample = SingleTurnSample(
+                    user_input=question,
+                    response=optimized_answer,
+                    retrieved_contexts=[optimized_context] if optimized_context else [""]
+                )
+                result = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                return ("faithfulness", float(result) if result is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                return ("faithfulness", 0.0)
         
-        try:
-            # Answer Relevancy (SalesRAGAS 방식)
-            answer_relevancy_scorer = ResponseRelevancy(
-                llm=LangchainLLMWrapper(llm), 
-                embeddings=embedding_model
-            )
-            
-            # SingleTurnSample 생성 (Answer Relevancy용)
-            relevancy_sample = SingleTurnSample(
-                user_input=question,
-                response=optimized_answer,
-                retrieved_contexts=[optimized_context] if optimized_context else [""]
-            )
-            
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            answer_relevancy_score = asyncio.run(answer_relevancy_scorer.single_turn_ascore(relevancy_sample))
-            scores['answer_relevancy'] = float(answer_relevancy_score)
-            
-        except Exception as e:
-            scores['answer_relevancy'] = 0.0
-
-        f_val = scores.get('faithfulness', 0.0)
-        r_val = scores.get('answer_relevancy', 0.0)
-
-
-
-        # 개별 임계값 평가
-        faithfulness_sufficient = f_val >= 0.4
-        relevancy_sufficient = r_val >= 0.5
-        is_sufficient = faithfulness_sufficient and relevancy_sufficient
-
-        print(f"   - 📈 답변 품질 지표:")
-        print(f"     • Faithfulness: {f_val:.3f} (임계값: 0.4) {'✅' if faithfulness_sufficient else '❌'}")
-        print(f"     • Answer Relevancy: {r_val:.3f} (임계값: 0.5) {'✅' if relevancy_sufficient else '❌'}")
-        print(f"     • 최종 결과: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
-
-        # 충분한 경우 최종 출력 처리
-        if is_sufficient:
-            answer = state.get("answer", "답변 생성 실패")
-            source = state.get("answer_source", "알 수 없음")
-
-            print("\n" + "="*20)
-            print("최종 답변")
-            print("="*20)
-            print("\n" + answer)
-            print("="*20)
-
-        return {**state, "is_answer_sufficient": is_sufficient, "retry_count": retry_count}
-
+        async def evaluate_answer_relevancy():
+            try:
+                answer_relevancy_scorer = ResponseRelevancy(
+                    llm=LangchainLLMWrapper(llm), 
+                    embeddings=embedding_model
+                )
+                relevancy_sample = SingleTurnSample(
+                    user_input=question,
+                    response=optimized_answer,
+                    retrieved_contexts=[optimized_context] if optimized_context else [""]
+                )
+                result = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
+                return ("answer_relevancy", float(result) if result is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                return ("answer_relevancy", 0.0)
+        
+        # 스레드 격리로 병렬 실행
+        def run_parallel_in_thread():
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    # 2개 평가를 동시에 실행 (진짜 병렬 처리)
+                    results = new_loop.run_until_complete(
+                        asyncio.gather(
+                            evaluate_faithfulness(),
+                            evaluate_answer_relevancy(),
+                            return_exceptions=True
+                        )
+                    )
+                    
+                    # 결과 수집
+                    for result in results:
+                        if isinstance(result, Exception):
+                            print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                            continue
+                        metric_name, score = result
+                        scores[metric_name] = score
+                    
+                    return scores
+                finally:
+                    new_loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                print(f"   - ⚠️ 스레드 내 병렬 RAGAS 평가 실패: {e}")
+                return {"faithfulness": 0.0, "answer_relevancy": 0.0}
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_parallel_in_thread()
+        
+        print("   - 🔥 Faithfulness & Answer Relevancy 병렬 평가 시작!")
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        print("   - ✅ 병렬 평가 완료!")
+        
+        parallel_scores = result_container[0]
+        scores.update(parallel_scores)
+        
     except Exception as e:
-        print(f"   - ❌ 2차 검증 중 오류 발생: {e}")
-        return {**state, "is_answer_sufficient": True, "retry_count": retry_count}
+        print(f"   - ❌ 병렬 RAGAS 평가 실패: {e}")
+        scores['faithfulness'] = 0.0
+        scores['answer_relevancy'] = 0.0
+
+    f_val = scores.get('faithfulness', 0.0)
+    r_val = scores.get('answer_relevancy', 0.0)
+
+    # 개별 임계값 평가
+    faithfulness_sufficient = f_val >= 0.4
+    relevancy_sufficient = r_val >= 0.5
+    is_sufficient = faithfulness_sufficient and relevancy_sufficient
+
+    print(f"   - 📈 답변 품질 지표:")
+    print(f"     • Faithfulness: {f_val:.3f} (임계값: 0.4) {'✅' if faithfulness_sufficient else '❌'}")
+    print(f"     • Answer Relevancy: {r_val:.3f} (임계값: 0.5) {'✅' if relevancy_sufficient else '❌'}")
+    print(f"     • 최종 결과: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
+
+    # 충분한 경우 최종 출력 처리
+    if is_sufficient:
+        answer = state.get("answer", "답변 생성 실패")
+        source = state.get("answer_source", "알 수 없음")
+
+        print("\n" + "="*20)
+        print("최종 답변")
+        print("="*20)
+        print("\n" + answer)
+        print("="*20)
+
+    return {**state, "is_answer_sufficient": is_sufficient, "retry_count": retry_count}
 
 # 웹 검색을 수행하는 노드 함수를 정의합니다.
 def web_search_node(state: GraphState) -> Dict[str, Any]:
@@ -573,19 +631,37 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         print("TAVILY API 키 없음. 웹 검색 건너뜁니다.")
         return {**state, "web_search_results": "웹 검색 비활성화", "web_contexts": []}
     
-    search_tool = TavilySearch(max_results=3)
-    results = search_tool.invoke({"query": question})
+    search_tool = TavilyClient(api_key=TAVILY_API_KEY)
     
     web_contexts: List[str] = []
-    for r in results:
-        title = (r.get("title") or "").strip()
-        content = (r.get("content") or r.get("snippet") or "").strip()
-        url = (r.get("url") or "").strip()
-        passage = f"{title}\n{content}\nURL: {url}".strip()
-        web_contexts.append(passage)
+    web_context_parts = []
+    
+    try:
+        # TavilyClient 사용 - search 메서드 호출
+        response = search_tool.search(query=question, max_results=3)
+        
+        # TavilyClient 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
+        if isinstance(response, dict) and "results" in response:
+            results = response["results"]
+            for r in results:
+                if isinstance(r, dict):
+                    title = (r.get("title") or "").strip()
+                    content = (r.get("content") or r.get("snippet") or "").strip()
+                    url = (r.get("url") or "").strip()
+                    passage = f"{title}\n{content}\nURL: {url}".strip()
+                    web_contexts.append(passage)
+                    web_context_parts.append(f"- 출처: {url or 'N/A'}\n 내용: {content}")
+        else:
+            # 예상치 못한 응답 형식
+            print(f"⚠️ 예상치 못한 Tavily 응답 형식: {type(response)}")
+            web_context_parts.append(f"- 출처: N/A\n 내용: 웹 검색 응답 형식 오류")
+            
+    except Exception as e:
+        print(f"⚠️ Tavily 검색 오류: {e}")
+        web_context_parts.append(f"- 출처: N/A\n 내용: 웹 검색 실패 - {str(e)}")
 
     # 웹 검색 결과를 web_context에 저장
-    web_context = "\n\n".join([f"- 출처: {r.get('url', 'N/A')}\n 내용: {r.get('content', r.get('snippet', ''))}" for r in results])
+    web_context = "\n\n".join(web_context_parts)
     
     return {**state, "web_context": web_context}
 
@@ -652,9 +728,9 @@ def build_graph():
     
     return g.compile()
 
-def run(state: dict) -> dict:
+async def run(state: dict) -> dict:
     """
-    오케스트레이터에서 호출되는 메인 실행 함수
+    오케스트레이터에서 호출되는 메인 실행 함수 (비동기)
     
     Args:
         state: 오케스트레이터에서 전달받은 상태 딕셔너리
@@ -676,8 +752,13 @@ def run(state: dict) -> dict:
         app = build_graph()
         final_state = app.invoke({"question": query})
         
-        # 결과 추출
-        answer = final_state.get("answer", "답변 생성에 실패했습니다.")
+        # 결과 추출 - 안전한 타입 체크
+        if isinstance(final_state, dict):
+            answer = final_state.get("answer", "답변 생성에 실패했습니다.")
+        elif isinstance(final_state, str):
+            answer = final_state
+        else:
+            answer = "답변 형식이 올바르지 않습니다."
         
         print(f"[작물추천_agent] 답변 생성 완료: {len(answer)}자")
         

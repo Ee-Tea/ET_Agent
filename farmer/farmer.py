@@ -146,9 +146,9 @@ class Farmer:
     
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
-        from farmer.작물추천.crop_recommendation_agent import run as crop_recommend_run
-        from farmer.재배방법.CG_agent_edit import run as crop_cultivation_run
-        from farmer.재해대응.DisasterAgent import run as disaster_run
+        from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
+        from farmer.cultivation.CG_agent_edit import run as crop_cultivation_run
+        from farmer.disaster.DisasterAgent import run as disaster_run
         from farmer.WeatherAgent import run as weather_run
         from farmer.sales.SalesAgent import run as market_run
         

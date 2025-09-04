@@ -38,9 +38,12 @@ try:
 except ImportError:
     from milvus_store import load_questions_from_json
 
+def evaluate_with_ragas(dataset, metrics):
+    from ragas import evaluate  # <- 여기로 이동
+    return evaluate(dataset, metrics=metrics)
+
 # 🔍 RAGAS 관련 임포트 추가
 try:
-    from ragas import evaluate
     from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
     from datasets import Dataset
     from ragas.llms import llm_factory
@@ -588,7 +591,7 @@ class InfoProcessingExamAgent(BaseAgent):
             
             # RAGAS 평가 실행
             dataset = Dataset.from_dict(eval_data)
-            results = evaluate(
+            results = evaluate_with_ragas(
                 dataset,
                 metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
                 llm=llm,

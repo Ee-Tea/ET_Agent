@@ -114,6 +114,8 @@ services:
       MILVUS_HOST: ${MILVUS_HOST:-standalone}
       MILVUS_PORT: ${MILVUS_PORT:-19530}
       MILVUS_COLLECTION: problems
+      PYTHONPATH: /deps/LLM-T
+      
 
 
 

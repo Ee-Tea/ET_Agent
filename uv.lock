@@ -1666,6 +1666,21 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-tavily"
+version = "0.2.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "langchain" },
+    { name = "langchain-core" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/17/bb/63ce4058684dddf525af3c8e5dcfab15c5f17515d20241ef6e726ac9e8b7/langchain_tavily-0.2.11.tar.gz", hash = "sha256:ab4f5d0f7fcb276a3905aef2e38c21a334b6cbfc86b405a3238fdc9c6eae1290", size = 22382, upload-time = "2025-07-25T17:26:33.41Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/5a/9326f125b4d3055a96200a5035016efe1aac46149cdafc7182e56710fcfe/langchain_tavily-0.2.11-py3-none-any.whl", hash = "sha256:358317c18fbb26500bca665301450e38945f1f4f6a6f4e06406c7674a76c8d5c", size = 26187, upload-time = "2025-07-25T17:26:32.324Z" },
+]
+
+[[package]]
 name = "langchain-teddynote"
 version = "0.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1725,7 +1740,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-api"
-version = "0.4.9"
+version = "0.4.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cloudpickle" },
@@ -1748,9 +1763,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/91/671306db7502e50b148d695574f64fc762e04c0c790a93ddec1ed66af61e/langgraph_api-0.4.9.tar.gz", hash = "sha256:86203824c8aa6f81387422d261678a67e378109a1d8451e3d1fd20046d2055ae", size = 265672, upload-time = "2025-09-02T23:45:03.784Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/ad/3ebb6ceb3e5bd81383f8e5656d4ca97a81a96ad96040c123610b61f06d58/langgraph_api-0.4.11.tar.gz", hash = "sha256:3baada32aff2c136c271eeee0cd0bcb2335f94917242e82eab08937081ce8793", size = 265821, upload-time = "2025-09-04T01:38:43.876Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5f/8c/dfb010eabadf4c54fe77c0c19252092b8ca1e0ccacaad532b1f2d8fd6fc5/langgraph_api-0.4.9-py3-none-any.whl", hash = "sha256:b0dc66b8045025dbd0af2890c56fcc6ed3441f939daa45d2d9f29e317bd8e148", size = 216240, upload-time = "2025-09-02T23:45:02.232Z" },
+    { url = "https://files.pythonhosted.org/packages/76/4c/f0ca287feea995556aaf292a6a9cd2718cdff8155c747b526d10e499b256/langgraph_api-0.4.11-py3-none-any.whl", hash = "sha256:afcb57c4b4563c3bae59f559804c24ab208a552ba4eae8e0172aa9cddb90fd5b", size = 216370, upload-time = "2025-09-04T01:38:42.152Z" },
 ]
 
 [[package]]
@@ -1801,7 +1816,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-runtime-inmem"
-version = "0.10.0"
+version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "blockbuster" },
@@ -1811,22 +1826,22 @@ dependencies = [
     { name = "starlette" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/ae/6a37fb49f0fc81bcad01daabd1943e2fbaf28cbdf1b10ab6f2caaf1f1a43/langgraph_runtime_inmem-0.10.0.tar.gz", hash = "sha256:0d36f5b4bde7984b59dff4dae9b4971c94b088ef71806fb2ba8dc37737660723", size = 82362, upload-time = "2025-09-02T23:35:07.045Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/b5/321cbba8925142db22f6524d45ea5642da76acbcfc2316a75e5d31cf94af/langgraph_runtime_inmem-0.11.0.tar.gz", hash = "sha256:cb629cbf2cf4c7f158afbf013ac4d026d96650b86845bc33c8f694012c147364", size = 82364, upload-time = "2025-09-04T01:28:35.528Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/37/38b46b8a7a0669d596317ef43451297363de5a062f30c610a8e43f0b941a/langgraph_runtime_inmem-0.10.0-py3-none-any.whl", hash = "sha256:22fb43e5a8fb80d2ec3ce5e62e4aa26756f71d2102b5ac08e7397df32a4bb5d8", size = 34436, upload-time = "2025-09-02T23:35:05.887Z" },
+    { url = "https://files.pythonhosted.org/packages/30/8d/fbe4913a4f97bf5bf335aae10ad8551e1b4f4f11e664be128e67ae0f3701/langgraph_runtime_inmem-0.11.0-py3-none-any.whl", hash = "sha256:5b6ff9cff23fe61c287e000cd001445bd0ad7f8710f129aae082223d17123cd3", size = 34434, upload-time = "2025-09-04T01:28:34.592Z" },
 ]
 
 [[package]]
 name = "langgraph-sdk"
-version = "0.2.5"
+version = "0.2.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "orjson" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/42/72/37943b367f480b4761c052e86b0c380ecb928cdccf1d5c85d569e036c06f/langgraph_sdk-0.2.5.tar.gz", hash = "sha256:b28aa0f485811388465ac5d2a19d728ab84b59a8900cdfcf0f4e8177802cbf62", size = 79816, upload-time = "2025-09-03T00:51:14.285Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/55/35/a1caf4fdb725adec30f1e9562f218524a92d8b675deb97be653687f086ee/langgraph_sdk-0.2.6.tar.gz", hash = "sha256:7db27cd86d1231fa614823ff416fcd2541b5565ad78ae950f31ae96d7af7c519", size = 80346, upload-time = "2025-09-04T01:51:11.262Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/2c/9e5a0259601253f89f8b50095a6a2541ff6beb9041c92e64bd8e05e77c29/langgraph_sdk-0.2.5-py3-none-any.whl", hash = "sha256:a837a7a3c5e16ba55a3952037f9d8e247d3e001e9a0e3b07aacef55861e5dc58", size = 54052, upload-time = "2025-09-03T00:51:13.057Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/d2/c5fac919601b27a0af5df0bde46e7f1361d5e04505e404b75bed45d21fc8/langgraph_sdk-0.2.6-py3-none-any.whl", hash = "sha256:477216b573b8177bbd849f4c754782a81279fbbd88bfadfeda44422d14b18b08", size = 54565, upload-time = "2025-09-04T01:51:10.044Z" },
 ]
 
 [[package]]
@@ -1882,6 +1897,7 @@ dependencies = [
     { name = "graphviz" },
     { name = "groq" },
     { name = "huggingface-hub", extra = ["hf-xet"] },
+    { name = "kiwipiepy" },
     { name = "langchain", extra = ["openai"] },
     { name = "langchain-community" },
     { name = "langchain-core" },
@@ -1890,6 +1906,7 @@ dependencies = [
     { name = "langchain-milvus" },
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
+    { name = "langchain-tavily" },
     { name = "langchain-teddynote" },
     { name = "langgraph" },
     { name = "langgraph-cli", extra = ["inmem"] },
@@ -1929,6 +1946,7 @@ requires-dist = [
     { name = "graphviz", specifier = ">=0.21" },
     { name = "groq", specifier = ">=0.31.0" },
     { name = "huggingface-hub", extras = ["hf-xet"], specifier = ">=0.34.4" },
+    { name = "kiwipiepy", specifier = ">=0.18.0" },
     { name = "langchain", extras = ["openai"], specifier = ">=0.3.27" },
     { name = "langchain-community", specifier = ">=0.3.27" },
     { name = "langchain-core", specifier = ">=0.3.72" },
@@ -1937,6 +1955,7 @@ requires-dist = [
     { name = "langchain-milvus", specifier = ">=0.2.1" },
     { name = "langchain-ollama", specifier = ">=0.1.0" },
     { name = "langchain-openai", specifier = ">=0.3.28" },
+    { name = "langchain-tavily", specifier = ">=0.1.0" },
     { name = "langchain-teddynote", specifier = ">=0.4.4" },
     { name = "langgraph", specifier = ">=0.6.3" },
     { name = "langgraph-cli", extras = ["inmem"] },

@@ -495,24 +495,39 @@ def generate_user_response(state: Dict[str, Any]) -> str:
     artifacts = state.get("artifacts", {})
     
     # 1. 검색 답변이 있으면 그대로 포함 (retrieve intent)
-    if intent == "retrieve" and retrieval and shared.get("retrieve_answer"):
-        retrieve_answer = shared.get("retrieve_answer", "")
-        print("📝 검색 답변을 그대로 포함하여 응답 생성")
-        return f"안녕하세요! 요청하신 정보를 검색했습니다.\n\n{retrieve_answer}"
+    print(f"🔍 [generate_user_response] intent: {intent}")
+    print(f"🔍 [generate_user_response] retrieval: {retrieval}")
+    print(f"🔍 [generate_user_response] shared: {shared}")
+    print(f"🔍 [generate_user_response] generation: {generation}")
+    print(f"🔍 [generate_user_response] solution: {solution}")
+    print(f"🔍 [generate_user_response] score: {score}")
+    print(f"🔍 [generate_user_response] analysis: {analysis}")
     
+    # intent 값에서 따옴표 제거
+    clean_intent = intent.strip().strip('"\'')
+    print(f"🔍 [generate_user_response] clean_intent: '{clean_intent}'")
+    
+    if clean_intent == "retrieve":
+        retrieve_answer = shared.get("retrieve_answer", "")
+        print(f"📝 검색 답변을 그대로 포함하여 응답 생성 (retrieve_answer 길이: {len(retrieve_answer)})")
+        if retrieve_answer:
+            return f"안녕하세요! 요청하신 정보를 검색했습니다.\n\n{retrieve_answer}"
+        else:
+            print("⚠️ retrieve_answer가 비어있습니다.")
+            return "죄송합니다. 검색 결과를 찾을 수 없습니다."
     # 2. 사용자 입력에 따라 변화한 내용만 요약
     executed_tasks = []
     results_summary = []
     
     # 문제 생성 (새로운 내용 생성)
-    if intent == "generate" and generation and shared.get("question"):
+    if clean_intent == "generate" and generation:
         executed_tasks.append("문제 생성")
         question_count = len(shared.get("question", []))
         if question_count > 0:
             results_summary.append(f"{question_count}개의 문제를 생성했습니다")
     
     # 문제 풀이 (새로운 내용 생성)
-    if intent == "solution" and solution and shared.get("answer"):
+    if clean_intent == "solution" and solution:
         executed_tasks.append("문제 풀이")
         answer_count = len(shared.get("answer", []))
         if answer_count > 0:
@@ -556,6 +571,10 @@ def generate_user_response(state: Dict[str, Any]) -> str:
     
     # 3. 변화한 내용이 있으면 요약, 없으면 기본 메시지
     if executed_tasks:
+        # 검색 답변이 있으면 포함
+        retrieve_answer = shared.get("retrieve_answer", "")
+        search_context = f"\n\n검색 결과:\n{retrieve_answer}" if retrieve_answer else ""
+        
         system_prompt = f"""당신은 사용자 친화적인 챗봇입니다. 
         사용자의 질문과 실행 결과를 바탕으로 친근하고 이해하기 쉽게 답변해주세요.
         
@@ -563,7 +582,7 @@ def generate_user_response(state: Dict[str, Any]) -> str:
         1. 사용자 질문에 대한 간단한 인사
         2. 실행된 작업들의 요약 (간결하게)
         3. 주요 결과 요약
-        4. 추가 도움이 필요한 부분이 있다면 안내
+        4. 추가 도움이 필요한 부분이 있다면 안내{search_context}
         
         답변은 한국어로 작성하고, 친근하고 도움이 되는 톤으로 작성해주세요.
         """
@@ -593,4 +612,8 @@ def generate_user_response(state: Dict[str, Any]) -> str:
             return f"안녕하세요! {', '.join(executed_tasks)} 작업을 완료했습니다. {'; '.join(results_summary)}"
     else:
         # 변화한 내용이 없으면 기본 메시지
-        return "안녕하세요! 요청하신 작업을 처리했습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."
+        retrieve_answer = shared.get("retrieve_answer", "")
+        if retrieve_answer:
+            return f"안녕하세요! 요청하신 정보를 검색했습니다.\n\n{retrieve_answer}"
+        else:
+            return "안녕하세요! 요청하신 작업을 처리했습니다. 추가로 도움이 필요한 부분이 있으시면 말씀해 주세요."

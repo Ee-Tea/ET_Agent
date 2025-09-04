@@ -160,7 +160,12 @@ class retrieve_agent(BaseAgent):
             "retrieval_question": input_data.get("retrieval_question", "")
         }
         result = self.graph.invoke(initial_state)
-        return result
+        
+        # teacher graph에서 기대하는 형태로 변환
+        return {
+            "retrieve_answer": result.get("answer", ""),
+            "retrieval": result  # 전체 결과도 포함
+        }
 
 # initial_state = {
 #     "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"

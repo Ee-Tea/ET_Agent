@@ -106,7 +106,7 @@ services:
     env_file:
       - .env
     environment:
-      REDIS_URI: redis://redis:6379
+      REDIS_URI: redis://redis:6379/0
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
       POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
       # Milvus 연결 설정 (애플리케이션 컨테이너 내부에서는 'localhost' 대신 서비스명 사용)

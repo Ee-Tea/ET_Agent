@@ -312,6 +312,17 @@ function ChatInterface() {
   const [isLoading, setIsLoading] = useState(false);
   const [isBackendConnected, setIsBackendConnected] = useState<boolean | null>(null);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [availablePdfs, setAvailablePdfs] = useState<Array<{filename: string, size: number, created: number}>>([]);
+  const [isLoadingPdfs, setIsLoadingPdfs] = useState(false);
+  const [pdfGenerationStatus, setPdfGenerationStatus] = useState<{
+    is_generating: boolean;
+    last_generated_time: number | null;
+    generated_files: string[];
+  }>({
+    is_generating: false,
+    last_generated_time: null,
+    generated_files: []
+  });
 
   // 백엔드 연결 테스트 함수
   const testBackendConnection = async () => {
@@ -340,9 +351,89 @@ function ChatInterface() {
     }
   };
 
-  // 컴포넌트 마운트 시 자동으로 연결 테스트
+  // PDF 생성 상태 확인 함수
+  const checkPdfGenerationStatus = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/pdf-status", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setPdfGenerationStatus(data);
+        
+        // 새로 생성된 PDF가 있으면 목록 새로고침
+        if (data.generated_files && data.generated_files.length > 0) {
+          fetchPdfs();
+        }
+        
+        console.log("✅ PDF 생성 상태 확인:", data);
+      } else {
+        console.error("❌ PDF 생성 상태 확인 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ PDF 생성 상태 확인 오류:", error);
+    }
+  };
+
+  // PDF 목록 조회 함수
+  const fetchPdfs = async () => {
+    setIsLoadingPdfs(true);
+    try {
+      const response = await fetch("http://localhost:8000/pdfs", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setAvailablePdfs(data.pdfs || []);
+        console.log("✅ PDF 목록 조회 성공:", data);
+      } else {
+        console.error("❌ PDF 목록 조회 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ PDF 목록 조회 오류:", error);
+    } finally {
+      setIsLoadingPdfs(false);
+    }
+  };
+
+  // PDF 다운로드 함수
+  const downloadPdf = async (filename: string) => {
+    try {
+      const response = await fetch(`http://localhost:8000/pdf/${filename}`, {
+        method: "GET",
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        console.log("✅ PDF 다운로드 성공:", filename);
+      } else {
+        console.error("❌ PDF 다운로드 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ PDF 다운로드 오류:", error);
+    }
+  };
+
+  // 컴포넌트 마운트 시 자동으로 연결 테스트 및 PDF 생성 상태 확인
   useEffect(() => {
     testBackendConnection();
+    checkPdfGenerationStatus();
   }, []);
 
   const sendMessage = async () => {
@@ -379,6 +470,11 @@ function ChatInterface() {
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
+      // 메시지 전송 후 PDF 생성 상태 체크 (여러 번 체크)
+      setTimeout(() => checkPdfGenerationStatus(), 1000);  // 1초 후 첫 번째 체크
+      setTimeout(() => checkPdfGenerationStatus(), 3000);  // 3초 후 두 번째 체크
+      setTimeout(() => checkPdfGenerationStatus(), 5000);  // 5초 후 세 번째 체크
+      setTimeout(() => checkPdfGenerationStatus(), 10000); // 10초 후 마지막 체크
     }
   };
 
@@ -413,6 +509,13 @@ function ChatInterface() {
                 <span className="text-xs text-red-600">연결 안됨</span>
               </div>
             )}
+            <button
+              onClick={checkPdfGenerationStatus}
+              disabled={isLoadingPdfs}
+              className="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded text-blue-600 disabled:opacity-50"
+            >
+              {isLoadingPdfs ? "확인 중..." : "PDF 상태 확인"}
+            </button>
             <button
               onClick={testBackendConnection}
               disabled={isTestingConnection}
@@ -450,6 +553,47 @@ function ChatInterface() {
       ) : (
         // 연결 성공 시 채팅 화면
         <>
+          {/* PDF 생성 상태 표시 */}
+          {pdfGenerationStatus.is_generating && (
+            <div className="border-b border-gray-200 p-3 bg-yellow-50">
+              <div className="flex items-center space-x-2">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-600"></div>
+                <span className="text-sm text-yellow-700">PDF 생성 중...</span>
+              </div>
+            </div>
+          )}
+          
+          {/* PDF 다운로드 섹션 */}
+          {availablePdfs.length > 0 && (
+            <div className="border-b border-gray-200 p-3 bg-blue-50">
+              <div className="flex items-center justify-between mb-2">
+                <h5 className="text-sm font-medium text-blue-700">📄 새로 생성된 PDF 파일</h5>
+                <span className="text-xs text-blue-500">{availablePdfs.length}개</span>
+              </div>
+              <p className="text-xs text-blue-600 mb-2">백엔드에서 PDF 생성 완료 시 자동으로 표시됩니다</p>
+              <div className="space-y-1 max-h-20 overflow-y-auto">
+                {availablePdfs.slice(0, 3).map((pdf, index) => (
+                  <div key={index} className="flex items-center justify-between bg-white rounded px-2 py-1 text-xs">
+                    <span className="text-gray-600 truncate flex-1 mr-2" title={pdf.filename}>
+                      {pdf.filename}
+                    </span>
+                    <button
+                      onClick={() => downloadPdf(pdf.filename)}
+                      className="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs"
+                    >
+                      다운로드
+                    </button>
+                  </div>
+                ))}
+                {availablePdfs.length > 3 && (
+                  <div className="text-xs text-gray-500 text-center">
+                    +{availablePdfs.length - 3}개 더...
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          
           {/* 메시지 영역 */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
             {messages.length === 0 ? (

@@ -3,7 +3,12 @@ import json
 import os
 import time
 import redis
+<<<<<<< HEAD
 from urllib.parse import urlparse
+=======
+import time
+import hashlib
+>>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
 from typing import Any, Dict, List, Optional
 
 # 길이 제한/TTL 설정 (필요에 맞게 조정)
@@ -21,11 +26,6 @@ except Exception:
         "answer": [],
         "explanation": [],
         "subject": [],
-        "wrong_question": [],
-        "weak_type": [],
-        "notes": [],
-        "user_answer": [],
-        "retrieve_answer": "",
     }
     def ensure_shared(state: Dict[str, Any]) -> Dict[str, Any]:
         state = dict(state or {})
@@ -37,6 +37,7 @@ except Exception:
 
 
 class RedisLangGraphMemory:
+<<<<<<< HEAD
     """Redis 기반 단기 메모리.
 
     환경변수(.env) 우선 순위:
@@ -48,7 +49,15 @@ class RedisLangGraphMemory:
       - 로컬 개발이면 host='localhost', port=6380 (docker-compose 포트 매핑 가정)
 
     사용자가 매개변수 redis_host / redis_port 를 직접 넘기면 가장 높은 우선순위.
+=======
     """
+    통합된 Redis 기반 숏텀 메모리
+    - 기존 LangGraph 메모리 기능 (shared, history)
+    - 문제 중심 스키마 (질문/풀이 분리 저장, 중복 검사)
+    - 부분 선택 실행, 취약점 분석, 맞춤형 문제 생성 지원
+>>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
+    """
+    
     def __init__(
         self,
         user_id: str,
@@ -64,14 +73,101 @@ class RedisLangGraphMemory:
         self.service = service
         self.chat_id = chat_id
         self.ttl_seconds = ttl_seconds
+<<<<<<< HEAD
         self.redis = self._init_client(
             redis_host=redis_host,
             redis_port=redis_port,
             redis_url=redis_url,
         )
+=======
+        self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        
+        # 문제 중심 스키마를 위한 네임스페이스
+        self.question_ns = f"{user_id}:{service}:{chat_id}:questions"
+        
+        # LangGraph checkpointer를 위한 버전 관리
+        self._version_key = f"{self.user_id}:{self.service}:{self.chat_id}:version"
+>>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
 
+    # ==================== 기존 LangGraph 메모리 기능 ====================
+    
     def _k(self, suffix: str) -> str:
         return f"{self.user_id}:{self.service}:{self.chat_id}:{suffix}"
+    
+    # ---------- LangGraph Checkpointer 인터페이스 ----------
+    def get_next_version(self, thread_id: str, checkpoint_id: str) -> str:
+        """LangGraph checkpointer가 요구하는 다음 버전 ID 생성"""
+        # thread_id와 checkpoint_id를 포함한 버전 키 생성
+        version_key = f"{self._version_key}:{thread_id}:{checkpoint_id}"
+        current_version = self.redis.get(version_key) or "0"
+        next_version = str(int(current_version) + 1)
+        self.redis.set(version_key, next_version)
+        if self.ttl_seconds:
+            self.redis.expire(version_key, self.ttl_seconds)
+        return next_version
+    
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        """LangGraph checkpointer가 요구하는 get 메서드"""
+        try:
+            data = self.redis.get(key)
+            return json.loads(data) if data else None
+        except Exception:
+            return None
+    
+    def put(self, key: str, value: Dict[str, Any], *args, **kwargs) -> None:
+        """LangGraph checkpointer가 요구하는 put 메서드"""
+        try:
+            data = json.dumps(value, ensure_ascii=False)
+            self.redis.set(key, data)
+            if self.ttl_seconds:
+                self.redis.expire(key, self.ttl_seconds)
+        except Exception:
+            pass
+    
+    def put_writes(self, writes: List[Dict[str, Any]], *args, **kwargs) -> None:
+        """LangGraph checkpointer가 요구하는 put_writes 메서드"""
+        try:
+            for write in writes:
+                key = write.get("key")
+                value = write.get("value")
+                if key and value is not None:
+                    self.put(key, value)
+        except Exception:
+            pass
+    
+    def list_keys(self, prefix: str = "") -> List[str]:
+        """LangGraph checkpointer가 요구하는 list_keys 메서드"""
+        try:
+            pattern = f"{self.user_id}:{self.service}:{self.chat_id}:{prefix}*" if prefix else f"{self.user_id}:{self.service}:{self.chat_id}:*"
+            keys = []
+            for key in self.redis.scan_iter(match=pattern):
+                keys.append(key)
+            return keys
+        except Exception:
+            return []
+    
+    def get_tuple(self, key: str) -> Optional[tuple]:
+        """LangGraph checkpointer가 요구하는 get_tuple 메서드"""
+        try:
+            data = self.get(key)
+            if data and isinstance(data, dict):
+                # tuple 형태로 변환 (예: (config, checkpoint))
+                return (data.get("config", {}), data.get("checkpoint", {}))
+            return None
+        except Exception:
+            return None
+    
+    def put_tuple(self, key: str, value: tuple) -> None:
+        """LangGraph checkpointer가 요구하는 put_tuple 메서드"""
+        try:
+            if len(value) == 2:
+                data = {
+                    "config": value[0],
+                    "checkpoint": value[1]
+                }
+                self.put(key, data)
+        except Exception:
+            pass
 
     # ---------- 초기화/클라이언트 ----------
     @staticmethod
@@ -156,6 +252,7 @@ class RedisLangGraphMemory:
         return shared
 
     def _save_shared(self, shared: Dict[str, Any]) -> None:
+        shared = self._dedupe_aligned_shared(shared)
         shared = self._enforce_limits(shared)
         payload = json.dumps(shared, ensure_ascii=False)
         with self.redis.pipeline() as pipe:
@@ -163,6 +260,56 @@ class RedisLangGraphMemory:
             if self.ttl_seconds:
                 pipe.expire(self.k_shared, self.ttl_seconds)
             pipe.execute()
+
+    def _normalize_text(self, text: Any) -> str:
+        try:
+            return " ".join(str(text or "").split()).strip().lower()
+        except Exception:
+            return str(text or "").strip().lower()
+
+    def _dedupe_aligned_shared(self, shared: Dict[str, Any]) -> Dict[str, Any]:
+        """question+options 조합 기준으로 정렬 보존 중복 제거."""
+        if not isinstance(shared, dict):
+            return shared
+        questions = list(shared.get("question", []) or [])
+        options_l = list(shared.get("options", []) or [])
+        answers = list(shared.get("answer", []) or [])
+        expls = list(shared.get("explanation", []) or [])
+        subjects = list(shared.get("subject", []) or [])
+        user_ans = list(shared.get("user_answer", []) or [])
+
+        keep_q, keep_o, keep_a, keep_e, keep_s, keep_u = [], [], [], [], [], []
+        seen = set()
+        total = len(questions)
+        for i in range(total):
+            q = questions[i]
+            opts_raw = options_l[i] if i < len(options_l) else []
+            if isinstance(opts_raw, list):
+                opts_list = [self._normalize_text(x) for x in opts_raw if str(x).strip()]
+            elif isinstance(opts_raw, str):
+                opts_list = [self._normalize_text(x) for x in opts_raw.splitlines() if x.strip()]
+            else:
+                opts_list = []
+            key = (self._normalize_text(q), tuple(opts_list))
+            if key in seen:
+                continue
+            seen.add(key)
+            keep_q.append(q)
+            keep_o.append(options_l[i] if i < len(options_l) else [])
+            keep_a.append(answers[i] if i < len(answers) else "")
+            keep_e.append(expls[i] if i < len(expls) else "")
+            keep_s.append(subjects[i] if i < len(subjects) else "")
+            keep_u.append(user_ans[i] if i < len(user_ans) else "")
+
+        cleaned = dict(shared)
+        cleaned["question"] = keep_q
+        cleaned["options"] = keep_o
+        cleaned["answer"] = keep_a
+        cleaned["explanation"] = keep_e
+        cleaned["subject"] = keep_s
+        if user_ans:
+            cleaned["user_answer"] = keep_u
+        return cleaned
 
     def _append_history_entries(self, entries: List[Dict[str, Any]]) -> None:
         if not entries:
@@ -193,6 +340,48 @@ class RedisLangGraphMemory:
             except Exception:
                 pass
         return out
+
+    # 외부에서 단일/다중 상호작용을 히스토리에 추가
+    def add_to_chat_history(self, interaction: Any) -> None:
+        try:
+            if not interaction:
+                return
+            if isinstance(interaction, dict):
+                self._append_history_entries([interaction])
+            elif isinstance(interaction, list):
+                # list[dict] 가정
+                safe_list = [x for x in interaction if isinstance(x, dict)]
+                if safe_list:
+                    self._append_history_entries(safe_list)
+        except Exception:
+            pass
+
+    def delete(self, key: str) -> None:
+        """주어진 키 삭제 (세션 잠금 해제 등)"""
+        try:
+            self.redis.delete(key)
+        except Exception:
+            pass
+
+    # 외부 편의 메서드 (메인 오케스트레이터 호환)
+    def get_chat_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        채팅 히스토리를 반환합니다. 메인 오케스트레이터의 기대 인터페이스에 맞춘 편의 메서드.
+        """
+        try:
+            return self._load_history(limit=limit)
+        except Exception:
+            return []
+
+    def keys(self, pattern: str = "") -> List[str]:
+        """
+        키 목록을 반환합니다. 메인 오케스트레이터 호환을 위한 래퍼.
+        - 인자로 전달된 패턴은 무시하고 현재 세션 네임스페이스 내 키만 반환합니다.
+        """
+        try:
+            return self.list_keys()
+        except Exception:
+            return []
 
     # ---------- append-only 병합 로직 ----------
     @staticmethod
@@ -242,6 +431,7 @@ class RedisLangGraphMemory:
         # 기존 shared 불러와서 append-only 병합 후 저장
         existing_shared = self._load_shared()
         merged_shared = self._merge_shared_append_only(existing_shared, incoming_shared)
+        merged_shared = self._dedupe_aligned_shared(merged_shared)
         self._save_shared(merged_shared)
 
         # history append
@@ -253,8 +443,564 @@ class RedisLangGraphMemory:
         return out
 
     # 편의
-    def clear(self) -> None:
+    def clear(self, include_questions: bool = True) -> None:
+        """
+        메모리 데이터 삭제
+        
+        Args:
+            include_questions: 문제 데이터도 함께 삭제할지 여부
+        """
         with self.redis.pipeline() as pipe:
             pipe.delete(self.k_shared)
             pipe.delete(self.k_history)
+            if include_questions:
+                pipe.delete(self._k_all())
+                pipe.delete(self._k_dedupe())
+                pipe.delete(self._k_wrong())
+                # 과목별 인덱스도 삭제
+                pattern = f"{self.question_ns}:q:by_subject:*"
+                for key in self.redis.scan_iter(match=pattern):
+                    pipe.delete(key)
             pipe.execute()
+
+    # ==================== 문제 중심 스키마 기능 ====================
+    
+    def _now_ts(self) -> int:
+        """현재 타임스탬프"""
+        return int(time.time())
+    
+    def _norm_text(self, text: str) -> str:
+        """텍스트 정규화 (공백 정리, 소문자 변환)"""
+        return " ".join((text or "").split()).strip().lower()
+    
+    def _question_hash(self, question_text: str, options: List[str]) -> str:
+        """질문과 보기를 기반으로 한 중복 검사용 해시 생성"""
+        base = self._norm_text(question_text) + "||" + "||".join([self._norm_text(o) for o in options or []])
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()
+    
+    # --------------------------
+    # 키 헬퍼 메서드들 (문제 중심 스키마용)
+    def _k_q(self, qid: str) -> str:
+        """질문 키"""
+        return f"{self.question_ns}:q:{qid}"
+    
+    def _k_sol(self, qid: str) -> str:
+        """풀이 키"""
+        return f"{self.question_ns}:sol:{qid}"
+    
+    def _k_all(self) -> str:
+        """전체 질문 인덱스 (ZSET)"""
+        return f"{self.question_ns}:q:all"
+    
+    def _k_by_subject(self, subject: str) -> str:
+        """과목별 질문 인덱스 (ZSET)"""
+        return f"{self.question_ns}:q:by_subject:{subject}"
+    
+    def _k_dedupe(self) -> str:
+        """중복 방지용 해시 세트 (SET)"""
+        return f"{self.question_ns}:q:dedupe"
+    
+    def _k_wrong(self) -> str:
+        """오답 인덱스 (SET)"""
+        return f"{self.question_ns}:q:wrong"
+    
+    def _k_events(self) -> str:
+        """이벤트 로그 (Stream)"""
+        return f"{self.question_ns}:events"
+    
+    # --------------------------
+    # 1) 문제 중복 검사 + 삽입
+    def add_questions(self, questions: List[Dict[str, Any]]) -> List[str]:
+        """
+        문제들을 추가 (중복 자동 필터링)
+        
+        Args:
+            questions: [{"question": "질문", "options": ["보기1", "보기2"], "subject": "과목", "qid": "선택적"}]
+        
+        Returns:
+            신규로 추가된 qid 리스트 (중복 제외)
+        """
+        pipe = self.redis.pipeline()
+        new_qids = []
+        ts = self._now_ts()
+        
+        for q in questions:
+            qtext = q.get("question") or ""
+            options = q.get("options") or []
+            subject = q.get("subject") or "unknown"
+            qid = q.get("qid") or hashlib.md5((qtext + str(ts)).encode()).hexdigest()[:12]
+            
+            # 중복 검사
+            ch = self._question_hash(qtext, options)
+            if self.redis.sismember(self._k_dedupe(), ch):
+                continue  # 이미 존재 → skip
+            
+            # 질문 저장
+            pipe.hset(self._k_q(qid), mapping={
+                "question_text": qtext,
+                "options_json": json.dumps(options, ensure_ascii=False),
+                "subject": subject,
+                "content_hash": ch,
+                "created_at": ts,
+                "updated_at": ts,
+            })
+            
+            # 인덱스 & dedupe 세트
+            pipe.zadd(self._k_all(), {qid: ts})
+            pipe.sadd(self._k_by_subject(subject), qid)
+            pipe.sadd(self._k_dedupe(), ch)
+            
+            new_qids.append(qid)
+        
+        pipe.execute()
+        
+        # TTL 설정 (기본값 사용)
+        if new_qids and self.ttl_seconds:
+            self.set_question_ttl()
+        
+        return new_qids
+    
+    # --------------------------
+    # 2) 풀이 수정(업데이트, 부분 필드 upsert)
+    def upsert_solution(self, qid: str, **kwargs) -> None:
+        """
+        풀이 정보를 업데이트 (부분 필드만 업데이트 가능)
+        
+        Args:
+            qid: 질문 ID
+            **kwargs: 업데이트할 필드들 (user_answer, model_answer, explanation, score, is_correct, meta 등)
+        """
+        if not self.redis.exists(self._k_q(qid)):
+            raise ValueError(f"질문 {qid}가 존재하지 않습니다.")
+        
+        update = {"updated_at": self._now_ts()}
+        
+        # 업데이트할 필드들 처리
+        if "user_answer" in kwargs:
+            update["user_answer"] = kwargs["user_answer"]
+        if "model_answer" in kwargs:
+            update["model_answer"] = kwargs["model_answer"]
+        if "explanation" in kwargs:
+            update["explanation"] = kwargs["explanation"]
+        if "score" in kwargs:
+            update["score"] = kwargs["score"]
+        if "is_correct" in kwargs:
+            update["is_correct"] = int(bool(kwargs["is_correct"]))
+        if "meta" in kwargs:
+            update["meta_json"] = json.dumps(kwargs["meta"], ensure_ascii=False)
+        
+        pipe = self.redis.pipeline()
+        pipe.hincrby(self._k_sol(qid), "attempts", 1)
+        pipe.hset(self._k_sol(qid), mapping=update)
+        
+        # 오답 인덱스 관리
+        if "is_correct" in kwargs:
+            if kwargs["is_correct"]:
+                pipe.srem(self._k_wrong(), qid)
+            else:
+                pipe.sadd(self._k_wrong(), qid)
+        
+        pipe.execute()
+    
+    # --------------------------
+    # 3) 특정 문제 선택(여러 기준)
+    def select_qids(self, limit: int = 10, subject: Optional[str] = None,
+                   only_wrong: bool = False, recent_first: bool = True) -> List[str]:
+        """
+        조건에 맞는 문제 ID들을 선택
+        
+        Args:
+            limit: 최대 개수
+            subject: 특정 과목만
+            only_wrong: 오답만 선택
+            recent_first: 최근 순으로 정렬
+        
+        Returns:
+            선택된 qid 리스트
+        """
+        if only_wrong:
+            # 오답만 선택
+            wrong = list(self.redis.smembers(self._k_wrong()))
+            if not wrong:
+                return []
+            if recent_first:
+                # all zset 점수(=ts) 참조해서 정렬
+                scores = self.redis.zmscore(self._k_all(), wrong)
+                pairs = sorted(zip(wrong, scores), key=lambda x: (x[1] or 0), reverse=True)
+                return [qid for qid, _ in pairs[:limit]]
+            return wrong[:limit]
+        
+        if subject:
+            # 과목별 선택
+            qids = list(self.redis.smembers(self._k_by_subject(subject)))
+            if recent_first:
+                scores = self.redis.zmscore(self._k_all(), qids)
+                pairs = sorted(zip(qids, scores), key=lambda x: (x[1] or 0), reverse=True)
+                return [qid for qid, _ in pairs[:limit]]
+            return qids[:limit]
+        
+        # 기본: 전체 중 최근 N개
+        if recent_first:
+            return self.redis.zrevrange(self._k_all(), 0, limit - 1)
+        else:
+            return self.redis.zrange(self._k_all(), 0, limit - 1)
+    
+    # --------------------------
+    # 4) 기존 문제 → 풀이/채점 저장
+    def get_question(self, qid: str) -> Dict[str, Any]:
+        """질문 정보 조회"""
+        q = self.redis.hgetall(self._k_q(qid))
+        if not q:
+            raise ValueError("질문이 없습니다.")
+        
+        # JSON 필드 파싱
+        if "options_json" in q:
+            try:
+                q["options"] = json.loads(q["options_json"])
+            except:
+                q["options"] = []
+        
+        return q
+    
+    def get_solution(self, qid: str) -> Dict[str, Any]:
+        """풀이 정보 조회"""
+        s = self.redis.hgetall(self._k_sol(qid))
+        if not s:
+            return {}
+        
+        # JSON 필드 파싱
+        if "meta_json" in s:
+            try:
+                s["meta"] = json.loads(s["meta_json"])
+            except:
+                pass
+        
+        # 타입 변환
+        if "is_correct" in s:
+            s["is_correct"] = bool(int(s["is_correct"]))
+        if "score" in s:
+            try:
+                s["score"] = float(s["score"])
+            except:
+                pass
+        
+        return s
+    
+    # --------------------------
+    # 5) 취약점 분석(간단 집계)
+    def weakness_summary(self, top_k: int = 3) -> Dict[str, Any]:
+        """
+        과목별 정답률 단순 집계
+        
+        Args:
+            top_k: 취약 과목 상위 개수
+        
+        Returns:
+            취약점 분석 결과
+        """
+        qids = self.redis.zrevrange(self._k_all(), 0, -1)
+        by_subject = {}
+        
+        for qid in qids:
+            q = self.redis.hget(self._k_q(qid), "subject") or "unknown"
+            sol = self.redis.hgetall(self._k_sol(qid))
+            if not sol:
+                continue
+            
+            attempts = int(sol.get("attempts", 0) or 0)
+            score = float(sol.get("score", 0) or 0)
+            if attempts == 0:
+                continue
+            
+            d = by_subject.setdefault(q, {"attempts": 0, "score_sum": 0.0})
+            d["attempts"] += attempts
+            d["score_sum"] += score
+        
+        # 정답률(혹은 평균 점수) 낮은 순
+        items = []
+        for subj, v in by_subject.items():
+            avg = v["score_sum"] / max(1, v["attempts"])
+            items.append((subj, round(avg, 4), v["attempts"]))
+        
+        items.sort(key=lambda x: x[1])  # 낮은 점수 우선
+        
+        return {
+            "weak_subjects": items[:top_k],
+            "basis": "avg_score_per_attempt(lowest_first)",
+            "total_questions": len(qids)
+        }
+    
+    # --------------------------
+    # 6) 기존 문제 기반 풀이 생성 및 채점
+    def generate_solution_for_question(self, qid: str, model_answer: str, 
+                                     explanation: str, score: float, is_correct: bool) -> None:
+        """
+        기존 문제에 대한 풀이 생성 및 채점 결과 저장
+        
+        Args:
+            qid: 질문 ID
+            model_answer: 모델이 생성한 답
+            explanation: 해설
+            score: 점수 (0~1 또는 0~100)
+            is_correct: 정답 여부
+        """
+        self.upsert_solution(
+            qid=qid,
+            model_answer=model_answer,
+            explanation=explanation,
+            score=score,
+            is_correct=is_correct
+        )
+    
+    # --------------------------
+    # 7) 맞춤형 문제 생성 (취약점 기반)
+    def get_weakness_based_prompt(self, top_k: int = 3) -> str:
+        """
+        취약점 분석 결과를 기반으로 한 맞춤형 문제 생성 프롬프트 생성
+        
+        Args:
+            top_k: 취약 과목 상위 개수
+        
+        Returns:
+            맞춤형 문제 생성용 프롬프트
+        """
+        weakness = self.weakness_summary(top_k)
+        
+        prompt = "다음 취약 과목들을 기반으로 맞춤형 문제를 생성해주세요:\n\n"
+        
+        for i, (subject, avg_score, attempts) in enumerate(weakness["weak_subjects"], 1):
+            prompt += f"{i}. {subject}: 평균 점수 {avg_score:.2f} (시도 횟수: {attempts})\n"
+        
+        prompt += f"\n총 문제 수: {weakness['total_questions']}\n"
+        prompt += "위 취약 과목들을 보완할 수 있는 문제를 생성해주세요."
+        
+        return prompt
+    
+    # --------------------------
+    # 8) 유틸리티 메서드들
+    def get_question_count(self) -> int:
+        """전체 질문 수 조회"""
+        return self.redis.zcard(self._k_all())
+    
+    def get_subject_list(self) -> List[str]:
+        """등록된 과목 목록 조회"""
+        # 과목별 인덱스 키들을 스캔하여 과목명 추출
+        subjects = set()
+        pattern = f"{self.question_ns}:q:by_subject:*"
+        
+        for key in self.redis.scan_iter(match=pattern):
+            subject = key.split(":", -1)[-1]
+            subjects.add(subject)
+        
+        return list(subjects)
+    
+    def clear_questions(self) -> None:
+        """현재 세션의 모든 문제 데이터 삭제"""
+        pattern = f"{self.question_ns}:*"
+        keys = self.redis.scan_iter(match=pattern)
+        
+        if keys:
+            self.redis.delete(*keys)
+    
+    def set_question_ttl(self, ttl_seconds: Optional[int] = None) -> None:
+        """
+        현재 세션의 모든 문제 키에 TTL 설정
+        
+        Args:
+            ttl_seconds: TTL 초 단위, None이면 기본값 사용
+        """
+        if ttl_seconds is None:
+            ttl_seconds = self.ttl_seconds or DEFAULT_TTL
+            
+        pattern = f"{self.question_ns}:*"
+        keys = self.redis.scan_iter(match=pattern)
+        
+        pipe = self.redis.pipeline()
+        for key in keys:
+            pipe.expire(key, ttl_seconds)
+        pipe.execute()
+    
+    # --------------------------
+    # 9) 기존 shared와 연동하는 편의 메서드들
+    def sync_shared_to_questions(self) -> None:
+        """
+        기존 shared의 question 데이터를 문제 중심 스키마로 동기화
+        """
+        shared = self._load_shared()
+        questions = shared.get("question", [])
+        options = shared.get("options", [])
+        subjects = shared.get("subject", [])
+        
+        if not questions:
+            return
+        
+        # shared 데이터를 문제 형태로 변환
+        question_data = []
+        for i, q in enumerate(questions):
+            if i < len(options) and i < len(subjects):
+                question_data.append({
+                    "question": q,
+                    "options": options[i] if isinstance(options[i], list) else [],
+                    "subject": subjects[i] if i < len(subjects) else "unknown"
+                })
+        
+        if question_data:
+            self.add_questions(question_data)
+    
+    def get_questions_for_shared(self) -> Dict[str, Any]:
+        """
+        문제 중심 스키마의 데이터를 shared 형태로 변환하여 반환
+        """
+        qids = self.redis.zrevrange(self._k_all(), 0, -1)
+        
+        questions = []
+        options = []
+        subjects = []
+        
+        for qid in qids:
+            q = self.get_question(qid)
+            questions.append(q.get("question_text", ""))
+            options.append(q.get("options", []))
+            subjects.append(q.get("subject", "unknown"))
+        
+        return {
+            "question": questions,
+            "options": options,
+            "subject": subjects
+        }
+    
+    # --------------------------
+    # 10) 서비스별 숏텀 메모리 관리 메서드들
+    def save_service_short_term_data(self, service: str, data: Dict[str, Any]) -> None:
+        """서비스별 숏텀 메모리 데이터 저장"""
+        try:
+            key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+            self.redis.setex(key, 3600, json.dumps(data, ensure_ascii=False))  # 1시간 TTL
+            print(f"💾 {service} 서비스 숏텀 메모리 저장 완료: {key}")
+        except Exception as e:
+            print(f"❌ {service} 서비스 숏텀 메모리 저장 실패: {e}")
+    
+    def load_service_short_term_data(self, service: str) -> Dict[str, Any]:
+        """서비스별 숏텀 메모리 데이터 로드"""
+        try:
+            key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+            data = self.redis.get(key)
+            if data:
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                return json.loads(data)
+            return {}
+        except Exception as e:
+            print(f"❌ {service} 서비스 숏텀 메모리 로드 실패: {e}")
+            return {}
+    
+
+    
+    def save_chat_history(self, user_query: str, response: str) -> None:
+        """채팅 히스토리 저장"""
+        try:
+            key = f"chat_history:{self.user_id}:{self.chat_id}"
+            chat_entry = {
+                "user_query": user_query,
+                "response": response,
+                "timestamp": self._now_ts()
+            }
+            
+            # 기존 히스토리 로드
+            existing_history = self.redis.lrange(key, 0, -1)
+            history = []
+            for entry in existing_history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                history.append(json.loads(entry))
+            
+            # 새 엔트리 추가
+            history.append(chat_entry)
+            
+            # 최근 50개만 유지
+            if len(history) > 50:
+                history = history[-50:]
+            
+            # Redis에 저장
+            self.redis.delete(key)  # 기존 데이터 삭제
+            for entry in history:
+                self.redis.rpush(key, json.dumps(entry, ensure_ascii=False))
+            
+            self.redis.expire(key, 3600)  # 1시간 TTL
+            
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 저장 실패: {e}")
+    
+    def get_chat_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """채팅 히스토리 조회"""
+        try:
+            key = f"chat_history:{self.user_id}:{self.chat_id}"
+            history = self.redis.lrange(key, -limit, -1)  # 최근 N개
+            
+            result = []
+            for entry in history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                result.append(json.loads(entry))
+            
+            return result
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 조회 실패: {e}")
+            return []
+    
+    def clear_short_term_memory(self, service: Optional[str] = None) -> None:
+        """숏텀 메모리 삭제 (특정 서비스 또는 전체)"""
+        try:
+            if service:
+                # 특정 서비스만 삭제
+                key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+                self.redis.delete(key)
+                print(f"🗑️ {service} 서비스 숏텀 메모리 삭제 완료")
+            else:
+                # 전체 숏텀 메모리 삭제
+                pattern = f"short_term:{self.user_id}:{self.chat_id}:*"
+                keys = self.redis.keys(pattern)
+                if keys:
+                    self.redis.delete(*keys)
+                    print(f"🗑️ 전체 숏텀 메모리 삭제 완료: {len(keys)}개 키")
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 삭제 실패: {e}")
+    
+    def get_short_term_memory_stats(self) -> Dict[str, Any]:
+        """숏텀 메모리 통계 조회"""
+        try:
+            stats = {
+                "teacher": {},
+                "farmer": {},
+                "chat_history": {}
+            }
+            
+            # Teacher 데이터
+            teacher_data = self.load_service_short_term_data("teacher")
+            if teacher_data:
+                stats["teacher"] = {
+                    "questions_count": len(teacher_data.get("questions", [])),
+                    "added_count": teacher_data.get("added_count", 0),
+                    "timestamp": teacher_data.get("timestamp", 0)
+                }
+            
+            # Farmer 데이터
+            farmer_data = self.load_service_short_term_data("farmer")
+            if farmer_data:
+                stats["farmer"] = {
+                    "has_selected_crop": bool(farmer_data.get("selected_crop")),
+                    "has_crop_info": bool(farmer_data.get("crop_info")),
+                    "timestamp": farmer_data.get("timestamp", 0)
+                }
+            
+            # 채팅 히스토리
+            chat_history = self.get_chat_history(limit=100)
+            stats["chat_history"] = {
+                "count": len(chat_history),
+                "latest_timestamp": chat_history[-1].get("timestamp", 0) if chat_history else 0
+            }
+            
+            return stats
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 통계 조회 실패: {e}")
+            return {}

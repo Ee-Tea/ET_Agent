@@ -8,7 +8,7 @@ dependencies = [
     "pypdf[crypto]>=4.0.0",
     "ddgs>=9.5.2",
     "dotenv>=0.9.9",
-    "langchain>=0.3.27",
+    "langchain[openai]>=0.3.27",
     "langchain-community>=0.3.27",
     "langchain-core>=0.3.72",
     "langgraph>=0.6.3",
@@ -44,6 +44,10 @@ dependencies = [
     "pdfminer.six>=20231228",
     "pydantic>=2.0.0",
     "pdfplumber>=0.11.7",
+    "langchain-teddynote>=0.4.4",
+    "datasets>=4.0.0",
+    "ragas>=0.3.2",
+    "matplotlib>=3.10.5",
 ]
 
 [build-system]

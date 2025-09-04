@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import time
+import asyncio
 from datetime import datetime
 
 # 서드파티 라이브러리
@@ -191,68 +192,73 @@ class SalesRAGASEvaluator:
         return evaluation_result
     
     async def _evaluate_single_ragas_simple(self, question, answer, context):
-        """개별 질문-답변에 대한 RAGAS 라이브러리 평가 (비동기)"""
+        """개별 질문-답변에 대한 RAGAS 라이브러리 평가 (WeatherAgent 방식 병렬 처리)"""
         try:
-            # RAGAS 메트릭 실행
+            # 🚀 WeatherAgent 방식: 3개 RAGAS 평가 모두 병렬 처리
+            async def evaluate_context_precision():
+                try:
+                    context_precision_scorer = LLMContextPrecisionWithoutReference(llm=self.evaluator_llm)
+                    context_sample = SingleTurnSample(
+                        user_input=question,
+                        response=answer,
+                        retrieved_contexts=[context] if context else [""]
+                    )
+                    score = await context_precision_scorer.single_turn_ascore(context_sample)
+                    return ("context_precision", float(score) if score is not None else 0.0)
+                except Exception as e:
+                    print(f"   - ⚠️ Context Precision 평가 실패: {e}")
+                    return ("context_precision", 0.0)
+            
+            async def evaluate_faithfulness():
+                try:
+                    faithfulness_scorer = Faithfulness(llm=self.evaluator_llm)
+                    faithfulness_sample = SingleTurnSample(
+                        user_input=question,
+                        response=answer,
+                        retrieved_contexts=[context] if context else [""]
+                    )
+                    score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                    return ("faithfulness", float(score) if score is not None else 0.0)
+                except Exception as e:
+                    print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                    return ("faithfulness", 0.0)
+            
+            async def evaluate_answer_relevancy():
+                try:
+                    response_relevancy_scorer = ResponseRelevancy(
+                        llm=self.evaluator_llm, 
+                        embeddings=self.embeddings
+                    )
+                    sample = SingleTurnSample(
+                        user_input=question,
+                        response=answer,
+                        retrieved_contexts=[context] if context else [""]
+                    )
+                    score = await response_relevancy_scorer.single_turn_ascore(sample)
+                    return ("answer_relevancy", float(score) if score is not None else 0.0)
+                except Exception as e:
+                    print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                    return ("answer_relevancy", 0.0)
+            
+            # 3개 평가를 동시에 실행 (진짜 병렬 처리)
+            print("   - 🔥 Context Precision, Faithfulness & Answer Relevancy 3개 병렬 평가 시작!")
+            results = await asyncio.gather(
+                evaluate_context_precision(),
+                evaluate_faithfulness(),
+                evaluate_answer_relevancy(),
+                return_exceptions=True
+            )
+            
+            # 결과 수집
             scores = {}
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                    continue
+                metric_name, score = result
+                scores[metric_name] = score
             
-            try:
-                # Response Relevancy (기본 설정으로 복원)
-                response_relevancy_scorer = ResponseRelevancy(
-                    llm=self.evaluator_llm, 
-                    embeddings=self.embeddings
-                )
-                
-                # SingleTurnSample 생성
-                sample = SingleTurnSample(
-                    user_input=question,
-                    response=answer,
-                    retrieved_contexts=[context] if context else [""]
-                )
-                
-                # await 키워드 추가
-                answer_relevancy_score = await response_relevancy_scorer.single_turn_ascore(sample)
-                scores['answer_relevancy'] = float(answer_relevancy_score)
-                
-            except Exception as e:
-                scores['answer_relevancy'] = 0.0
-            
-            try:
-                # Context Precision without reference (LLM 기반 방식)
-                context_precision_scorer = LLMContextPrecisionWithoutReference(llm=self.evaluator_llm)
-                
-                # SingleTurnSample 생성 (Context Precision용)
-                context_sample = SingleTurnSample(
-                    user_input=question,
-                    response=answer,
-                    retrieved_contexts=[context] if context else [""]
-                )
-                
-                # await 키워드 추가
-                context_precision_score = await context_precision_scorer.single_turn_ascore(context_sample)
-                scores['context_precision'] = float(context_precision_score)
-                
-            except Exception as e:
-                scores['context_precision'] = 0.0
-            
-            try:
-                # Faithfulness (SingleTurnSample 방식)
-                faithfulness_scorer = Faithfulness(llm=self.evaluator_llm)
-                
-                # SingleTurnSample 생성 (Faithfulness용)
-                faithfulness_sample = SingleTurnSample(
-                    user_input=question,
-                    response=answer,
-                    retrieved_contexts=[context] if context else [""]
-                )
-                
-                # await 키워드 추가
-                faithfulness_score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
-                scores['faithfulness'] = float(faithfulness_score)
-                
-            except Exception as e:
-                scores['faithfulness'] = 0.0
-            
+            print("   - ✅ 3개 병렬 평가 완료!")
             return scores
             
         except Exception as e:

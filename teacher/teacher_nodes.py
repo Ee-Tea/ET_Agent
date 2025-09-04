@@ -493,6 +493,7 @@ def generate_user_response(state: Dict[str, Any]) -> str:
     analysis = state.get("analysis", {})
     retrieval = state.get("retrieval", {})
     artifacts = state.get("artifacts", {})
+    added_count = state.get("added_count", 0)
     
     # 1. 검색 답변이 있으면 그대로 포함 (retrieve intent)
     print(f"🔍 [generate_user_response] intent: {intent}")
@@ -522,14 +523,14 @@ def generate_user_response(state: Dict[str, Any]) -> str:
     # 문제 생성 (새로운 내용 생성)
     if clean_intent == "generate" and generation:
         executed_tasks.append("문제 생성")
-        question_count = len(shared.get("question", []))
+        question_count = shared.get("added_count", 0)
         if question_count > 0:
             results_summary.append(f"{question_count}개의 문제를 생성했습니다")
     
     # 문제 풀이 (새로운 내용 생성)
     if clean_intent == "solution" and solution:
         executed_tasks.append("문제 풀이")
-        answer_count = len(shared.get("answer", []))
+        answer_count = shared.get("added_count", 0)
         if answer_count > 0:
             results_summary.append(f"{answer_count}개 문제의 답안과 해설을 생성했습니다")
     

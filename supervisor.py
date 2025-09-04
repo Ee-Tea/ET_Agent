@@ -67,6 +67,69 @@ class MainOrchestrator:
         
         print(f"✅ MainOrchestrator 초기화 완료 (session: {self.session_key})")
     
+    def load_recent_questions(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """최근 생성된 문제들을 불러오기"""
+        try:
+            if not self.memory:
+                print("⚠️ 메모리가 초기화되지 않았습니다.")
+                return []
+            
+            print(f"🔍 Redis에서 최근 {limit}개 문제 조회 중...")
+            
+            # Redis에서 questions:{session_key}:* 패턴으로 키 검색
+            pattern = f"questions:{self.session_key}:*"
+            keys = self.memory.redis.keys(pattern)
+            print(f"🔍 조회된 키들: {keys}")
+            
+            if not keys:
+                print("📝 저장된 문제가 없습니다.")
+                return []
+            
+            # 최근 생성된 순서로 정렬 (키에 타임스탬프가 포함되어 있다면)
+            keys.sort(reverse=True)
+            
+            # 각 문제의 상세 정보 가져오기
+            questions = []
+            for i, key in enumerate(keys[:limit]):
+                try:
+                    print(f"🔍 문제 {i+1} 상세 정보 조회 중... (키: {key})")
+                    question_data = self.memory.redis.hgetall(key)
+                    print(f"🔍 문제 데이터: {question_data}")
+                    
+                    # Redis에서 가져온 데이터를 직접 사용 (이미 문자열)
+                    question_text = question_data.get("question", "")
+                    options_str = question_data.get("options", "[]")
+                    answer = question_data.get("answer", "")
+                    explanation = question_data.get("explanation", "")
+                    subject = question_data.get("subject", "unknown")
+                    
+                    # options JSON 파싱
+                    try:
+                        options = json.loads(options_str) if options_str else []
+                    except:
+                        options = []
+                    
+                    questions.append({
+                        "qid": key if isinstance(key, str) else key.decode("utf-8"),
+                        "question": question_text,
+                        "options": options if isinstance(options, list) else [],
+                        "answer": answer,
+                        "explanation": explanation,
+                        "subject": subject,
+                        "created_at": int(time.time()),  # 현재 시간으로 설정
+                        "updated_at": int(time.time())
+                    })
+                except Exception as e:
+                    print(f"⚠️ 문제 {key} 로드 중 오류: {e}")
+                    continue
+            
+            print(f"📖 최근 {len(questions)}개 문제를 불러왔습니다.")
+            return questions
+            
+        except Exception as e:
+            print(f"❌ 최근 문제 조회 실패: {e}")
+            return []
+    
     def _create_graph(self) -> StateGraph:
         """LangGraph StateGraph 생성"""
         workflow = StateGraph(MainState)
@@ -458,6 +521,7 @@ class MainOrchestrator:
             }
             result = self.teacher.graph.invoke(teacher_state, config)
             
+            
             state["teacher_result"] = result
             print("👨‍🏫 Teacher 실행 완료")
             
@@ -766,10 +830,7 @@ class MainOrchestrator:
                     # bytes 처리
                     question_data = {}
                     for k, v in data.items():
-                        if isinstance(k, bytes):
-                            k = k.decode('utf-8')
-                        if isinstance(v, bytes):
-                            v = v.decode('utf-8')
+                        # Redis에서 가져온 데이터는 이미 문자열
                         
                         if k == "options":
                             try:

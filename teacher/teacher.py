@@ -73,6 +73,7 @@ class SharedState(TypedDict):
     retrieve_answer: NotRequired[str]
     user_answer: NotRequired[List[str]]  # 사용자가 실제 제출한 답
     score_result: NotRequired[dict]
+    added_count: NotRequired[int]
 
 class TeacherState(TypedDict):
     user_query: str

@@ -317,3 +317,6 @@ volumes/
 *.rdb
 *.aof
 appendonlydir/
+
+pdf_outputs/
+pdf_outputs/**

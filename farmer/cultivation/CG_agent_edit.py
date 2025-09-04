@@ -48,12 +48,22 @@ if not USE_OPENAI:
 if not USE_TAVILY:
     print("⚠️ TAVILY_API_KEY 미설정: 웹검색을 비활성화합니다.")
 
-# Tavily 도구 생성 부분도 안전하게
+class _NoopTavily:
+    def search(self, query: str, max_results: int = 5):
+        print("⚠️ Tavily 비활성화: 키가 없거나 패키지가 없습니다.")
+        return {"results": []}  # 기존 파싱 로직과 호환
+
 tavily_tool = None
 if USE_TAVILY:
-    from langchain_tavily import TavilySearch
-    tavily_tool = TavilySearch(max_results=5, api_key=TAVILY_API_KEY)
-    
+    try:
+        from tavily import TavilyClient
+        tavily_tool = TavilyClient(api_key=TAVILY_API_KEY)
+    except Exception as e:
+        print(f"⚠️ Tavily 초기화 실패: {e}  → No-Op로 대체")
+        tavily_tool = _NoopTavily()
+else:
+    tavily_tool = _NoopTavily()
+
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME_INFO = "crop_info"
@@ -109,7 +119,6 @@ VALIDATION_PROMPT = """
 답변:
 """
 
-tavily_tool = TavilyClient(api_key=TAVILY_API_KEY)
 
 # 전역 retriever 변수 (직렬화 문제 해결을 위해)
 _global_retriever = None

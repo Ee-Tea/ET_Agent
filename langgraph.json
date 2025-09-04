@@ -1,14 +1,8 @@
 {
-  "dockerfile_lines": [
-    "ADD . /app"
-  ],
+  "dependencies": ["."],
   "graphs": {
-    "agent": "teacher.graph:graph"
+    "agent": "./teacher/graph:graph"
   },
   "env": ".env",
-  "image_distro": "wolfi",
-  "python_version": "3.12",
-  "dependencies": [
-    "file:/app"
-  ]
+  "image_distro": "wolfi"
 }

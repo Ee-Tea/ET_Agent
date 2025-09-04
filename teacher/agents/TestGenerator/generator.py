@@ -32,6 +32,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
 from pymilvus import connections, utility, Collection, DataType
 
+from datasets import Dataset
 # milvus_store 유틸 불러오기 (패키지 구조에 따라 상대/절대 임포트 호환)
 try:
     from .milvus_store import load_questions_from_json
@@ -42,15 +43,23 @@ def evaluate_with_ragas(dataset, metrics):
     from ragas import evaluate  # <- 여기로 이동
     return evaluate(dataset, metrics=metrics)
 
-# 🔍 RAGAS 관련 임포트 추가
-try:
+def get_ragas_metrics():
+    # metrics도 내부에서 import
     from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
-    from datasets import Dataset
-    from ragas.llms import llm_factory
-    RAGAS_AVAILABLE = True
-except ImportError:
-    RAGAS_AVAILABLE = False
-    print("⚠️ RAGAS가 설치되지 않았습니다. 품질 검증 기능이 비활성화됩니다.")
+    return faithfulness, answer_relevancy, context_precision, context_recall
+
+RAGAS_AVAILABLE = False
+
+def get_llm_factory():
+    global RAGAS_AVAILABLE
+    try:
+        from ragas.llms import llm_factory
+        RAGAS_AVAILABLE = True
+        return llm_factory
+    except ImportError:
+        RAGAS_AVAILABLE = False
+        print("⚠️ RAGAS가 설치되지 않았습니다. 품질 검증 기능이 비활성화됩니다.")
+        return None
 
 # LLM 모델 설정을 환경변수에서 가져오기
 OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
@@ -509,6 +518,7 @@ class InfoProcessingExamAgent(BaseAgent):
 
     def _validate_with_ragas(self, questions: List[Dict[str, Any]], context: str, subject_area: str = "정보처리기사") -> float:
         """개선된 RAGAS를 사용한 문제 품질 검증"""
+        
         if not RAGAS_AVAILABLE or not RAGAS_ENABLED:
             print("[DEBUG] RAGAS 비활성화됨 - 품질 검증 건너뜀")
             return 1.0  # RAGAS가 없으면 기본적으로 통과
@@ -527,6 +537,8 @@ class InfoProcessingExamAgent(BaseAgent):
                 base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
                 
                 ragas_model = os.getenv("RAGAS_LLM_MODEL") or os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+                llm_factory = get_llm_factory()
+                
                 llm = llm_factory(
                     model=ragas_model,
                     base_url=base_url
@@ -587,6 +599,7 @@ class InfoProcessingExamAgent(BaseAgent):
             
             # RAGAS 평가 실행
             dataset = Dataset.from_dict(eval_data)
+            faithfulness, answer_relevancy, context_precision, context_recall = get_ragas_metrics()
             results = evaluate_with_ragas(
                 dataset,
                 metrics=[faithfulness, answer_relevancy, context_precision, context_recall],

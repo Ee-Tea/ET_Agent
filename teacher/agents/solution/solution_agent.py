@@ -1826,6 +1826,3 @@ if __name__ == "__main__":
             print(f"- 풀이:{r.get('generated_explanation','-')}")
             print(f"- faith={r.get('ragas_faithfulness')}, ans_rel={r.get('ragas_answer_relevancy')}, valid={r.get('validated')}")
         print("========================================\n")
-
-
-        

@@ -69,30 +69,40 @@ def _install_ragas_safe_parse():
         print(f"[RAGAS] safe patch not applied: {e}")
 
 _install_ragas_safe_parse()
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+
+
 import os, json, glob
 from datetime import datetime
 from langchain_milvus import Milvus
 from pymilvus import connections, Collection
 from difflib import SequenceMatcher
+
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy
+    return faithfulness, answer_relevancy
 # RAGAS 래퍼 & 데이터 스키마
-from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
-from ragas.dataset_schema import SingleTurnSample
+def get_ragas_wrappers():
+    from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
+    return RagasLLMWrapper, RagasEmbWrapper
 
-# RAGAS 지표
-from ragas.metrics import faithfulness, answer_relevancy
-from ragas import evaluate as ragas_evaluate
+def get_ragas_schema():
+    try:
+        from ragas import EvaluationDataset  # 신버전 권장 경로
+    except Exception:
+        from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
+    return EvaluationDataset
 
-try:
-    from ragas import EvaluationDataset  # 신버전 권장 경로
-except Exception:
-    from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
-try:
-    from ragas import EvaluationDataset  # 신버전
-except Exception:
-    from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
+def get_single_turn_sample():
+    from ragas.dataset_schema import SingleTurnSample
+    return SingleTurnSample
+
 
 
 try:
@@ -1166,6 +1176,7 @@ class SolutionAgent(BaseAgent):
         - metrics  : faithfulness, answer_relevancy
         """
         print("\n🧪 [3단계] RAGAS 검증 시작")
+        RagasLLMWrapper, RagasEmbWrapper = get_ragas_wrappers()
 
         def _norm(s: str) -> str:
             return (s or "").strip()
@@ -1218,13 +1229,13 @@ class SolutionAgent(BaseAgent):
         print(f"[RAGAS] contexts 원문 사용: {len(ctx_list)}개")
 
         # 4) SingleTurnSample + EvaluationDataset
-        sample = SingleTurnSample(
+        sample = get_single_turn_sample(
             user_input=question_text,
             response=answer_text,
             retrieved_contexts=ctx_list,
             reference=None,   # ground_truth 없음
         )
-        dataset = EvaluationDataset(samples=[sample])
+        dataset = get_ragas_schema(samples=[sample])
 
         # 5) Wrappers
         eval_llm = ChatOpenAI(
@@ -1254,9 +1265,12 @@ class SolutionAgent(BaseAgent):
             )
         emb_wrapped = RagasEmbWrapper(emb)
 
+        faithfulness, answer_relevancy = get_ragas_metrics()
+
+
         # 6) 평가 함수 (콜백 완전 차단 → trace 파서 경로 차단)
         def _run(ds):
-            return ragas_evaluate(
+            return evaluate_with_ragas(
                 ds,
                 metrics=[faithfulness, answer_relevancy],
                 llm=llm_wrapped,
@@ -1270,8 +1284,8 @@ class SolutionAgent(BaseAgent):
         except Exception as e:
             print(f"[RAGAS] 1st pass failed: {e} -> retry with 1 ctx")
             subset = ctx_list[:1] or [""]
-            dataset2 = EvaluationDataset(samples=[
-                SingleTurnSample(
+            dataset2 = get_ragas_schema(samples=[
+                get_single_turn_sample(
                     user_input=question_text,
                     response=answer_text,
                     retrieved_contexts=subset,

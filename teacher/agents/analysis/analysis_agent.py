@@ -7,10 +7,7 @@ load_dotenv()
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from openai import OpenAI
-from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field
 
 from ..base_agent import BaseAgent
 

@@ -4,8 +4,17 @@ from dataclasses import dataclass
 import pandas as pd
 
 from datasets import Dataset
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall  # 필요한 것만
+    return faithfulness, answer_relevancy, context_precision, context_recall
+
 
 from teacher.agents.solution.solution_agent import SolutionAgent
 
@@ -312,7 +321,9 @@ def run_eval(
             golden_df.to_csv(golden_csv, index=False, encoding="utf-8-sig")
             return
         ds = Dataset.from_pandas(df_eval)
-        ragas_result = evaluate(
+        faithfulness, answer_relevancy, context_precision, context_recall = get_ragas_metrics()
+
+        ragas_result = evaluate_with_ragas(
             ds,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
             llm=llm,

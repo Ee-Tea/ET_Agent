@@ -20,15 +20,32 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 
+
 # RAGAS 관련
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall  # 필요한 것만
+    return faithfulness, answer_relevancy, context_precision, context_recall
+
 from ragas import evaluate, SingleTurnSample
 from ragas.metrics import (
     ResponseRelevancy,
     LLMContextPrecisionWithoutReference,
     Faithfulness
 )
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
+
+
+# RAGAS 래퍼 & 데이터 스키마
+def get_ragas_wrappers():
+    from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
+    return RagasLLMWrapper, RagasEmbWrapper
+
 
 # HuggingFace 관련
 from datasets import Dataset
@@ -49,6 +66,9 @@ class SalesRAGASEvaluator:
     
     def _setup_models(self):
         """공식 문서에 따른 모델 설정"""
+
+        LangchainLLMWrapper, LangchainEmbeddingsWrapper = get_ragas_wrappers()
+
         try:
             # LLM 설정 (기본 설정으로 복원)
             self.llm = ChatOpenAI(

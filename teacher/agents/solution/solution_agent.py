@@ -247,10 +247,23 @@ class SolutionAgent(BaseAgent):
         *, text_field: str | None = None,
         vector_field: str | None = None,
         metric_type: str | None = None) -> Milvus:
-        emb = HuggingFaceEmbeddings(
-            model_name="jhgan/ko-sroberta-multitask",
-            model_kwargs={"device": "cpu"},
-        )
+        
+        # 싱글톤 임베딩 모델 사용
+        if not hasattr(self, '_cached_embedding_model'):
+            try:
+                self._cached_embedding_model = HuggingFaceEmbeddings(
+                    model_name="jhgan/ko-sroberta-multitask",
+                    model_kwargs={
+                        "device": "cpu"
+                    },
+                    encode_kwargs={"normalize_embeddings": True}
+                )
+                print("✅ 임베딩 모델 캐시 생성 완료")
+            except Exception as e:
+                print(f"❌ 임베딩 모델 생성 실패: {e}")
+                raise
+        
+        emb = self._cached_embedding_model
         if "default" not in connections.list_connections():
             connections.connect(alias="default", host=host, port=port)
 
@@ -1234,7 +1247,10 @@ class SolutionAgent(BaseAgent):
             from langchain_huggingface import HuggingFaceEmbeddings
             emb = HuggingFaceEmbeddings(
                 model_name=os.getenv("RAGAS_EMBED_MODEL", "jhgan/ko-sroberta-multitask"),
-                model_kwargs={"device": os.getenv("RAGAS_EMBED_DEVICE", "cpu")},
+                model_kwargs={
+                    "device": os.getenv("RAGAS_EMBED_DEVICE", "cpu")
+                },
+                encode_kwargs={"normalize_embeddings": True}
             )
         emb_wrapped = RagasEmbWrapper(emb)
 
@@ -1623,7 +1639,10 @@ if __name__ == "__main__":
                          metric_type: str | None = None) -> Milvus:
         emb = HuggingFaceEmbeddings(
             model_name="jhgan/ko-sroberta-multitask",
-            model_kwargs={"device": "cpu"},
+            model_kwargs={
+                "device": "cpu"
+            },
+            encode_kwargs={"normalize_embeddings": True}
         )
         if "default" not in connections.list_connections():
             connections.connect(alias="default", host=host, port=port)

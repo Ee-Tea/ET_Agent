@@ -3,7 +3,6 @@ import os
 import uuid
 from typing import List, Dict, Any
 from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
-import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
 
@@ -12,17 +11,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class MilvusDBManager:
-    def __init__(self, host: str = None, port: str = None):
+    def __init__(self, host: str = None, port: str = None, 
+                 chunk_tokens: int = 256, chunk_overlap: int = 32, 
+                 min_chunk_chars: int = 50, min_chunk_tokens: int = 0):
+        
         """MilvusDB 연결 관리자 초기화"""
         # 환경변수에서 MilvusDB 연결 정보 가져오기
         self.host = host or os.getenv("MILVUS_HOST", "localhost")
-        print(self.host)
         self.port = port or os.getenv("MILVUS_PORT", "19530")
-        print(self.port)
-        self.collection_name = "concept_summary"
+        logger.debug(f"Milvus host={self.host}, port={self.port}")
+        self.collection_name = "concepts"
         self.dimension = 768  # ko-sroberta-multitask 임베딩 차원
         self.embeddings_model = None
         self.collection = None
+        self.chunk_tokens = int(os.getenv("CHUNK_TOKENS", chunk_tokens))
+        self.chunk_overlap = int(os.getenv("CHUNK_OVERLAP", chunk_overlap))
+        self.min_chunk_chars = int(os.getenv("CHUNK_MIN_CHARS", min_chunk_chars))   # 문자 기준
+        self.min_chunk_tokens = int(os.getenv("CHUNK_MIN_TOKENS", min_chunk_tokens))  # 토큰 기준(0이면 비활성)
+        self._tokenizer = None
         
     def connect(self):
         """MilvusDB에 연결"""
@@ -33,7 +39,31 @@ class MilvusDBManager:
         except Exception as e:
             logger.error(f"MilvusDB 연결 실패: {e}")
             return False
+        
+    def _ensure_tokenizer(self):
+        if self._tokenizer is None:
+            if not self.embeddings_model:
+                raise ValueError("임베딩 모델이 먼저 초기화되어야 합니다.")
+            # SentenceTransformer는 내부에 tokenizer를 갖고 있음
+            self._tokenizer = getattr(self.embeddings_model, "tokenizer", None)
+            if self._tokenizer is None:
+                # 호환성이 떨어지는 모델일 경우 대비
+                raise RuntimeError("SentenceTransformer tokenizer를 찾지 못했습니다.")
+        return self._tokenizer
+
     
+    def _passes_min_size(self, text: str) -> bool:
+        # 토큰 기준 활성화 시
+        if self.min_chunk_tokens > 0:
+            tok = self._ensure_tokenizer()
+            n_tokens = len(tok(text, add_special_tokens=False, truncation=False)["input_ids"])
+            if n_tokens < self.min_chunk_tokens:
+                return False
+        # 문자 기준
+        if self.min_chunk_chars > 0 and len(text) < self.min_chunk_chars:
+            return False
+        return True
+
     def load_embedding_model(self):
         """HuggingFace 임베딩 모델 초기화"""
         try:
@@ -54,55 +84,44 @@ class MilvusDBManager:
             logger.error(f"HuggingFace 임베딩 모델 초기화 실패: {e}")
             return False
     
-    def create_collection(self):
-        """컬렉션 생성"""
-        try:
-            # 기존 컬렉션이 있다면 삭제
-            if utility.has_collection(self.collection_name):
+    def create_collection(self, drop: bool = False):
+        if utility.has_collection(self.collection_name):
+            if drop:
                 utility.drop_collection(self.collection_name)
-                logger.info(f"기존 컬렉션 '{self.collection_name}'을 삭제했습니다.")
-            
-            # 필드 스키마 정의 - item_title 길이를 2000자로 증가
-            fields = [
-                FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=36, is_primary=True),
-                FieldSchema(name="subject", dtype=DataType.VARCHAR, max_length=100),
-                FieldSchema(name="item_id", dtype=DataType.VARCHAR, max_length=20),
-                FieldSchema(name="item_title", dtype=DataType.VARCHAR, max_length=2000),  # 500 -> 2000으로 증가
-                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=10000),
-                FieldSchema(name="chunk_size", dtype=DataType.INT64),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension)
-            ]
-            
-            # 컬렉션 스키마 생성
-            schema = CollectionSchema(fields=fields, description="정보처리기사 시험 자료 임베딩 컬렉션")
-            
-            # 컬렉션 생성
-            self.collection = Collection(name=self.collection_name, schema=schema)
-            
-            # 인덱스 생성
-            index_params = {
-                "metric_type": "COSINE",
-                "index_type": "IVF_FLAT",
-                "params": {"nlist": 1024}
-            }
-            self.collection.create_index(field_name="embedding", index_params=index_params)
-            
-            logger.info(f"컬렉션 '{self.collection_name}'이 생성되었습니다.")
-            return True
-            
-        except Exception as e:
-            logger.error(f"컬렉션 생성 실패: {e}")
-            return False
+                logger.info(f"기존 '{self.collection_name}' 삭제")
+            else:
+                self.collection = Collection(self.collection_name)
+                logger.info(f"기존 '{self.collection_name}' 로드")
+                return True
+
+        # ↓ 여기부터는 '없거나(drop 후)' 새로 만들기
+        fields = [
+            FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=36, is_primary=True),
+            FieldSchema(name="subject", dtype=DataType.VARCHAR, max_length=100),
+            FieldSchema(name="item_id", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="item_title", dtype=DataType.VARCHAR, max_length=2000),
+            FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=10000),
+            FieldSchema(name="chunk_size", dtype=DataType.INT64),
+            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension),
+        ]
+        schema = CollectionSchema(fields=fields, description="개념 요약 임베딩")
+        self.collection = Collection(name=self.collection_name, schema=schema)
+        logger.info(f"컬렉션 '{self.collection_name}' 생성")
+        return True
+
     
+    def build_index(self):
+        index_params = {"metric_type": "COSINE", "index_type": "IVF_FLAT", "params": {"nlist": 1024}}
+        self.collection.create_index(field_name="embedding", index_params=index_params)
+        self.collection.load()
+        logger.info("컬렉션 인덱스가 성공적으로 생성되었습니다.")
+        
     def generate_embedding(self, text: str) -> List[float]:
         """텍스트를 HuggingFace 임베딩 벡터로 변환"""
         try:
             if not self.embeddings_model:
                 raise ValueError("HuggingFace 임베딩 모델이 초기화되지 않았습니다.")
             
-            # 텍스트 전처리 (너무 긴 텍스트는 잘라내기)
-            if len(text) > 8000:  # HuggingFace 토큰 제한
-                text = text[:8000]
             
             # HuggingFace 임베딩 생성
             embedding = self.embeddings_model.encode(text)
@@ -118,37 +137,37 @@ class MilvusDBManager:
             logger.error(f"HuggingFace 임베딩 생성 실패: {e}")
             return [0.0] * self.dimension
     
-    def chunk_content(self, content: str, max_length: int = 8000) -> List[str]:
-        """긴 내용을 적절한 크기로 청킹"""
-        if len(content) <= max_length:
-            return [content]
-        
-        chunks = []
-        current_chunk = ""
-        
-        # 문장 단위로 나누기 (마침표, 느낌표, 물음표 기준)
-        sentences = content.replace('!', '.').replace('?', '.').split('.')
-        
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-                
-            # 현재 청크에 문장을 추가했을 때 길이 확인
-            if len(current_chunk) + len(sentence) + 1 <= max_length:
-                current_chunk += (sentence + ". ")
-            else:
-                # 현재 청크가 있으면 저장
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                # 새 청크 시작
-                current_chunk = sentence + ". "
-        
-        # 마지막 청크 추가
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        
-        return chunks if chunks else [content[:max_length]]
+    def chunk_by_tokens(self, text: str, chunk_tokens: int = None, overlap: int = None) -> list[str]:
+        tok = self._ensure_tokenizer()
+        chunk_tokens = chunk_tokens or self.chunk_tokens
+        overlap = overlap or self.chunk_overlap
+
+        # 모델 max seq length 방어
+        try:
+            model_max = int(getattr(self.embeddings_model, "max_seq_length", 0)) \
+                        or int(getattr(self.embeddings_model, "get_max_seq_length", lambda: 0)() or 0)
+            if model_max and chunk_tokens > model_max:
+                chunk_tokens = max(8, model_max - 8)
+        except Exception:
+            pass
+
+        enc = tok(text, add_special_tokens=False, return_offsets_mapping=True, truncation=False)
+        ids = enc.get("input_ids", [])
+        offs = enc.get("offset_mapping", [])
+        if not ids:
+            return [text] if text else []
+
+        chunks, start = [], 0
+        step = max(1, chunk_tokens - overlap)
+        while start < len(ids):
+            end = min(len(ids), start + chunk_tokens)
+            s, e = offs[start][0], offs[end - 1][1]
+            piece = text[s:e].strip()
+            if piece:
+                chunks.append(piece)
+            start += step
+        return chunks
+
 
     def truncate_title(self, title: str, max_length: int = 1800) -> str:
         """제목을 적절한 길이로 자르기"""
@@ -174,7 +193,13 @@ class MilvusDBManager:
                     # 제목 길이 제한
                     title = self.truncate_title(item.get('item_title', ''))
                     # 내용은 청킹
-                    content_chunks = self.chunk_content(item.get('content', ''), max_length=8000)
+                    content_chunks = self.chunk_by_tokens(
+                        item.get('content', ''),
+                        chunk_tokens=self.chunk_tokens,
+                        overlap=self.chunk_overlap
+                    )
+                    content_chunks = [c for c in content_chunks if self._passes_min_size(c)]
+
                     
                     for i, chunk in enumerate(content_chunks):
                         # 청크가 여러 개인 경우 제목에 청크 번호 추가
@@ -195,7 +220,13 @@ class MilvusDBManager:
                 # 제목 길이 제한
                 title = self.truncate_title(data.get('item_title', ''))
                 # 내용은 청킹
-                content_chunks = self.chunk_content(data.get('content', ''), max_length=8000)
+                content_chunks = self.chunk_by_tokens(
+                    data.get('content', ''),
+                    chunk_tokens=self.chunk_tokens,
+                    overlap=self.chunk_overlap
+                )
+                content_chunks = [c for c in content_chunks if self._passes_min_size(c)]
+
                 
                 for i, chunk in enumerate(content_chunks):
                     # 청크가 여러 개인 경우 제목에 청크 번호 추가
@@ -225,33 +256,26 @@ class MilvusDBManager:
                 logger.warning("삽입할 데이터가 없습니다.")
                 return
             
-            # 임베딩 생성
-            embeddings = []
-            for i, item in enumerate(data_list):
-                logger.info(f"임베딩 생성 중... ({i+1}/{len(data_list)})")
-                
-                # 제목과 내용을 결합하여 임베딩 생성
-                combined_text = f"{item['item_title']} {item['content']}"
-                embedding = self.generate_embedding(combined_text)
-                embeddings.append(embedding)
-                
-                # API 호출 제한을 위한 짧은 대기
-                if (i + 1) % 10 == 0:
-                    import time
-                    time.sleep(0.1)
-            
-            # 데이터 준비
+            # ① 텍스트 모으기
+            texts = [f"{it['item_title']} {it['content']}" for it in data_list]
+
+            # ② 배치 임베딩 (환경변수로 배치 크기 조절)
+            batch_size = int(os.getenv("EMBED_BATCH", 64))
+            embeddings = self.embeddings_model.encode(
+                texts, batch_size=batch_size, show_progress_bar=True,
+                convert_to_numpy=True, normalize_embeddings=True
+            ).tolist()
+
+            # ③ 나머지는 동일
             insert_data = [
-                [item['id'] for item in data_list],
-                [item['subject'] for item in data_list],
-                [item['item_id'] for item in data_list],
-                [item['item_title'] for item in data_list],
-                [item['content'] for item in data_list],
-                [item['chunk_size'] for item in data_list],
+                [it['id'] for it in data_list],
+                [it['subject'] for it in data_list],
+                [it['item_id'] for it in data_list],
+                [it['item_title'] for it in data_list],
+                [it['content'] for it in data_list],
+                [it['chunk_size'] for it in data_list],
                 embeddings
             ]
-            
-            # 데이터 삽입
             self.collection.insert(insert_data)
             self.collection.flush()
             
@@ -308,18 +332,10 @@ class MilvusDBManager:
             query_embedding = self.generate_embedding(query)
             
             # 검색 파라미터
-            search_params = {
-                "metric_type": "COSINE",
-                "params": {"nprobe": 10}
-            }
-            
-            # 검색 실행
+            search_params = {"metric_type": "COSINE", "params": {"nprobe": int(os.getenv("NPROBE", 32))}}
             results = self.collection.search(
-                data=[query_embedding],
-                anns_field="embedding",
-                param=search_params,
-                limit=top_k,
-                output_fields=["subject", "item_title", "content", "chunk_size"]
+                [query_embedding], "embedding", search_params, limit=top_k,
+                output_fields=["id","item_id","subject","item_title","content","chunk_size"]
             )
             
             # 결과 정리
@@ -327,6 +343,8 @@ class MilvusDBManager:
             for hits in results:
                 for hit in hits:
                     search_results.append({
+                        'id': hit.entity.get('id'),
+                        'item_id': hit.entity.get('item_id'),
                         'score': hit.score,
                         'subject': hit.entity.get('subject'),
                         'item_title': hit.entity.get('item_title'),
@@ -342,35 +360,28 @@ class MilvusDBManager:
 
 def main():
     """메인 함수"""
-    # MilvusDB 관리자 초기화
-    db_manager = MilvusDBManager()
-    
-    # MilvusDB 연결
-    if not db_manager.connect():
-        logger.error("MilvusDB 연결에 실패했습니다.")
-        return
-    
-    # HuggingFace 임베딩 모델 초기화
-    if not db_manager.load_embedding_model():
-        logger.error("HuggingFace 임베딩 모델 초기화에 실패했습니다.")
-        return
-    
-    # 컬렉션 생성
-    if not db_manager.create_collection():
-        logger.error("컬렉션 생성에 실패했습니다.")
-        return
-    
-    # JSON 파일들이 있는 디렉토리 경로
+    db = MilvusDBManager()
+    if not db.connect(): return
+    if not db.load_embedding_model(): return
+
+    # 1) 컬렉션 먼저
+    drop = os.getenv("MILVUS_DROP_COLLECTION", "false").lower() == "true"
+    if not db.create_collection(drop=drop): return
+
     json_dir = "teacher/agents/retrieve/data/json"
-    
-    # 모든 JSON 파일 로드 및 저장
-    db_manager.load_all_json_files(json_dir)
-    
+    # 2) 데이터 적재
+    json_dir = os.getenv("JSON_DIR", "teacher/agents/retrieve/data/json")
+    db.load_all_json_files(json_dir)
+
+    # 3) 마지막에 인덱스 빌드 & 로드
+    db.build_index()
+
     # 테스트 검색
     logger.info("테스트 검색을 실행합니다...")
     test_query = "소프트웨어 생명주기"
-    results = db_manager.search_similar(test_query, top_k=3)
+    results = db.search_similar(test_query, top_k=3)
     
+    # JSON 파일들이 있는 디렉토리 경로
     logger.info(f"쿼리: '{test_query}'에 대한 검색 결과:")
     for i, result in enumerate(results, 1):
         logger.info(f"{i}. 점수: {result['score']:.4f}")

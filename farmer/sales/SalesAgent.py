@@ -291,7 +291,7 @@ def execute_milvus_search(query: str) -> list[str]:
 
         results = search_market_docs(query, collection, top_k=3)
         connections.disconnect("default")
-        return results
+        return results 
     except Exception as e:
         print(f"❌ Milvus 연결 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
@@ -899,7 +899,7 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import
-        from sales.SalesRAGAS import SalesRAGASEvaluator
+        from .SalesRAGAS import SalesRAGASEvaluator
         
         # 평가기 초기화
         evaluator = SalesRAGASEvaluator()

@@ -449,7 +449,7 @@ def post_generator_route(state: Dict[str, Any]) -> str:
 def post_solution_route(state: Dict[str, Any]) -> str:
     """solution 실행 후 다음 노드 결정"""
     nxt = ((state.get("routing") or {}).get("after_solution") or "").strip()
-    return nxt if nxt else "generate_answer_pdf"  # 기본적으로 persist_state로 이동
+    return nxt if nxt else "generate_answer_pdf"  
 
 def post_score_route(state: Dict[str, Any]) -> str:
     """score 실행 후 다음 노드 결정"""

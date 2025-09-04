@@ -7,24 +7,27 @@ import os
 import json
 import hashlib
 import time
-from typing import Dict, List, Any, Optional, TypedDict
+from typing import Dict, List, Any, Optional, TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 from common.short_term.redis_memory import RedisLangGraphMemory
 from teacher.teacher import Teacher, TeacherState
 from farmer.farmer import Farmer, RouterState
 
 
 class MainState(TypedDict):
-    """라우터 상태 정의"""
+    """라우터 상태 정의 - LangGraph StateGraph 호환"""
     user_query: str
     user_id: str
     chat_id: str
     session_key: str
     
     # 메모리 데이터
-    existing_questions: List[Dict]
+    existing_questions: Annotated[List[Dict], "기존 문제 목록"]
     locked_service: Optional[str]
+    short_term_data: Annotated[Dict[str, Any], "숏텀 메모리 데이터"]
     
     # 분류 결과
     is_relevant: bool
@@ -38,7 +41,7 @@ class MainState(TypedDict):
 
 
 class MainOrchestrator:
-    """메인 오케스트레이터 - 이미지 워크플로우 기반"""
+    """메인 오케스트레이터 - LangGraph StateGraph 기반"""
     
     def __init__(self, user_id: str, chat_id: str):
         self.user_id = user_id
@@ -63,7 +66,95 @@ class MainOrchestrator:
         self.teacher = Teacher(user_id, "teacher", chat_id)
         self.farmer = Farmer()
         
+        # LangGraph StateGraph 생성
+        self.graph = self._create_graph()
+        
         print(f"✅ MainOrchestrator 초기화 완료 (session: {self.session_key})")
+    
+    def _create_graph(self) -> StateGraph:
+        """LangGraph StateGraph 생성"""
+        workflow = StateGraph(MainState)
+        
+        # 노드 추가
+        workflow.add_node("load_memory", self.load_memory_data)
+        workflow.add_node("classify_question_and_service", self.classify_question_and_service)
+        workflow.add_node("validate_classification", self._refine_classification_if_needed)
+        workflow.add_node("check_consistency", self.check_final_service_consistency)
+        workflow.add_node("update_session", self.update_session_data)
+        workflow.add_node("execute_teacher", self.teacher_app)
+        workflow.add_node("execute_farmer", self.execute_farmer)
+        workflow.add_node("merge_teacher_result", self.merge_teacher_result)
+        workflow.add_node("save_memory", self.save_memory_data)
+        workflow.add_node("finalize_response", self.finalize_response)
+        workflow.add_node("handle_irrelevant", self.handle_irrelevant_question)
+        workflow.add_node("handle_inconsistency", self.handle_service_inconsistency)
+        
+        # 시작점 설정
+        workflow.set_entry_point("load_memory")
+        
+        # 엣지 추가
+        workflow.add_edge("load_memory", "classify_question_and_service")
+        workflow.add_conditional_edges(
+            "classify_question_and_service",
+            self._route_after_classification,
+            {
+                "irrelevant": "handle_irrelevant",
+                "relevant": "validate_classification"
+            }
+        )
+        workflow.add_edge("validate_classification", "check_consistency")
+        workflow.add_conditional_edges(
+            "check_consistency",
+            self._route_after_consistency_check,
+            {
+                "inconsistent": "handle_inconsistency",
+                "consistent": "update_session"
+            }
+        )
+        workflow.add_conditional_edges(
+            "update_session",
+            self._route_to_service,
+            {
+                "teacher": "execute_teacher",
+                "farmer": "execute_farmer"
+            }
+        )
+        workflow.add_edge("execute_teacher", "merge_teacher_result")
+        workflow.add_edge("merge_teacher_result", "save_memory")
+        workflow.add_edge("execute_farmer", "save_memory")
+        workflow.add_edge("save_memory", "finalize_response")
+        workflow.add_edge("handle_irrelevant", "save_memory")
+        workflow.add_edge("handle_inconsistency", "save_memory")
+        workflow.add_edge("finalize_response", END)
+        
+        return workflow.compile(checkpointer=MemorySaver())
+    
+    def visualize_graph(self, output_path: str = "supervisor_graph.png"):
+        """그래프 시각화"""
+        try:
+            # 그래프 이미지 생성
+            image = self.graph.get_graph().draw_mermaid_png()
+            
+            # 파일로 저장
+            with open(output_path, "wb") as f:
+                f.write(image)
+            
+            print(f"📊 그래프 시각화 저장: {output_path}")
+        except Exception as e:
+            print(f"❌ 그래프 시각화 실패: {e}")
+    
+    # 라우팅 함수들
+    def _route_after_classification(self, state: MainState) -> str:
+        """분류 후 라우팅"""
+        return "irrelevant" if not state["is_relevant"] else "relevant"
+    
+    def _route_after_consistency_check(self, state: MainState) -> str:
+        """일관성 검사 후 라우팅"""
+        return "inconsistent" if not state["service_consistent"] else "consistent"
+    
+    def _route_to_service(self, state: MainState) -> str:
+        """서비스로 라우팅"""
+        return state["classified_service"]
     
     def load_memory_data(self, state: MainState) -> MainState:
         """1. 메모리 데이터 로드"""
@@ -95,75 +186,184 @@ class MainOrchestrator:
         
         return state
     
-    def check_question_relevance(self, state: MainState) -> MainState:
-        """2. 질문 관련성 검사"""
-        print("🔍 질문 관련성 검사 중...")
-        
-        user_query = state["user_query"].lower()
-        
-        # 관련 키워드 체크
-        relevant_keywords = [
-            # Teacher 관련
-            "문제", "시험", "학습", "공부", "정답", "채점", "점수", "용어", "설명",
-            "데이터베이스", "소프트웨어", "프로그래밍", "정보시스템",
-            # Farmer 관련  
-            "재배", "농작물", "작물", "토마토", "고추", "배추", "상추", "시설", "온실",
-            "재해", "병해", "해충", "날씨", "기상", "수확", "시장", "가격"
-        ]
-        
-        is_relevant = any(keyword in user_query for keyword in relevant_keywords)
-        state["is_relevant"] = is_relevant
-        
-        print(f"🔍 질문 관련성: {'✅ 관련' if is_relevant else '❌ 무관'}")
-        return state
-    
-    def classify_service(self, state: MainState) -> MainState:
-        """3. 서비스 분류"""
-        print("🤖 서비스 분류 중...")
+    def classify_question_and_service(self, state: MainState) -> MainState:
+        """2. 질문 관련성 검사 및 서비스 분류 - 통합 LLM 기반"""
+        print("🔍 질문 분석 및 서비스 분류 중...")
         
         user_query = state["user_query"]
         
         prompt = f"""
-        다음 사용자 질문을 분석하여 적절한 서비스를 분류해주세요.
+        다음 사용자 질문을 분석하여 관련성과 적절한 서비스를 한 번에 분류해주세요.
 
-        **Teacher 서비스 키워드:**
-        - 문제 생성: "문제", "시험", "문제 만들어줘", "3문제", "5문제"
-        - 답변 입력: "정답은", "답은", "1,2,3", "1, 2, 3"
-        - 채점 요청: "채점", "점수", "맞았나", "정답 확인"
-        - 학습 도움: "학습", "공부", "설명", "용어", "개념"
-        - 과목 관련: "데이터베이스", "소프트웨어", "프로그래밍", "정보시스템"
+        **저희 서비스 범위:**
 
-        **Farmer 서비스 키워드:**
-        - 작물 재배: "재배", "농작물", "작물", "토마토", "고추", "배추", "상추"
-        - 시설 관리: "시설", "온실", "하우스", "관수", "환기"
-        - 재해 대응: "재해", "병해", "해충", "방제", "예방"
-        - 기상 정보: "날씨", "기상", "온도", "습도", "강수"
-        - 수확/시장: "수확", "시장", "가격", "판매", "유통"
+        **1. Teacher 서비스 (교육/학습 관련)**
+        - **문제 생성**: IT 관련 시험 문제 자동 생성
+          * 정보처리기사, 컴퓨터활용능력, ITQ, 워드프로세서, 스프레드시트 등
+          * 데이터베이스, 소프트웨어, 프로그래밍, 정보시스템, 하드웨어, 네트워크, 보안, 알고리즘 등
+          * 객관식, 주관식 문제 생성
+        - **답변 처리**: 사용자 답변 분석 및 피드백
+          * 정답 확인 및 해설 제공
+          * 오답 분석 및 학습 포인트 제시
+          * 단계별 문제 풀이 과정 안내
+        - **채점 기능**: 자동 채점 및 성적 관리
+          * 객관식 문제 정답 여부 판단
+          * 점수 계산 및 성적 통계
+          * 학습 진도 추적
+        - **학습 지원**: IT 지식 및 개념 설명
+          * IT 용어 사전 및 개념 설명
+          * 학습 자료 제공 및 추천
+          * 개인별 학습 계획 수립
 
-        질문: "{user_query}"
+        **2. Farmer 서비스 (농업/재배 관련)**
+        - **작물 재배**: 시설작물 재배 방법 및 관리
+          * 토마토, 고추, 배추, 상추, 오이, 딸기, 가지, 파프리카 등
+          * 파종, 정식, 수확 시기 및 방법
+          * 생육 단계별 관리 포인트
+        - **시설 관리**: 온실 및 농업 시설 관리
+          * 온실, 하우스, 관수시설, 환기시설, 난방시설 관리
+          * 온도, 습도, 조도 등 환경 제어
+          * 시설 점검 및 유지보수 가이드
+        - **재해 대응**: 병해충 및 자연재해 대응
+          * 병해충 진단 및 방제 방법
+          * 자연재해 예방 및 대응 전략
+          * 예방적 관리 방법
+        - **기상 정보**: 기상 데이터 기반 농업 관리
+          * 온도, 습도, 강수량, 일조량 분석
+          * 기상 예보 기반 재배 계획 수립
+          * 이상 기상 대응 방안
+        - **수확/유통**: 수확 및 판매 전략
+          * 수확 시기 및 방법 최적화
+          * 저장 및 보관 방법
+          * 시장 가격 정보 및 판매 전략
+        - **작물 추천**: 지역별, 계절별 작물 추천
+          * 지역 특성에 맞는 작물 선택
+          * 계절별 재배 가능 작물
+          * 수익성 분석 기반 작물 추천
 
-        위 키워드를 참고하여 다음 중 하나로 분류해주세요:
-        - teacher: 교육/학습 관련 질문
-        - farmer: 농업/재배 관련 질문 [ex) 판매처, 시세, 날씨, 재해, 재배방법, 작물추천]
-        - irrelevant: 위 두 분야와 무관한 질문
+        **관련 없는 질문 예시:**
+        - 일반적인 대화, 인사말 ("안녕하세요", "고마워요" 등)
+        - 다른 분야의 질문 (의료, 법률, 요리, 여행, 쇼핑 등)
+        - 개인적인 상담이나 심리적 문제
+        - 뉴스나 정치 관련 질문
+        - 게임이나 엔터테인먼트 관련 질문
+        - 날씨 일반 문의 (농업과 무관한)
+
+        **질문: "{user_query}"**
+
+        위 서비스 범위를 고려하여 다음 중 하나로 분류해주세요:
+        - teacher: Teacher 서비스가 적합한 IT/컴퓨터 관련 교육, 학습, 시험, 문제, 채점, 용어 설명 등
+        - farmer: Farmer 서비스가 적합한 농업, 재배, 작물, 시설, 재해, 기상, 수확, 시장 등
+        - irrelevant: 두 서비스 모두 해당하지 않는 질문
 
         분류 결과만 출력하세요 (teacher/farmer/irrelevant):
         """
         
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
-            classified_service = response.content.strip().lower()
+            classification_result = response.content.strip().lower()
             
             # 유효성 검사
-            if classified_service not in ["teacher", "farmer", "irrelevant"]:
-                classified_service = "irrelevant"
+            if classification_result not in ["teacher", "farmer", "irrelevant"]:
+                classification_result = "irrelevant"
+                print(f"⚠️ LLM 응답이 유효하지 않음, 기본값 사용: {classification_result}")
             
-            state["classified_service"] = classified_service
-            print(f"🤖 분류 결과: {classified_service}")
+            # 관련성과 서비스 분류 동시 설정
+            is_relevant = (classification_result != "irrelevant")
+            state["is_relevant"] = is_relevant
+            state["classified_service"] = classification_result
+            
+            print(f"🔍 질문 분석 결과: {'✅ 관련' if is_relevant else '❌ 무관'} → {classification_result}")
             
         except Exception as e:
-            print(f"❌ 서비스 분류 실패: {e}")
+            print(f"❌ LLM 질문 분석 실패: {e}")
+            # 오류 시 기본값 설정
+            state["is_relevant"] = True
             state["classified_service"] = "irrelevant"
+            print("🔍 기본값 사용: 관련 → irrelevant")
+        
+        return state
+    
+    def _validate_classification_confidence(self, state: MainState) -> bool:
+        """분류 결과의 신뢰성 검증"""
+        user_query = state["user_query"].lower()
+        classified_service = state["classified_service"]
+        
+        # 경계선상의 키워드들 (두 서비스 모두에 관련될 수 있는)
+        ambiguous_keywords = [
+            "데이터", "분석", "관리", "시스템", "정보", "기술", "자동화", 
+            "모니터링", "제어", "최적화", "효율성", "생산성"
+        ]
+        
+        # Teacher 관련 강한 키워드들
+        teacher_strong_keywords = [
+            "문제", "시험", "채점", "정답", "학습", "공부", "교육", "강의",
+            "정보처리기사", "컴퓨터활용능력", "itq", "데이터베이스", "프로그래밍",
+            "소프트웨어", "하드웨어", "네트워크", "보안", "알고리즘"
+        ]
+        
+        # Farmer 관련 강한 키워드들
+        farmer_strong_keywords = [
+            "재배", "농작물", "작물", "토마토", "고추", "배추", "상추", "오이", "딸기",
+            "온실", "하우스", "시설", "관수", "환기", "병해", "해충", "방제",
+            "수확", "시장", "가격", "판매", "유통", "기상", "온도", "습도"
+        ]
+        
+        # 강한 키워드가 있는지 확인
+        has_teacher_strong = any(keyword in user_query for keyword in teacher_strong_keywords)
+        has_farmer_strong = any(keyword in user_query for keyword in farmer_strong_keywords)
+        has_ambiguous = any(keyword in user_query for keyword in ambiguous_keywords)
+        
+        # 분류 신뢰도 평가
+        if classified_service == "teacher" and has_teacher_strong:
+            return True  # 높은 신뢰도
+        elif classified_service == "farmer" and has_farmer_strong:
+            return True  # 높은 신뢰도
+        elif has_ambiguous and not (has_teacher_strong or has_farmer_strong):
+            return False  # 낮은 신뢰도 (경계선상)
+        else:
+            return True  # 기본적으로 신뢰
+    
+    def _refine_classification_if_needed(self, state: MainState) -> MainState:
+        """필요시 분류 결과 재검토"""
+        if not self._validate_classification_confidence(state):
+            print("🤔 분류 신뢰도가 낮음, 재검토 중...")
+            
+            user_query = state["user_query"]
+            
+            # 재검토 프롬프트
+            refinement_prompt = f"""
+            다음 질문의 분류를 다시 한번 신중하게 검토해주세요.
+            
+            **현재 분류 결과**: {state["classified_service"]}
+            
+            **질문**: "{user_query}"
+            
+            이 질문이 정말로 {state["classified_service"]} 서비스에 적합한지 다시 생각해보세요.
+            
+            **Teacher 서비스**: IT/컴퓨터 관련 교육, 학습, 시험, 문제, 채점, 용어 설명
+            **Farmer 서비스**: 농업, 재배, 작물, 시설, 재해, 기상, 수확, 시장
+            
+            만약 다른 서비스가 더 적합하다고 생각되면 변경해주세요.
+            
+            최종 분류 결과만 출력하세요 (teacher/farmer/irrelevant):
+            """
+            
+            try:
+                response = self.llm.invoke([HumanMessage(content=refinement_prompt)])
+                refined_service = response.content.strip().lower()
+                
+                if refined_service in ["teacher", "farmer", "irrelevant"]:
+                    if refined_service != state["classified_service"]:
+                        print(f"🔄 분류 결과 변경: {state['classified_service']} → {refined_service}")
+                        state["classified_service"] = refined_service
+                    else:
+                        print("✅ 분류 결과 유지")
+                else:
+                    print("⚠️ 재검토 결과가 유효하지 않음, 기존 결과 유지")
+                    
+            except Exception as e:
+                print(f"❌ 분류 재검토 실패: {e}")
         
         return state
     
@@ -353,7 +553,7 @@ class MainOrchestrator:
         return state
     
     def process_query(self, user_query: str) -> str:
-        """메인 쿼리 처리 - 워크플로우 실행"""
+        """메인 쿼리 처리 - LangGraph 워크플로우 실행"""
         print(f"\n📝 사용자 질문: {user_query}")
         
         # 특별 명령어 처리
@@ -362,13 +562,14 @@ class MainOrchestrator:
             return "🧹 세션이 초기화되었습니다."
         
         # 초기 상태 설정
-        state = MainState(
+        initial_state = MainState(
             user_query=user_query,
             user_id=self.user_id,
             chat_id=self.chat_id,
             session_key=self.session_key,
             existing_questions=[],
             locked_service=None,
+            short_term_data={},
             is_relevant=False,
             classified_service="",
             service_consistent=False,
@@ -377,50 +578,23 @@ class MainOrchestrator:
             final_response=""
         )
         
-        # 워크플로우 실행
+        # LangGraph 실행
         try:
-            # 1. 메모리 데이터 로드
-            state = self.load_memory_data(state)
+            config = {
+                "configurable": {
+                    "thread_id": self.session_key,
+                    "checkpoint_ns": "supervisor",
+                    "checkpoint_id": f"supervisor_{self.session_key}"
+                }
+            }
             
-            # 2. 질문 관련성 검사
-            state = self.check_question_relevance(state)
+            # 그래프 실행
+            final_state = self.graph.invoke(initial_state, config)
             
-            if not state["is_relevant"]:
-                state = self.handle_irrelevant_question(state)
-                state = self.save_memory_data(state)
-                return state["final_response"]
-            
-            # 3. 서비스 분류
-            state = self.classify_service(state)
-            
-            # 4. 서비스 일관성 검사
-            state = self.check_final_service_consistency(state)
-            
-            if not state["service_consistent"]:
-                state = self.handle_service_inconsistency(state)
-                state = self.save_memory_data(state)
-                return state["final_response"]
-            
-            # 5. 세션 데이터 업데이트
-            state = self.update_session_data(state)
-            
-            # 6-7. 서비스 실행
-            if state["classified_service"] == "teacher":
-                state = self.teacher_app(state)
-                state = self.merge_teacher_result(state)
-            elif state["classified_service"] == "farmer":
-                state = self.execute_farmer(state)
-            
-            # 8. 메모리 데이터 저장
-            state = self.save_memory_data(state)
-            
-            # 9. 최종 응답 생성
-            state = self.finalize_response(state)
-            
-            return state["final_response"]
+            return final_state["final_response"]
             
         except Exception as e:
-            print(f"❌ 워크플로우 실행 실패: {e}")
+            print(f"❌ LangGraph 워크플로우 실행 실패: {e}")
             return f"❌ 시스템 오류가 발생했습니다: {e}"
     
     # 헬퍼 메서드들
@@ -438,20 +612,61 @@ class MainOrchestrator:
         if "error" in teacher_result:
             return f"❌ Teacher 실행 오류: {teacher_result['error']}"
         
-        llm_response = teacher_result.get("llm_response", "")
+        # 1. llm_response가 있으면 우선적으로 사용 (가장 자연스러운 응답)
+        llm_response = teacher_result.get("llm_response", "").strip()
         if llm_response:
+            print(f"📝 Teacher llm_response 사용: {llm_response[:100]}...")
             return llm_response
         
-        # 문제 생성 결과가 있는 경우
+        # 2. llm_response가 없으면 intent와 데이터에 따라 적절한 메시지 생성
+        intent = teacher_result.get("intent", "").lower()
         shared_data = teacher_result.get("shared", {})
         questions = shared_data.get("question", [])
+        answers = shared_data.get("answer", [])
+        explanations = shared_data.get("explanation", [])
         
-        if questions:
+        print(f"📝 Teacher intent 기반 응답 생성: {intent}")
+        
+        if intent == "generate" and questions:
             response = "✅ 문제가 생성되었습니다!\n\n"
             for i, question in enumerate(questions):
                 if question:
                     response += f"문제 {i+1}: {question[:100]}...\n"
             response += "\n답변을 입력하려면 '정답은 1,2,3' 형식으로 입력하세요."
+            return response
+        
+        elif intent == "solution" and questions and answers:
+            response = "✅ 문제 풀이가 완료되었습니다!\n\n"
+            for i, (question, answer, explanation) in enumerate(zip(questions, answers, explanations)):
+                if question and answer:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
+                    response += f"정답: {answer}\n"
+                    if explanation:
+                        response += f"해설: {explanation[:100]}...\n"
+                    response += "\n"
+            return response
+        
+        elif intent == "score" and questions and answers:
+            response = "✅ 채점이 완료되었습니다!\n\n"
+            for i, (question, answer) in enumerate(zip(questions, answers)):
+                if question and answer:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
+                    response += f"정답: {answer}\n\n"
+            return response
+        
+        elif intent == "analyze" and questions:
+            response = "✅ 문제 분석이 완료되었습니다!\n\n"
+            for i, question in enumerate(questions):
+                if question:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
+            return response
+        
+        elif questions:
+            # intent가 명확하지 않지만 문제가 있는 경우
+            response = "✅ Teacher 서비스가 실행되었습니다!\n\n"
+            for i, question in enumerate(questions):
+                if question:
+                    response += f"문제 {i+1}: {question[:100]}...\n"
             return response
         
         return "✅ Teacher 서비스가 실행되었습니다."
@@ -461,10 +676,14 @@ class MainOrchestrator:
         if "error" in farmer_result:
             return f"❌ Farmer 실행 오류: {farmer_result['error']}"
         
-        output = farmer_result.get("output", "")
+        # 1. output이 있으면 우선적으로 사용 (가장 자연스러운 응답)
+        output = farmer_result.get("output", "").strip()
         if output:
+            print(f"📝 Farmer output 사용: {output[:100]}...")
             return output
         
+        # 2. output이 없으면 기본 메시지
+        print("📝 Farmer 기본 응답 생성")
         return "✅ Farmer 서비스가 실행되었습니다."
     
     # Redis 관련 메서드들
@@ -709,6 +928,12 @@ def main():
     
     # 오케스트레이터 초기화
     orchestrator = MainOrchestrator(args.user_id, args.chat_id)
+    
+    # 그래프 시각화 생성 (선택적)
+    try:
+        orchestrator.visualize_graph("supervisor_langgraph.png")
+    except Exception as e:
+        print(f"⚠️ 그래프 시각화 실패 (계속 진행): {e}")
     
     if args.query:
         # 한 번만 실행

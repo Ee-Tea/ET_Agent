@@ -35,19 +35,53 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.graph import StateGraph, END
 
-# ===== (신규) RAGAS 관련 Import (0.3.x 호환) =====
+# ===== RAGAS lazy import 유틸 =====
 _HAS_RAGAS = False
-try:
-    from ragas import evaluate, SingleTurnSample
-    from ragas.metrics import ResponseRelevancy, Faithfulness
-    from ragas.metrics import LLMContextPrecisionWithoutReference
-    from ragas.llms import LangchainLLMWrapper
-    from ragas.embeddings import LangchainEmbeddingsWrapper
-    # RAGAS 0.3.x에서는 직접 LangChain 객체를 전달
-    from datasets import Dataset
-    _HAS_RAGAS = True
-except ImportError as e:
-    print(f"   - ⚠️ RAGAS/의존성 임포트 실패: {e}")
+_RAGAS_ERR = None
+
+def _ragas_try_import():
+    """필요 시점에만 ragas 로드. 성공 시 _HAS_RAGAS True로 세팅."""
+    global _HAS_RAGAS, _RAGAS_ERR
+    if _HAS_RAGAS:
+        return True
+    try:
+        import ragas  # noqa: F401
+        _HAS_RAGAS = True
+        _RAGAS_ERR = None
+        return True
+    except Exception as e:
+        _HAS_RAGAS = False
+        _RAGAS_ERR = e
+        return False
+
+def _get_ragas_core():
+    """evaluate, SingleTurnSample, Dataset 반환"""
+    if not _ragas_try_import():
+        return None, None, None
+    from ragas import evaluate, SingleTurnSample  # type: ignore
+    try:
+        from datasets import Dataset  # type: ignore
+    except Exception:
+        Dataset = None
+    return evaluate, SingleTurnSample, Dataset
+
+def _get_ragas_metrics():
+    """ResponseRelevancy, Faithfulness, LLMContextPrecisionWithoutReference 반환"""
+    if not _ragas_try_import():
+        return None, None, None
+    from ragas.metrics import (  # type: ignore
+        ResponseRelevancy, Faithfulness, LLMContextPrecisionWithoutReference
+    )
+    return ResponseRelevancy, Faithfulness, LLMContextPrecisionWithoutReference
+
+def _get_ragas_wrappers():
+    """LangchainLLMWrapper, LangchainEmbeddingsWrapper 반환"""
+    if not _ragas_try_import():
+        return None, None
+    from ragas.llms import LangchainLLMWrapper  # type: ignore
+    from ragas.embeddings import LangchainEmbeddingsWrapper  # type: ignore
+    return LangchainLLMWrapper, LangchainEmbeddingsWrapper
+
 
 # torch는 선택 사항
 try:
@@ -106,6 +140,7 @@ def _init_ragas_backend():
         )
         _RAGAS_LLM = llm
         _RAGAS_EMB = emb
+        LangchainLLMWrapper, LangchainEmbeddingsWrapper = _get_ragas_wrappers()
         
         # RAGAS Wrapper 설정 (SalesRAGAS 방식)
         global _RAGAS_LLM_WRAPPER, _RAGAS_EMB_WRAPPER
@@ -638,6 +673,9 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     if _HAS_RAGAS and _RAGAS_LLM_WRAPPER:
         try:
             print("   - 📊 RAGAS 검색 품질 평가 중...")
+            LLMContextPrecisionWithoutReference = _get_ragas_metrics().LLMContextPrecisionWithoutReference
+            SingleTurnSample = _get_ragas_core().SingleTurnSample
+
 
             # 컨텍스트 최적화
             max_context_length = 2500
@@ -713,6 +751,10 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
 
     try:
         print("   - 📊 RAGAS 답변 품질 평가 중...")
+        Faithfulness = _get_ragas_metrics().Faithfulness
+        ResponseRelevancy = _get_ragas_metrics().ResponseRelevancy
+        SingleTurnSample = _get_ragas_core().SingleTurnSample
+        
         
         scores = {}
         

@@ -19,10 +19,18 @@ from langgraph.graph import StateGraph, END
 from langchain_tavily import TavilySearch
 from langchain.retrievers import EnsembleRetriever
 
-# RAGAS 라이브러리
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
 from datasets import Dataset
+# RAGAS 라이브러리
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
+    return faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
+
 
 # --- 1. 환경 설정 ---
 load_dotenv()
@@ -310,6 +318,7 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     주어진 질문, 답변, 맥락으로 RAGAS 평가를 실행합니다.
     """
     print("\n--- RAGAS 자동 평가 시작 ---")
+    faithfulness, answer_relevancy , ContextUtilization, LLMContextPrecisionWithoutReference = get_ragas_metrics()
     data = {
         'question': [question],
         'answer': [answer],
@@ -325,7 +334,7 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     ]
 
     try:
-        result = evaluate(
+        result = evaluate_with_ragas(
             dataset=dataset,
             metrics=metrics_to_evaluate,
             llm=ragas_llm,

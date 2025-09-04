@@ -12,7 +12,7 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 # teacher_graph 모듈 임포트
-from teacher_graph import create_app, TeacherState
+from .teacher_graph import create_app, TeacherState
 
 # 페이지 설정
 st.set_page_config(

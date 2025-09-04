@@ -45,7 +45,7 @@ from teacher_nodes import (
 from file_path_mapper import FilePathMapper
 from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
-from teacher_util import (
+from .teacher_util import (
     ensure_shared, validate_qas, safe_execute,
     has_questions, has_solution_answers, has_score, has_files_to_preprocess,
     extract_image_paths, extract_problems_from_images, SupportsExecute

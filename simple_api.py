@@ -5,17 +5,20 @@ ET-Agent FastAPI 서버
 
 import os
 import sys
+import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
+import glob
 
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 # ET-Agent 메인 오케스트레이터 import
 try:
-    from main import MainOrchestrator
+    from supervisor import MainOrchestrator    
     ET_AGENT_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: ET-Agent import failed: {e}")
@@ -23,6 +26,11 @@ except ImportError as e:
 
 # 전역 변수
 orchestrator = None
+pdf_generation_status = {
+    "is_generating": False,
+    "last_generated_time": None,
+    "generated_files": []
+}
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -107,6 +115,10 @@ async def chat(request: ChatRequest):
     
     # ET-Agent가 사용 가능한 경우
     if orchestrator and ET_AGENT_AVAILABLE:
+        # PDF 생성 상태 초기화
+        pdf_generation_status["is_generating"] = True
+        pdf_generation_status["generated_files"] = []
+        
         try:
             # ET-Agent 상태 초기화 (MainState 구조에 맞게)
             initial_state = {
@@ -134,6 +146,31 @@ async def chat(request: ChatRequest):
             }
             result = orchestrator.graph.invoke(initial_state, config=config)
             
+            # PDF 생성 상태 업데이트
+            pdf_generation_status["is_generating"] = False
+            pdf_generation_status["last_generated_time"] = time.time()
+            
+            # 새로 생성된 PDF 파일 확인
+            import glob
+            current_time = time.time()
+            pdf_dirs = [
+                "teacher/agents/solution/pdf_outputs",
+                "teacher/pdf_outputs", 
+                "farmer/pdf_outputs"
+            ]
+            
+            new_pdfs = []
+            for pdf_dir in pdf_dirs:
+                if os.path.exists(pdf_dir):
+                    files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
+                    for file_path in files:
+                        file_created_time = os.path.getctime(file_path)
+                        # 최근 5분 내에 생성된 파일만 포함
+                        if file_created_time >= current_time - 300:
+                            new_pdfs.append(os.path.basename(file_path))
+            
+            pdf_generation_status["generated_files"] = new_pdfs
+            
             # 응답 구성
             response_text = result.get("final_response", "응답을 생성할 수 없습니다.")
             
@@ -146,6 +183,9 @@ async def chat(request: ChatRequest):
             
         except Exception as e:
             print(f"ET-Agent 실행 오류: {e}")
+            # 오류 발생 시 PDF 생성 상태 초기화
+            pdf_generation_status["is_generating"] = False
+            pdf_generation_status["generated_files"] = []
             # 오류 발생 시 폴백 응답
             response_text = f"죄송합니다. ET-Agent 처리 중 오류가 발생했습니다: {str(e)}"
             return ChatResponse(
@@ -224,6 +264,148 @@ async def chat_farmer(request: ChatRequest):
         confidence=0.9,
         session_id=f"{request.user_id}:{request.chat_id}"
     )
+
+@app.get("/pdf-status")
+async def get_pdf_status():
+    """PDF 생성 상태 조회"""
+    return {
+        "is_generating": pdf_generation_status["is_generating"],
+        "last_generated_time": pdf_generation_status["last_generated_time"],
+        "generated_files": pdf_generation_status["generated_files"]
+    }
+
+@app.get("/pdfs")
+async def list_pdfs():
+    """최근 생성된 PDF 파일 목록 조회 (최근 1시간 내)"""
+    try:
+        import time
+        current_time = time.time()
+        one_hour_ago = current_time - 3600  # 1시간 전
+        
+        # PDF 파일들이 저장된 디렉토리들 확인
+        pdf_dirs = [
+            "teacher/agents/solution/pdf_outputs",
+            "teacher/pdf_outputs", 
+            "farmer/pdf_outputs"
+        ]
+        
+        recent_pdf_files = []
+        for pdf_dir in pdf_dirs:
+            if os.path.exists(pdf_dir):
+                files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
+                for file_path in files:
+                    file_created_time = os.path.getctime(file_path)
+                    # 최근 1시간 내에 생성된 파일만 포함
+                    if file_created_time >= one_hour_ago:
+                        file_name = os.path.basename(file_path)
+                        file_size = os.path.getsize(file_path)
+                        recent_pdf_files.append({
+                            "filename": file_name,
+                            "path": file_path,
+                            "size": file_size,
+                            "created": file_created_time
+                        })
+        
+        # 생성 시간순으로 정렬 (최신순)
+        recent_pdf_files.sort(key=lambda x: x["created"], reverse=True)
+        
+        return {
+            "pdfs": recent_pdf_files,
+            "count": len(recent_pdf_files),
+            "filter": "최근 1시간 내 생성된 PDF만 표시"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF 목록 조회 실패: {str(e)}")
+
+@app.get("/recent-questions")
+async def get_recent_questions(limit: int = 10):
+    """최근 생성된 문제들 조회"""
+    print(f"🔍 [API] /recent-questions 호출됨, limit={limit}")
+    
+    try:
+        print(f"🔍 [API] orchestrator 상태 확인 중...")
+        if not orchestrator:
+            print("❌ [API] orchestrator가 None입니다!")
+            return {"questions": [], "message": "MainOrchestrator가 초기화되지 않았습니다."}
+        
+        print(f"✅ [API] orchestrator 존재: {type(orchestrator).__name__}")
+        
+        # 디버깅 정보 추가
+        debug_info = {
+            "orchestrator_type": type(orchestrator).__name__,
+            "has_memory": hasattr(orchestrator, 'memory'),
+            "memory_type": type(orchestrator.memory).__name__ if hasattr(orchestrator, 'memory') else "None"
+        }
+        
+        print(f"🔍 [API] 디버깅 정보: {debug_info}")
+        
+        print(f"🔍 [API] MainOrchestrator.load_recent_questions() 호출 중...")
+        # MainOrchestrator에서 최근 문제들 불러오기
+        recent_questions = orchestrator.load_recent_questions(limit=limit)
+        print(f"🔍 [API] load_recent_questions 결과: {len(recent_questions)}개 문제")
+        print(f"🔍 [API] recent_questions 상세: {recent_questions}")
+        
+        # Redis에서 불러온 문제가 없으면 빈 배열 유지
+        if not recent_questions:
+            print("📝 [API] Redis에 저장된 문제가 없습니다.")
+            debug_info["redis_empty"] = True
+        
+        print(f"🔍 [API] 프론트엔드 형식으로 변환 시작...")
+        # 프론트엔드에서 필요한 형태로 변환
+        formatted_questions = []
+        for i, q in enumerate(recent_questions, 1):
+            print(f"🔍 [API] 문제 {i} 변환 중: {q.get('question', '')[:50]}...")
+            formatted_question = {
+                "id": i,
+                "question": q.get("question", ""),
+                "options": q.get("options", []),
+                "correctAnswer": q.get("answer", ""),
+                "explanation": q.get("explanation", ""),
+                "subject": q.get("subject", "unknown"),
+                "created_at": q.get("created_at", 0)
+            }
+            formatted_questions.append(formatted_question)
+            print(f"✅ [API] 문제 {i} 변환 완료: {formatted_question}")
+        
+        result = {
+            "questions": formatted_questions,
+            "count": len(formatted_questions),
+            "message": f"최근 {len(formatted_questions)}개 문제를 불러왔습니다.",
+            "debug": debug_info
+        }
+        
+        print(f"✅ [API] 최종 결과: {result}")
+        return result
+        
+    except Exception as e:
+        print(f"❌ [API] 오류 발생: {str(e)}")
+        import traceback
+        print(f"❌ [API] 스택 트레이스: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"최근 문제 조회 실패: {str(e)}")
+
+@app.get("/pdf/{filename}")
+async def download_pdf(filename: str):
+    """PDF 파일 다운로드"""
+    try:
+        # PDF 파일들이 저장된 디렉토리들에서 파일 찾기
+        pdf_dirs = [
+            "teacher/agents/solution/pdf_outputs",
+            "teacher/pdf_outputs", 
+            "farmer/pdf_outputs"
+        ]
+        
+        for pdf_dir in pdf_dirs:
+            file_path = os.path.join(pdf_dir, filename)
+            if os.path.exists(file_path):
+                return FileResponse(
+                    path=file_path,
+                    filename=filename,
+                    media_type="application/pdf"
+                )
+        
+        raise HTTPException(status_code=404, detail="PDF 파일을 찾을 수 없습니다.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF 다운로드 실패: {str(e)}")
 
 if __name__ == "__main__":
     print("🚀 ET-Agent Simple API 서버 시작")

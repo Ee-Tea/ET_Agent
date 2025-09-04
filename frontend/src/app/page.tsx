@@ -89,6 +89,16 @@ function YourMainContent({
 }) {
   // 에이전트 상태는 로컬 상태로 관리
   // useCoAgent는 제거하고 필요시 다시 추가
+  
+  // 문제 관련 상태
+  const [parsedQuestions, setParsedQuestions] = useState<Array<{
+    id: number;
+    question: string;
+    options: string[];
+    correctAnswer?: string;
+    explanation?: string;
+  }>>([]);
+  const [isLoadingQuestions, setIsLoadingQuestions] = useState(false);
 
   // 테스트 세션 생성 함수 (AI 동적 생성)
   const createTestSession = async (type: string, questionCount: number, difficulty: string, userLevel: string) => {
@@ -147,6 +157,34 @@ function YourMainContent({
     }
   };
 
+  // 최근 생성된 문제들을 불러오는 함수
+  const fetchRecentQuestions = async () => {
+    setIsLoadingQuestions(true);
+    try {
+      const response = await fetch(`http://localhost:8000/recent-questions`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setParsedQuestions(data.questions || []);
+        console.log("✅ 최근 문제 조회 성공:", data);
+        console.log("🔍 디버깅 정보:", data.debug);
+      } else {
+        console.error("❌ 최근 문제 조회 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ 최근 문제 조회 오류:", error);
+      // 폴백: 빈 배열로 설정
+      setParsedQuestions([]);
+    } finally {
+      setIsLoadingQuestions(false);
+    }
+  };
+
   // 사용자 응답 분석 함수
   const analyzeUserResponse = async (sessionId: string, questionId: number, userAnswer: string, responseTime: number) => {
     try {
@@ -190,6 +228,11 @@ function YourMainContent({
     }
   };
 
+  // 컴포넌트 마운트 시 최근 문제들 불러오기
+  useEffect(() => {
+    fetchRecentQuestions();
+  }, []);
+
   // 날씨 카드 렌더링 함수
   const renderWeatherCard = (location: string) => {
     return <WeatherCard location={location} themeColor={themeColor} />;
@@ -199,56 +242,68 @@ function YourMainContent({
     <div
       className="h-screen w-screen bg-gray-200 flex transition-colors duration-300"
     >
-            {/* 왼쪽: Proverbs 콘텐츠 또는 테스트 모드 */}
-      <div className="flex-1 flex justify-center items-center p-8">
-        {!currentSessionId ? (
-          // 일반 모드 - 메인 페이지
-          <div className="bg-gray-100/40 backdrop-blur-md p-8 rounded-2xl shadow-xl max-w-2xl w-full border border-gray-300">
-            <div className="text-center">
-              <p className="text-gray-600 text-sm">
-                오른쪽 채팅창에서 "소프트웨어 설계 3문제 만들어줘"라고 입력하면<br/>
-                AI가 생성한 문제 테스트를 시작할 수 있습니다!
-              </p>
-              {testSessions.length > 0 && (
-                <div className="mt-4 p-4 bg-blue-50 rounded-lg">
-                  <p className="text-blue-800 text-sm">
-                    최근 AI 응답: {testSessions[testSessions.length - 1]?.metadata?.aiResponse?.substring(0, 100)}...
-                  </p>
+      {/* 왼쪽: 문제 표시 영역 */}
+      <div className="w-3/5 flex flex-col p-4">
+        <div className="bg-white rounded-lg shadow-lg h-full flex flex-col">
+          <div className="p-4 border-b border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-800">📝 최근 생성된 문제</h3>
+            <p className="text-sm text-gray-600">AI가 생성한 최신 문제들을 확인하세요</p>
+          </div>
+          
+          {isLoadingQuestions ? (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                <p className="text-gray-600">문제를 파싱하는 중...</p>
+              </div>
+            </div>
+          ) : parsedQuestions.length > 0 ? (
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {parsedQuestions.map((question) => (
+                <div key={question.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  <div className="mb-3">
+                    <span className="inline-block bg-blue-100 text-blue-800 text-xs font-medium px-2 py-1 rounded-full mr-2">
+                      문제 {question.id}
+                    </span>
+                    <p className="text-gray-800 font-medium mt-2">{question.question}</p>
+                  </div>
+                  
+                  <div className="space-y-2">
+                    {Array.isArray(question.options) && question.options.map((option, index) => (
+                      <label key={index} className="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-2 rounded">
+                        <input
+                          type="radio"
+                          name={`question-${question.id}`}
+                          value={option}
+                          className="text-blue-600 focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-700">{option}</span>
+                      </label>
+                    ))}
+                    {!Array.isArray(question.options) && (
+                      <p className="text-sm text-gray-500">보기 정보가 없습니다.</p>
+                    )}
+                  </div>
+                  
                 </div>
-              )}
+              ))}
             </div>
-          </div>
-        ) : (
-          // 테스트 모드 - 20문제 풀기 폼
-          <div className="w-full h-full flex flex-col">
-            <div className="text-center mb-6">
-              <h1 className="text-3xl font-bold text-gray-800 mb-2">📝 정처기 문제 테스트</h1>
-              <p className="text-gray-600">소프트웨어 설계 관련 20문제를 풀어보세요!</p>
+          ) : (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center text-gray-500">
+                <p className="text-lg mb-2">📝</p>
+                <p>아직 생성된 문제가 없습니다</p>
+                <p className="text-sm mt-1">채팅에서 "소프트웨어 설계 3문제 만들어줘"라고 입력해보세요</p>
+              </div>
             </div>
-            
-            {/* 문제 목록 - 전체 높이 사용 */}
-            <div className="flex-1 overflow-y-auto pr-4">
-              
-            </div>
-            
-            {/* 전체 답안 제출 버튼 */}
-            <div className="text-center mt-6">
-              <button className="bg-green-500 hover:bg-green-600 text-white px-8 py-4 rounded-lg font-medium transition-colors shadow-lg text-lg mr-4">
-                전체 답안 제출하기
-              </button>
-              <button 
-                onClick={() => setCurrentSessionId(null)}
-                className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-medium transition-colors shadow-lg"
-              >
-                메인으로 돌아가기
-              </button>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
+
+
       {/* 오른쪽: 채팅 영역 */}
-      <div className="w-[500px] bg-white shadow-xl p-8 relative">
+      <div className="w-2/5 bg-white shadow-xl p-8 relative">
         <div className="text-center mb-8">
           <h3 className="text-2xl font-bold text-gray-800 mb-4">👋 안녕하세요! 이장님과 선생님입니다.</h3>
           <p className="text-gray-600 mb-6">이 에이전트는 사용자의 질문을 파악하여 정처기 및 농사관련 질문에 답변을 할수있습니다.</p>
@@ -299,6 +354,27 @@ function ChatInterface() {
     last_generated_time: null,
     generated_files: []
   });
+
+  // 최근 생성된 문제들을 불러오는 함수
+  const fetchRecentQuestions = async () => {
+    try {
+      const response = await fetch(`http://localhost:8000/recent-questions`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log("✅ 최근 문제 조회 성공:", data);
+      } else {
+        console.error("❌ 최근 문제 조회 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ 최근 문제 조회 오류:", error);
+    }
+  };
 
   // 백엔드 연결 테스트 함수
   const testBackendConnection = async () => {
@@ -440,13 +516,16 @@ function ChatInterface() {
       const data = await response.json();
       const assistantMessage = { role: "assistant", content: data.response || "응답을 생성할 수 없습니다." };
       setMessages(prev => [...prev, assistantMessage]);
+      
+      // LLM 응답 완료 후 문제 목록 새로고침
+      setTimeout(() => fetchRecentQuestions(), 1000);  // 1초 후 문제 목록 새로고침
     } catch (error) {
       console.error("백엔드 API 호출 실패:", error);
       const errorMessage = { role: "assistant", content: "죄송합니다. 백엔드 서버에 연결할 수 없습니다." };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
-      // 메시지 전송 후 PDF 생성 상태 체크 (여러 번 체크)
+      // 메시지 전송 후 PDF 생성 상태 체크
       setTimeout(() => checkPdfGenerationStatus(), 1000);  // 1초 후 첫 번째 체크
       setTimeout(() => checkPdfGenerationStatus(), 3000);  // 3초 후 두 번째 체크
       setTimeout(() => checkPdfGenerationStatus(), 5000);  // 5초 후 세 번째 체크
@@ -616,7 +695,7 @@ function ChatInterface() {
                 onChange={(e) => setMessage(e.target.value)}
                 onKeyPress={handleKeyPress}
                 placeholder="질문을 입력하세요..."
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold"
                 disabled={isLoading || isBackendConnected !== true}
               />
               <button

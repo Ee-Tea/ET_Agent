@@ -18,7 +18,7 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 # ET-Agent 메인 오케스트레이터 import
 try:
-    from main import MainOrchestrator
+    from supervisor import MainOrchestrator    
     ET_AGENT_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: ET-Agent import failed: {e}")
@@ -316,6 +316,72 @@ async def list_pdfs():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF 목록 조회 실패: {str(e)}")
+
+@app.get("/recent-questions")
+async def get_recent_questions(limit: int = 10):
+    """최근 생성된 문제들 조회"""
+    print(f"🔍 [API] /recent-questions 호출됨, limit={limit}")
+    
+    try:
+        print(f"🔍 [API] orchestrator 상태 확인 중...")
+        if not orchestrator:
+            print("❌ [API] orchestrator가 None입니다!")
+            return {"questions": [], "message": "MainOrchestrator가 초기화되지 않았습니다."}
+        
+        print(f"✅ [API] orchestrator 존재: {type(orchestrator).__name__}")
+        
+        # 디버깅 정보 추가
+        debug_info = {
+            "orchestrator_type": type(orchestrator).__name__,
+            "has_memory": hasattr(orchestrator, 'memory'),
+            "memory_type": type(orchestrator.memory).__name__ if hasattr(orchestrator, 'memory') else "None"
+        }
+        
+        print(f"🔍 [API] 디버깅 정보: {debug_info}")
+        
+        print(f"🔍 [API] MainOrchestrator.load_recent_questions() 호출 중...")
+        # MainOrchestrator에서 최근 문제들 불러오기
+        recent_questions = orchestrator.load_recent_questions(limit=limit)
+        print(f"🔍 [API] load_recent_questions 결과: {len(recent_questions)}개 문제")
+        print(f"🔍 [API] recent_questions 상세: {recent_questions}")
+        
+        # Redis에서 불러온 문제가 없으면 빈 배열 유지
+        if not recent_questions:
+            print("📝 [API] Redis에 저장된 문제가 없습니다.")
+            debug_info["redis_empty"] = True
+        
+        print(f"🔍 [API] 프론트엔드 형식으로 변환 시작...")
+        # 프론트엔드에서 필요한 형태로 변환
+        formatted_questions = []
+        for i, q in enumerate(recent_questions, 1):
+            print(f"🔍 [API] 문제 {i} 변환 중: {q.get('question', '')[:50]}...")
+            formatted_question = {
+                "id": i,
+                "question": q.get("question", ""),
+                "options": q.get("options", []),
+                "correctAnswer": q.get("answer", ""),
+                "explanation": q.get("explanation", ""),
+                "subject": q.get("subject", "unknown"),
+                "created_at": q.get("created_at", 0)
+            }
+            formatted_questions.append(formatted_question)
+            print(f"✅ [API] 문제 {i} 변환 완료: {formatted_question}")
+        
+        result = {
+            "questions": formatted_questions,
+            "count": len(formatted_questions),
+            "message": f"최근 {len(formatted_questions)}개 문제를 불러왔습니다.",
+            "debug": debug_info
+        }
+        
+        print(f"✅ [API] 최종 결과: {result}")
+        return result
+        
+    except Exception as e:
+        print(f"❌ [API] 오류 발생: {str(e)}")
+        import traceback
+        print(f"❌ [API] 스택 트레이스: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"최근 문제 조회 실패: {str(e)}")
 
 @app.get("/pdf/{filename}")
 async def download_pdf(filename: str):

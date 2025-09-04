@@ -1,11 +1,13 @@
 # teacher/agents/TestGenerator/milvus_store.py
 import json
+import os
 import hashlib
 from typing import Dict, Any, List
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
 from pymilvus import connections, utility
+# from teacher.agents.milvus_utils import connect_milvus_fallback
 
 
 def _build_embeddings() -> HuggingFaceEmbeddings:
@@ -18,9 +20,9 @@ def _build_embeddings() -> HuggingFaceEmbeddings:
 
 
 def _connect_milvus(host: str, port: str, alias: str = "default") -> None:
-    if alias in connections.list_connections():
-        connections.disconnect(alias=alias)
-    connections.connect(alias=alias, host=host, port=port)
+    used = connect_milvus_fallback(hosts=[host], port=port, alias=alias)
+    if not used:
+        raise RuntimeError("Milvus 연결 불가 (fallback 모두 실패)")
 
 
 def _make_docs(questions: List[Dict[str, Any]]) -> List[Document]:
@@ -83,8 +85,9 @@ def load_questions_from_json(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     _connect_milvus(host, port, alias="default")
 
-    index_params = {"index_type": "AUTOINDEX", "metric_type": "IP"}
-    search_params = {"metric_type": "IP"}  # 필요 시 {"params": {"ef": 64}} 등 추가
+    # 컬렉션이 L2로 구축된 환경과 호환되도록 기본 메트릭을 L2로 설정
+    index_params = {"index_type": "AUTOINDEX", "metric_type": "L2"}
+    search_params = {"metric_type": "L2"}  # 필요 시 {"params": {"ef": 64}} 등 추가
 
     # 3) 컬렉션 관리: 드롭 or 생성/추가
     if drop_old and utility.has_collection(collection_name):

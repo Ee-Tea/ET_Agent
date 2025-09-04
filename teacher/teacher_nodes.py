@@ -346,8 +346,8 @@ def parse_generator_input(user_question: str) -> dict:
 # ========== 라우팅 함수들 ==========
 def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
     """solution 노드 라우팅 - 항상 preprocess를 먼저 거침"""
-    from teacher_util import has_questions, extract_image_paths
-    from pdf_preprocessor import extract_pdf_paths
+    from .teacher_util import has_questions, extract_image_paths
+    from .pdf_preprocessor import extract_pdf_paths
     
     print(f"🔍 [route_solution] 상태 확인:")
     print(f"   user_query: {state.get('user_query', '')}")
@@ -398,7 +398,7 @@ def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def route_score(state: Dict[str, Any]) -> Dict[str, Any]:
     """score 노드 라우팅"""
-    from teacher_util import has_solution_answers
+    from .teacher_util import has_solution_answers
     
     next_node = "score" if has_solution_answers(state) else "mark_after_solution_score"
     new_state = {**state}
@@ -408,7 +408,7 @@ def route_score(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def route_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
     """analysis 노드 라우팅"""
-    from teacher_util import has_score
+    from .teacher_util import has_score
     
     next_node = "analysis" if has_score(state) else "mark_after_score_analysis"
     new_state = {**state}
@@ -442,12 +442,13 @@ def mark_after_score_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
 def post_generator_route(state: Dict[str, Any]) -> str:
     """generator 실행 후 다음 노드 결정"""
     nxt = ((state.get("routing") or {}).get("after_generator") or "").strip()
-    return nxt if nxt else "generate_problem_pdf"  # 기본적으로 문제집 PDF 생성
+    return nxt if nxt else "generate_problem_pdf"
+    # return nxt if nxt else "await_output_mode"  # 기본: PDF vs Form 선택 대기 노드로 이동
 
 def post_solution_route(state: Dict[str, Any]) -> str:
     """solution 실행 후 다음 노드 결정"""
     nxt = ((state.get("routing") or {}).get("after_solution") or "").strip()
-    return nxt if nxt else "generate_answer_pdf"  # 기본적으로 답안집 PDF 생성
+    return nxt if nxt else "persist_state"  # 기본적으로 persist_state로 이동
 
 def post_score_route(state: Dict[str, Any]) -> str:
     """score 실행 후 다음 노드 결정"""
@@ -533,7 +534,7 @@ def generate_user_response(state: Dict[str, Any]) -> str:
 실행된 작업들: {', '.join(executed_tasks) if executed_tasks else '없음'}
 주요 결과: {'; '.join(results_summary) if results_summary else '결과 없음'}
 
-위 정보를 바탕으로 사용자에게 친근하고 도움이 되는 답변을 해주세요."""
+위 정보를 바탕으로 실행된 내용을 요약해서 친절하게 알려주세요."""
 
     try:
         response = client.chat.completions.create(

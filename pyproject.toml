@@ -36,6 +36,7 @@ dependencies = [
     "any>=0.0.2",
     "groq>=0.31.0",
     "langchain-groq>=0.3.7",
+    "langchain-tavily>=0.1.0",
     "graphviz>=0.21",
     "groq>=0.31.0",
     "docling>=2.43.0",
@@ -47,6 +48,7 @@ dependencies = [
     "langchain-teddynote>=0.4.4",
     "datasets>=4.0.0",
     "ragas>=0.3.2",
+    "matplotlib>=3.10.5",
 ]
 
 [build-system]

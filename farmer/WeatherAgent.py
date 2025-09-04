@@ -98,7 +98,7 @@ USE_KMA_LIVE = os.getenv("USE_KMA_LIVE", "true").lower() in ("1", "true", "yes")
 FORCE_DISABLE_KMA_LIVE = False
 
 # 통합 지역코드 CSV 설정
-UNIFIED_REGIONS_CSV = os.getenv("UNIFIED_REGIONS_CSV", "all_regions_combined.csv")
+UNIFIED_REGIONS_CSV = os.getenv("UNIFIED_REGIONS_CSV", "farmer/all_regions_combined.csv")
 
 TAVILY_API_KEY=REDACTED("TAVILY_API_KEY")
 TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))

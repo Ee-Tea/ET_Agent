@@ -7,7 +7,15 @@
 - 2차 검증 노드 제거
 - 예보관 톤(개요/상세/영향-위험도/권고) 프롬프트
 - 인터넷 연결 상태 자동 확인
+"""
 
+# 경고 메시지 필터링
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*HuggingFaceEmbeddings.*")
+warnings.filterwarnings("ignore", message=".*resume_download.*")
+"""
 .env 설정:
   WHEATHER_API_KEY_HUB=REDACTED     # (필수) 기상청 API 키
   KMA_TIMEOUT=30               # (선택) API 타임아웃 초 (기본값: 30초, 타임아웃 오류 시 증가 권장)
@@ -26,6 +34,8 @@ import json
 import csv
 import time
 import socket
+import asyncio
+import gc
 from typing import TypedDict, Optional, Any, Dict, List, Tuple
 from datetime import datetime, timedelta
 from operator import itemgetter
@@ -438,14 +448,9 @@ def safe_api_call(func, *args, **kwargs):
         return None
 
 def embed_texts_parallel(texts: List[str], batch_size: int = BATCH_SIZE) -> np.ndarray:
-    """병렬로 임베딩 계산 (안전한 버전)"""
-    # 병렬 처리 비활성화하거나 배치 크기가 작으면 순차 처리
-    if not ENABLE_PARALLEL_PROCESSING or len(texts) < batch_size:
-        return embed_texts(texts)
-    
-    # 간단하게 순차 처리로 폴백 (임베딩 모델의 thread-safety 문제 때문)
-    print("   - ℹ️ 임베딩 순차 처리로 폴백")
-    return embed_texts(texts)
+    """병렬로 임베딩 계산 (비동기 동적 배치 처리 버전)"""
+    # 비동기 임베딩 사용 (GPU 메모리 기반 동적 배치)
+    return embed_texts_async_wrapper(texts)
 
 def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
     """병렬로 날씨 데이터 가져오기"""
@@ -794,12 +799,337 @@ def summarize_region_alert(q: str, live_docs: List[Dict[str, str]], question_dat
     if cmd: bits.append(f"(명령: {cmd})")
     return "[LIVE_STATUS] " + " ".join(bits)
 
-# =========[ 임베딩 ]=========
+# =========[ GPU 메모리 기반 동적 배치 임베딩 처리 ]=========
 _text_embedder = SentenceTransformer(EMBED_MODEL_NAME)
+BATCH_EMBEDDING_SIZE = int(os.getenv("BATCH_EMBEDDING_SIZE", "100"))
+MIN_BATCH_SIZE = int(os.getenv("MIN_BATCH_SIZE", "10"))
+MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "500"))
+GPU_MEMORY_THRESHOLD = float(os.getenv("GPU_MEMORY_THRESHOLD", "0.8"))  # 80% 사용 시 배치 크기 감소
+GPU_CRITICAL_THRESHOLD = float(os.getenv("GPU_CRITICAL_THRESHOLD", "0.90"))  # 90% 사용 시 CPU 모드 전환
+ENABLE_DYNAMIC_BATCH = os.getenv("ENABLE_DYNAMIC_BATCH", "true").lower() in ("1", "true", "yes")
+ENABLE_ASYNC_EMBEDDING = os.getenv("ENABLE_ASYNC_EMBEDDING", "true").lower() in ("1", "true", "yes")
+ENABLE_AUTO_CPU_FALLBACK = os.getenv("ENABLE_AUTO_CPU_FALLBACK", "true").lower() in ("1", "true", "yes")
+
+# CPU 모드 전환 플래그
+_force_cpu_mode = False
+
+# GPU 메모리 모니터링
+try:
+    import torch
+    _HAS_TORCH = True
+    _GPU_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    _HAS_TORCH = False
+    _GPU_AVAILABLE = False
+
+def get_gpu_memory_usage() -> float:
+    """GPU 메모리 사용률을 반환합니다 (0.0 ~ 1.0)"""
+    if not _HAS_TORCH or not _GPU_AVAILABLE:
+        return 0.0
+    
+    try:
+        # GPU 메모리 사용량 확인
+        allocated = torch.cuda.memory_allocated()
+        reserved = torch.cuda.memory_reserved()
+        total = torch.cuda.get_device_properties(0).total_memory
+        
+        # 사용률 계산 (reserved 기준)
+        usage = reserved / total
+        return min(usage, 1.0)
+    except Exception as e:
+        print(f"   - ⚠️ GPU 메모리 확인 실패: {e}")
+        return 0.0
+
+def get_optimal_batch_size(text_lengths: List[int], base_batch_size: int = BATCH_EMBEDDING_SIZE) -> int:
+    """텍스트 길이와 GPU 메모리 상태를 고려하여 최적의 배치 크기를 계산합니다"""
+    if not ENABLE_DYNAMIC_BATCH:
+        return base_batch_size
+    
+    # GPU 메모리 사용률 확인
+    gpu_usage = get_gpu_memory_usage()
+    
+    # 평균 텍스트 길이 계산
+    avg_length = sum(text_lengths) / len(text_lengths) if text_lengths else 100
+    
+    # 메모리 사용률에 따른 배치 크기 조정
+    if gpu_usage > GPU_CRITICAL_THRESHOLD:
+        # 메모리 심각 부족 시 CPU 모드로 전환
+        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → CPU 모드로 전환 시도")
+        switch_to_cpu_mode()
+        # CPU 모드에서는 더 작은 배치 크기 사용
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.2))
+        print(f"   - 🔧 CPU 모드 배치 크기: {base_batch_size} → {adjusted_size}")
+    elif gpu_usage > GPU_MEMORY_THRESHOLD:
+        # 메모리 부족 시 배치 크기 대폭 감소
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.3))
+        print(f"   - 🔧 GPU 메모리 부족 ({gpu_usage:.1%}) → 배치 크기 감소: {base_batch_size} → {adjusted_size}")
+    elif gpu_usage > 0.6:
+        # 메모리 사용률 높음 → 배치 크기 감소
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.6))
+        print(f"   - 🔧 GPU 메모리 사용률 높음 ({gpu_usage:.1%}) → 배치 크기 조정: {base_batch_size} → {adjusted_size}")
+    elif avg_length > 500:
+        # 긴 텍스트 → 배치 크기 감소
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.7))
+        print(f"   - 🔧 긴 텍스트 감지 (평균 {avg_length:.0f}자) → 배치 크기 조정: {base_batch_size} → {adjusted_size}")
+    else:
+        # 메모리 여유 있음 → 배치 크기 유지 또는 증가
+        adjusted_size = min(MAX_BATCH_SIZE, int(base_batch_size * 1.2))
+        if adjusted_size != base_batch_size:
+            print(f"   - 🔧 메모리 여유 있음 ({gpu_usage:.1%}) → 배치 크기 증가: {base_batch_size} → {adjusted_size}")
+    
+    return max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, adjusted_size))
+
+def cleanup_gpu_memory():
+    """GPU 메모리를 정리합니다"""
+    if _HAS_TORCH and _GPU_AVAILABLE:
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("   - 🧹 GPU 메모리 정리 완료")
+        except Exception as e:
+            print(f"   - ⚠️ GPU 메모리 정리 실패: {e}")
+
+def switch_to_cpu_mode():
+    """GPU 메모리 부족 시 CPU 모드로 전환"""
+    global _text_embedder, _force_cpu_mode
+    
+    if _force_cpu_mode:
+        return  # 이미 CPU 모드
+        
+    print("   - 🚨 GPU 메모리 심각 부족 → CPU 모드로 전환")
+    
+    try:
+        # 기존 GPU 모델 해제
+        if _text_embedder:
+            del _text_embedder
+            cleanup_gpu_memory()
+        
+        # CPU 모드로 새 모델 로드
+        _text_embedder = SentenceTransformer(EMBED_MODEL_NAME, device='cpu')
+        _force_cpu_mode = True
+        
+        print("   - ✅ CPU 모드 전환 완료")
+        
+    except Exception as e:
+        print(f"   - ❌ CPU 모드 전환 실패: {e}")
+        _force_cpu_mode = False
+
+def check_and_switch_to_cpu_if_needed():
+    """GPU 메모리 상태를 확인하고 필요시 CPU 모드로 전환"""
+    global _force_cpu_mode
+    
+    if not ENABLE_AUTO_CPU_FALLBACK or _force_cpu_mode:
+        return
+    
+    gpu_usage = get_gpu_memory_usage()
+    
+    if gpu_usage > GPU_CRITICAL_THRESHOLD:
+        switch_to_cpu_mode()
+
+def embed_texts_batch(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) -> np.ndarray:
+    """
+    GPU 메모리 기반 동적 배치 크기로 텍스트 임베딩을 처리합니다.
+    """
+    if not texts:
+        return np.array([], dtype="float32").reshape(0, 768)
+    
+    # GPU 메모리 사용률 즉시 확인 및 CPU 모드 전환
+    gpu_usage = get_gpu_memory_usage()
+    if gpu_usage > GPU_CRITICAL_THRESHOLD and not _force_cpu_mode:
+        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → 즉시 CPU 모드로 전환")
+        switch_to_cpu_mode()
+    
+    # CPU 모드 전환 확인 (기존 로직)
+    check_and_switch_to_cpu_if_needed()
+    
+    # 텍스트 길이 분석
+    text_lengths = [len(text) for text in texts]
+    
+    # 동적 배치 크기 계산
+    optimal_batch_size = get_optimal_batch_size(text_lengths, batch_size)
+    
+    mode_text = "CPU 모드" if _force_cpu_mode else "GPU 모드"
+    print(f"   - 🔄 동적 배치 임베딩 처리 ({mode_text}): {len(texts)}개 텍스트를 {optimal_batch_size}개씩 처리")
+    
+    all_embs = []
+    for i in range(0, len(texts), optimal_batch_size):
+        batch = texts[i:i + optimal_batch_size]
+        batch_num = i//optimal_batch_size + 1
+        total_batches = (len(texts)-1)//optimal_batch_size + 1
+        
+        print(f"   - 🔄 배치 {batch_num}/{total_batches} 처리 중... ({len(batch)}개)")
+        
+        try:
+            # 배치 단위로 임베딩 계산
+            batch_embs = _text_embedder.encode(batch, show_progress_bar=False)
+            # L2 정규화 적용
+            batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+            all_embs.append(batch_embs)
+            print(f"   - ✅ 배치 {batch_num} 완료: {batch_embs.shape}")
+            
+            # GPU 메모리 정리 (매 배치마다, CPU 모드가 아닐 때만)
+            if not _force_cpu_mode and batch_num % 5 == 0:  # 5배치마다 정리
+                cleanup_gpu_memory()
+                
+        except Exception as e:
+            print(f"   - ❌ 배치 {batch_num} 실패: {e}")
+            
+            # GPU 메모리 부족으로 인한 오류인 경우 CPU 모드로 전환 시도
+            if not _force_cpu_mode and ("CUDA" in str(e) or "memory" in str(e).lower()):
+                print(f"   - 🚨 GPU 메모리 오류 감지 → CPU 모드로 전환 시도")
+                switch_to_cpu_mode()
+                
+                # CPU 모드로 재시도
+                try:
+                    batch_embs = _text_embedder.encode(batch, show_progress_bar=False)
+                    batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+                    all_embs.append(batch_embs)
+                    print(f"   - ✅ 배치 {batch_num} CPU 모드로 재시도 성공")
+                    continue
+                except Exception as cpu_e:
+                    print(f"   - ❌ CPU 모드 재시도도 실패: {cpu_e}")
+            
+            # GPU 메모리 정리 후 재시도
+            if not _force_cpu_mode:
+                cleanup_gpu_memory()
+            
+            try:
+                # 더 작은 배치로 재시도
+                smaller_batch_size = max(MIN_BATCH_SIZE, optimal_batch_size // 2)
+                print(f"   - 🔄 작은 배치로 재시도: {smaller_batch_size}개씩")
+                
+                for j in range(0, len(batch), smaller_batch_size):
+                    small_batch = batch[j:j + smaller_batch_size]
+                    small_embs = _text_embedder.encode(small_batch, show_progress_bar=False)
+                    small_embs = np.array([l2_normalize(e) for e in small_embs], dtype="float32")
+                    all_embs.append(small_embs)
+                    
+                print(f"   - ✅ 배치 {batch_num} 재시도 성공")
+            except Exception as retry_e:
+                print(f"   - ❌ 배치 {batch_num} 재시도도 실패: {retry_e}")
+                # 실패한 배치에 대해 빈 임베딩 추가
+                empty_emb = np.zeros((len(batch), 768), dtype="float32")
+                all_embs.append(empty_emb)
+    
+    # 모든 배치 결과 합치기
+    if all_embs:
+        final_embs = np.vstack(all_embs)
+        print(f"   - ✅ 동적 배치 임베딩 완료: {final_embs.shape}")
+        
+        # 최종 GPU 메모리 정리 (CPU 모드가 아닐 때만)
+        if not _force_cpu_mode:
+            cleanup_gpu_memory()
+        
+        return final_embs
+    else:
+        print("   - ❌ 모든 배치 임베딩 실패")
+        return np.zeros((len(texts), 768), dtype="float32")
+
+async def embed_texts_batch_async(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) -> np.ndarray:
+    """
+    비동기 배치 단위로 텍스트 임베딩을 처리합니다.
+    """
+    if not texts:
+        return np.array([], dtype="float32").reshape(0, 768)
+    
+    # 텍스트 길이 분석
+    text_lengths = [len(text) for text in texts]
+    
+    # 동적 배치 크기 계산
+    optimal_batch_size = get_optimal_batch_size(text_lengths, batch_size)
+    
+    print("   - 🔄 비동기 배치 처리 중...")
+    
+    # 비동기 배치 처리
+    semaphore = asyncio.Semaphore(2)  # 최대 2개 배치 동시 처리
+    
+    async def process_batch_async(batch: List[str], batch_num: int) -> np.ndarray:
+        async with semaphore:
+            try:
+                # asyncio.to_thread를 사용하여 동기 임베딩을 비동기로 실행
+                batch_embs = await asyncio.to_thread(
+                    _text_embedder.encode, 
+                    batch, 
+                    show_progress_bar=False
+                )
+                
+                # L2 정규화 적용
+                batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+                
+                return batch_embs
+                
+            except Exception as e:
+                print(f"   - ❌ 비동기 배치 {batch_num} 실패: {e}")
+                # 실패한 배치에 대해 빈 임베딩 반환
+                return np.zeros((len(batch), 768), dtype="float32")
+    
+    # 모든 배치를 비동기로 처리
+    tasks = []
+    for i in range(0, len(texts), optimal_batch_size):
+        batch = texts[i:i + optimal_batch_size]
+        batch_num = i//optimal_batch_size + 1
+        tasks.append(process_batch_async(batch, batch_num))
+    
+    # 모든 배치 완료 대기
+    try:
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 예외 처리 및 결과 수집
+        all_embs = []
+        for i, result in enumerate(batch_results):
+            if isinstance(result, Exception):
+                print(f"   - ❌ 비동기 배치 {i+1} 예외: {result}")
+                # 예외 발생 시 빈 임베딩 추가
+                batch_size_actual = min(optimal_batch_size, len(texts) - i * optimal_batch_size)
+                empty_emb = np.zeros((batch_size_actual, 768), dtype="float32")
+                all_embs.append(empty_emb)
+            else:
+                all_embs.append(result)
+        
+        # 모든 배치 결과 합치기
+        if all_embs:
+            final_embs = np.vstack(all_embs)
+            print(f"   - ✅ 비동기 동적 배치 임베딩 완료: {final_embs.shape}")
+            
+            # GPU 메모리 정리
+            cleanup_gpu_memory()
+            
+            return final_embs
+        else:
+            print("   - ❌ 모든 비동기 배치 임베딩 실패")
+            return np.zeros((len(texts), 768), dtype="float32")
+            
+    except Exception as e:
+        print(f"   - ❌ 비동기 배치 처리 중 오류: {e}")
+        # 폴백: 동기 방식으로 처리
+        print("   - 🔄 동기 방식으로 폴백")
+        return embed_texts_batch(texts, optimal_batch_size)
+
 def embed_texts(texts: List[str]) -> np.ndarray:
-    embs = _text_embedder.encode(texts, show_progress_bar=False)
-    embs = np.array([l2_normalize(e) for e in embs], dtype="float32")
-    return embs
+    """
+    기존 호환성을 위한 함수. 내부적으로 동적 배치 처리를 사용합니다.
+    """
+    return embed_texts_batch(texts, BATCH_EMBEDDING_SIZE)
+
+def embed_texts_async_wrapper(texts: List[str]) -> np.ndarray:
+    """
+    비동기 임베딩을 동기 함수로 래핑합니다.
+    """
+    if not ENABLE_ASYNC_EMBEDDING:
+        return embed_texts_batch(texts, BATCH_EMBEDDING_SIZE)
+    
+    try:
+        # 새로운 이벤트 루프에서 비동기 함수 실행
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(embed_texts_batch_async(texts, BATCH_EMBEDDING_SIZE))
+            return result
+        finally:
+            loop.close()
+    except Exception as e:
+        print(f"   - ⚠️ 비동기 임베딩 실패, 동기 방식으로 폴백: {e}")
+        return embed_texts_batch(texts, BATCH_EMBEDDING_SIZE)
 
 # =========[ 예보관 톤: 정규화/위험도 헬퍼 ]=========
 def _norm_temp(val: str) -> Optional[float]:
@@ -1286,169 +1616,107 @@ def make_llm() -> ChatOpenAI:
     ]
     return any(k in q for k in live_kw)
 
-# =========[ RAGAS 결과 파싱 헬퍼 ]=========
-def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
+# =========[ RAGAS 비동기 평가 함수들 (최적화된 방식) ]=========
+async def run_ragas_context_precision_only(question, answer, context):
+    """1차 검증용: Context Precision만 평가"""
+    print("   - 🔄 RAGAS Context Precision 평가 실행 중...")
+    
     try:
-        val = None
+        # LLM 설정
+        llm = ChatOpenAI(
+            model_name="gpt-4o-mini", 
+            temperature=0.1,
+            api_key=os.getenv("OPENAI_API_KEY=REDACTED = LangchainLLMWrapper(llm)
         
-        # 1. RAGAS 0.3.x _scores_dict 속성에서 직접 접근 (가장 일반적)
-        if hasattr(result_obj, "_scores_dict") and isinstance(result_obj._scores_dict, dict):
-            val = result_obj._scores_dict.get(metric_name)
-            if val is not None:
-                # 리스트인 경우 첫 번째 값 사용
-                if isinstance(val, list) and len(val) > 0:
-                    val = val[0]
-                # JSON 문자열인 경우 파싱 시도
-                elif isinstance(val, str) and val.startswith('{'):
-                    try:
-                        import json
-                        json_data = json.loads(val)
-                        if "statements" in json_data and isinstance(json_data["statements"], list):
-                            # verdict 값들의 평균 계산
-                            verdicts = []
-                            for stmt in json_data["statements"]:
-                                if isinstance(stmt, dict) and "verdict" in stmt:
-                                    verdicts.append(float(stmt["verdict"]))
-                            if verdicts:
-                                val = sum(verdicts) / len(verdicts)
-                                print(f"   - ✅ {metric_name}: {val:.4f} (JSON verdict 평균)")
-                                return val
-                    except:
-                        pass
-                val = float(val)
-                if val == val:  # NaN 체크
-                    print(f"   - ✅ {metric_name}: {val:.4f} (_scores_dict)")
-                    return val
+        # Context Precision만 평가
+        context_precision_scorer = LLMContextPrecisionWithoutReference(llm=evaluator_llm)
+        context_sample = SingleTurnSample(
+            user_input=question,
+            response=answer,
+            retrieved_contexts=[context] if context else [""]
+        )
+        score = await context_precision_scorer.single_turn_ascore(context_sample)
         
-        # 2. RAGAS 0.3.x scores 속성에서 직접 접근
-        if hasattr(result_obj, "scores") and hasattr(result_obj.scores, metric_name):
-            val = getattr(result_obj.scores, metric_name)
-            if val is not None:
-                # JSON 문자열인 경우 파싱 시도
-                if isinstance(val, str) and val.startswith('{'):
-                    try:
-                        import json
-                        json_data = json.loads(val)
-                        if "statements" in json_data and isinstance(json_data["statements"], list):
-                            # verdict 값들의 평균 계산
-                            verdicts = []
-                            for stmt in json_data["statements"]:
-                                if isinstance(stmt, dict) and "verdict" in stmt:
-                                    verdicts.append(float(stmt["verdict"]))
-                            if verdicts:
-                                val = sum(verdicts) / len(verdicts)
-                                print(f"   - ✅ {metric_name}: {val:.4f} (scores JSON verdict 평균)")
-                                return val
-                    except:
-                        pass
-                val = float(val)
-                if val == val:  # NaN 체크
-                    print(f"   - ✅ {metric_name}: {val:.4f} (scores 속성)")
-                    return val
-        
-        # 3. to_dict() 시도
-        if hasattr(result_obj, "to_dict"):
-            d = result_obj.to_dict()
-            if isinstance(d, dict):
-                # scores 딕셔너리 내부 확인 (RAGAS 0.3.x)
-                if "scores" in d and isinstance(d["scores"], dict):
-                    val = d["scores"].get(metric_name)
-                    if val is not None:
-                        val = float(val)
-                        if val == val:  # NaN 체크
-                            print(f"   - ✅ {metric_name}: {val:.4f} (to_dict scores)")
-                            return val
-                
-                # overall 딕셔너리 내부 확인 (구버전)
-                if "overall" in d and isinstance(d["overall"], dict):
-                    val = d["overall"].get(metric_name)
-                    if val is not None:
-                        val = float(val)
-                        if val == val:  # NaN 체크
-                            print(f"   - ✅ {metric_name}: {val:.4f} (to_dict overall)")
-                            return val
-                
-                # 직접 키 접근
-                if metric_name in d:
-                    val = d[metric_name]
-                    if val is not None:
-                        val = float(val)
-                        if val == val:  # NaN 체크
-                            print(f"   - ✅ {metric_name}: {val:.4f} (to_dict 직접)")
-                            return val
-        
-        # 4. __dict__ 시도
-        if hasattr(result_obj, "__dict__"):
-            d = result_obj.__dict__
-            # _scores_dict 딕셔너리 내부 확인 (RAGAS 0.3.x)
-            if "_scores_dict" in d and isinstance(d["_scores_dict"], dict):
-                val = d["_scores_dict"].get(metric_name)
-                if val is not None:
-                    # 리스트인 경우 첫 번째 값 사용
-                    if isinstance(val, list) and len(val) > 0:
-                        val = val[0]
-                    # JSON 문자열인 경우 파싱 시도
-                    elif isinstance(val, str) and val.startswith('{'):
-                        try:
-                            import json
-                            json_data = json.loads(val)
-                            if "statements" in json_data and isinstance(json_data["statements"], list):
-                                # verdict 값들의 평균 계산
-                                verdicts = []
-                                for stmt in json_data["statements"]:
-                                    if isinstance(stmt, dict) and "verdict" in stmt:
-                                        verdicts.append(float(stmt["verdict"]))
-                                if verdicts:
-                                    val = sum(verdicts) / len(verdicts)
-                                    print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ JSON verdict 평균)")
-                                    return val
-                        except:
-                            pass
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ _scores_dict)")
-                        return val
-            
-            # scores 딕셔너리 내부 확인 (RAGAS 0.3.x)
-            if "scores" in d and isinstance(d["scores"], dict):
-                val = d["scores"].get(metric_name)
-                if val is not None:
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ scores)")
-                        return val
-            
-            if "overall" in d and isinstance(d["overall"], dict):
-                val = d["overall"].get(metric_name)
-                if val is not None:
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ overall)")
-                        return val
-            
-            if metric_name in d:
-                val = d[metric_name]
-                if val is not None:
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ 직접)")
-                        return val
-        
-        # 5. 직접 속성 접근
-        if hasattr(result_obj, metric_name):
-            val = getattr(result_obj, metric_name)
-            if val is not None:
-                val = float(val)
-                if val == val:  # NaN 체크
-                    print(f"   - ✅ {metric_name}: {val:.4f} (직접 속성)")
-                    return val
-        
-        print(f"   - ❌ {metric_name} 값을 찾을 수 없음")
-        return None
+        scores = {"context_precision": float(score)}
+        print(f"   - ✅ RAGAS Context Precision 평가 완료: {scores}")
+        return scores
         
     except Exception as e:
-        print(f"   - ⚠️ RAGAS 결과 파싱 실패 ({metric_name}): {e}")
-        return None
+        print(f"   - ⚠️ Context Precision 평가 실패: {e}")
+        return {"context_precision": 0.0}
+
+async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
+    """2차 검증용: Faithfulness와 Answer Relevancy만 병렬 평가"""
+    print("   - 🔄 RAGAS Faithfulness & Relevancy 병렬 평가 실행 중...")
+    
+    try:
+        # LLM 및 임베딩 모델 설정
+        llm = ChatOpenAI(
+            model_name="gpt-4o-mini", 
+            temperature=0.1,
+            api_key=os.getenv("OPENAI_API_KEY=REDACTED = LangchainLLMWrapper(llm)
+        
+        embeddings = LangchainEmbeddingsWrapper(
+            HuggingFaceEmbeddings(
+                model_name="BAAI/bge-m3",
+                model_kwargs={'device': 'cpu'}
+            )
+        )
+        
+        # Faithfulness와 Answer Relevancy만 병렬 처리
+        async def evaluate_faithfulness():
+            try:
+                faithfulness_scorer = Faithfulness(llm=evaluator_llm)
+                faithfulness_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=[context] if context else [""]
+                )
+                score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                return ("faithfulness", float(score))
+            except Exception as e:
+                print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                return ("faithfulness", 0.0)
+        
+        async def evaluate_answer_relevancy():
+            try:
+                answer_relevancy_scorer = ResponseRelevancy(
+                    llm=evaluator_llm, 
+                    embeddings=embeddings
+                )
+                relevancy_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=[context] if context else [""]
+                )
+                score = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
+                return ("answer_relevancy", float(score))
+            except Exception as e:
+                print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                return ("answer_relevancy", 0.0)
+        
+        # 2개 평가를 동시에 실행 (진짜 병렬 처리)
+        results = await asyncio.gather(
+            evaluate_faithfulness(),
+            evaluate_answer_relevancy(),
+            return_exceptions=True
+        )
+        
+        # 결과 수집
+        scores = {}
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                continue
+            metric_name, score = result
+            scores[metric_name] = score
+        
+        print(f"   - ✅ RAGAS Faithfulness & Relevancy 병렬 평가 완료: {scores}")
+        return scores
+        
+    except Exception as e:
+        print(f"   - ⚠️ RAGAS 평가 실패: {e}")
+        return {"faithfulness": 0.0, "answer_relevancy": 0.0}
 
 # =========[ 프롬프트 (예보관 톤) ]=========
 DRAFT_PROMPT = ChatPromptTemplate.from_template(
@@ -1532,7 +1800,7 @@ def load_store_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 초기화 (벡터DB 미사용)")
     return {**state, "store_obj": None, "retry_count": 0}
 
-def retrieve_node(state: GraphState) -> Dict[str, Any]:
+async def retrieve_node(state: GraphState) -> Dict[str, Any]:
     print(f"🧩 노드: 리트리브(라이브 + 중기) | 재시도: {state['retry_count']}")
     q = state["question"] or ""
     live_enabled = _should_use_live(q)
@@ -1571,9 +1839,10 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
             # 특보는 현재 발효 중인 것만 의미 있으므로 질문 날짜가 오늘일 때만 사용
             if advisories and days_from_today <= 0:
                 human = [d["human"] for d in advisories]
-                embs = embed_texts(human)
+                # 비동기 동적 배치 임베딩 처리
+                embs = embed_texts_async_wrapper(human)
                 idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
-                qv = embed_texts([q])[0]
+                qv = embed_texts_async_wrapper([q])[0]
                 topk = min(5, len(advisories))
                 D, I = idx.search(np.array([qv], dtype="float32"), topk)
                 for s, i in zip(D[0], I[0]):
@@ -1588,9 +1857,10 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
             # 단기예보는 3일까지 유효하므로 3일 이내일 때 사용
             if forecasts and days_from_today <= 3:
                 human = [d["human"] for d in forecasts]
-                embs = embed_texts(human)
+                # 비동기 동적 배치 임베딩 처리
+                embs = embed_texts_async_wrapper(human)
                 idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
-                qv = embed_texts([q])[0]
+                qv = embed_texts_async_wrapper([q])[0]
                 topk = min(5, len(forecasts))
                 D, I = idx.search(np.array([qv], dtype="float32"), topk)
                 for s, i in zip(D[0], I[0]):
@@ -1620,9 +1890,10 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
                                                    merge_day=MERGE_BY_DAY)
                     if region_docs:
                         human = [d["human"] for d in region_docs]
-                        embs = embed_texts(human)
+                        # 비동기 동적 배치 임베딩 처리
+                        embs = embed_texts_async_wrapper(human)
                         idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
-                        qv = embed_texts([q])[0]
+                        qv = embed_texts_async_wrapper([q])[0]
                         topk = min(5, len(region_docs))
                         D, I = idx.search(np.array([qv], dtype="float32"), topk)
                         for s, i in zip(D[0], I[0]):
@@ -1677,15 +1948,14 @@ def _has_minimum_fields(ctx: str) -> bool:
 # ===== 검증 노드들 =====
 # 1차 검증 (검색 품질) 임계값
 CONTEXT_PRECISION_THRESHOLD = 0.7
-CONTEXT_RECALL_THRESHOLD = 0.7
 
 # 2차 검증 (답변 품질) 임계값
-FAITHFULNESS_THRESHOLD = 0.7  # RAGAS faithfulness는 일반적으로 낮게 나옴 (0.4 → 0.35로 더 완화)
-ANSWER_RELEVANCY_THRESHOLD = 0.7
+FAITHFULNESS_THRESHOLD = 0.7
+ANSWER_RELEVANCY_THRESHOLD = 0.6
 
 MAX_RETRIES = 3
 
-def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
+async def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 1차 검증 (검색 품질)")
     question = state.get("question") or ""
     context = state.get("context") or ""
@@ -1721,10 +1991,13 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
 
             print("   - 🔄 RAGAS 평가 실행 중...")
             
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            context_precision_score = asyncio.run(context_precision_scorer.single_turn_ascore(context_sample))
-            ragas_scores["context_precision"] = float(context_precision_score)
+            # Context Precision만 평가 (1차 검증용)
+            ragas_results = await run_ragas_context_precision_only(question, temp_answer, optimized_context)
+            if ragas_results and isinstance(ragas_results, dict):
+                ragas_scores["context_precision"] = ragas_results.get("context_precision", 0.0)
+            else:
+                print("   - ⚠️ RAGAS 검색 평가 실패")
+                ragas_scores["context_precision"] = 0.0
             
             print(f"   - 📈 검색 품질 지표:")
             print(f"     • Context Precision (LLM-based): {ragas_scores['context_precision']:.3f}")
@@ -1744,7 +2017,7 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     
     return {**state, "is_retrieval_sufficient": is_sufficient}
 
-def answer_validation_node(state: GraphState) -> Dict[str, Any]:
+async def answer_validation_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 2차 검증 (답변 품질)")
     retry_count = state.get("retry_count", 0) + 1
 
@@ -1785,48 +2058,17 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
     try:
         print("   - 📊 RAGAS 답변 품질 평가 중...")
         
-        scores = {}
-        
-        try:
-            # Faithfulness (SalesRAGAS 방식)
-            faithfulness_scorer = Faithfulness(llm=_RAGAS_LLM_WRAPPER)
-            
-            # SingleTurnSample 생성 (Faithfulness용)
-            faithfulness_sample = SingleTurnSample(
-                user_input=question,
-                response=optimized_answer,
-                retrieved_contexts=[optimized_context] if optimized_context else [""]
-            )
-            
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            faithfulness_score = asyncio.run(faithfulness_scorer.single_turn_ascore(faithfulness_sample))
-            scores['faithfulness'] = float(faithfulness_score)
-            
-        except Exception as e:
-            scores['faithfulness'] = 0.0
-        
-        try:
-            # Answer Relevancy (SalesRAGAS 방식)
-            answer_relevancy_scorer = ResponseRelevancy(
-                llm=_RAGAS_LLM_WRAPPER, 
-                embeddings=_RAGAS_EMB_WRAPPER
-            )
-            
-            # SingleTurnSample 생성 (Answer Relevancy용)
-            relevancy_sample = SingleTurnSample(
-                user_input=question,
-                response=optimized_answer,
-                retrieved_contexts=[optimized_context] if optimized_context else [""]
-            )
-            
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            answer_relevancy_score = asyncio.run(answer_relevancy_scorer.single_turn_ascore(relevancy_sample))
-            scores['answer_relevancy'] = float(answer_relevancy_score)
-            
-        except Exception as e:
-            scores['answer_relevancy'] = 0.0
+        # Faithfulness와 Answer Relevancy만 병렬 평가 (2차 검증용)
+        ragas_results = await run_ragas_faithfulness_relevancy_parallel(question, optimized_answer, optimized_context)
+        if ragas_results and isinstance(ragas_results, dict):
+            scores = {
+                'faithfulness': ragas_results.get("faithfulness", 0.0),
+                'answer_relevancy': ragas_results.get("answer_relevancy", 0.0)
+            }
+            print(f"   - ✅ RAGAS 답변 품질 평가 완료: Faithfulness={scores['faithfulness']:.3f}, Relevancy={scores['answer_relevancy']:.3f}")
+        else:
+            print("   - ⚠️ RAGAS 답변 품질 평가 실패")
+            scores = {'faithfulness': 0.0, 'answer_relevancy': 0.0}
 
         f_val = scores.get('faithfulness', 0.0)
         r_val = scores.get('answer_relevancy', 0.0)
@@ -2024,9 +2266,9 @@ def build_graph():
 #     print(f"\n전체 결과 저장: {out_path}")
 
 # =========[ OchestratorTest.py 호환 함수 ]=========
-def run(state: dict) -> dict:
+async def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수
+    OchestratorTest.py에서 호출되는 날씨 에이전트 실행 함수 (비동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
@@ -2040,15 +2282,15 @@ def run(state: dict) -> dict:
         # 질문 추출
         query = state.get("query", "")
         if not query:
-            return {"agent_answer": "질문이 제공되지 않았습니다. 재해 관련 질문을 해주세요."}
+            return {"agent_answer": "질문이 제공되지 않았습니다. 날씨 관련 질문을 해주세요."}
         
         print(f"[날씨_agent] 질문 처리 시작: {query}")
         
         # 그래프 빌드 및 실행
         app = build_graph()
         
-        # 그래프 실행
-        result = app.invoke({"question": query})
+        # 그래프 비동기 실행
+        result = await app.ainvoke({"question": query})
         
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")
@@ -2058,12 +2300,13 @@ def run(state: dict) -> dict:
         return {"agent_answer": answer}
         
     except Exception as e:
-        error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"
+        error_msg = f"날씨 에이전트 실행 중 오류가 발생했습니다: {e}"
         print(f"[날씨_agent] 오류: {e}")
         return {"agent_answer": error_msg}
 
-# =========[ 실행부 ]=========
-if __name__ == "__main__":
+# =========[ 비동기 실행부 ]=========
+async def async_main():
+    """비동기 메인 함수 - RAGAS 이벤트 루프 충돌 방지"""
     import sys
     from argparse import ArgumentParser
     parser = ArgumentParser(description="기상 전문가 통합 그래프 (라이브+중기, No VectorDB, No 2nd Validation)")
@@ -2078,7 +2321,8 @@ if __name__ == "__main__":
         q = args.question.strip()
         if not q: raise ValueError("질문이 비어 있습니다.")
         try:
-            out = app.invoke({"question": q})
+            # 비동기 invoke 사용
+            out = await app.ainvoke({"question": q})
             if args.show_context:
                 print("\n=== 컨텍스트 ===")
                 print(out.get("context", ""))
@@ -2094,7 +2338,8 @@ if __name__ == "__main__":
             if q.lower() in ("exit", "quit"): break
             if not q: continue
             try:
-                out = app.invoke({"question": q})
+                # 비동기 invoke 사용
+                out = await app.ainvoke({"question": q})
                 if args.show_context:
                     print("\n=== 컨텍스트 ===")
                     print(out.get("context", ""))
@@ -2103,3 +2348,10 @@ if __name__ == "__main__":
                 print()
             except Exception as e:
                 print(f"❌ 오류: {e}\n")
+
+def main():
+    """동기 메인 함수 - asyncio.run으로 비동기 함수 실행"""
+    asyncio.run(async_main())
+
+if __name__ == "__main__":
+    main()

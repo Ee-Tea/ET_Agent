@@ -1,14 +1,25 @@
-import json
-from pathlib import Path
-import sys
-from typing import Dict, Any, cast
-import os
-from dotenv import load_dotenv
-from langsmith import traceable
+# teacher_graph.py
+# uv run teacher/teacher_graph.py
+from __future__ import annotations
 
-from .agents.analysis.analysis_agent import AnalysisAgent, print_analysis_result
-from .agents.base_agent import BaseAgent
-from .agents.score.score_engine import ScoreEngine, print_score_result, ScoreResult
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+import sys, os
+from typing import Dict, Any, List, Optional, Tuple
+from dotenv import load_dotenv
+load_dotenv()
+
+from langsmith import traceable
+from langgraph.graph import START, END, StateGraph
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.runnables import RunnableLambda
+from typing_extensions import TypedDict, NotRequired
+
+# LLM 모델 설정을 환경변수에서 가져오기
+OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 메모리는 main에서 중앙집중식으로 관리하므로 Teacher 내부에서는 Redis 메모리를 사용하지 않습니다.
@@ -82,22 +93,68 @@ class TeacherState(TypedDict):
 class Teacher:
     def __init__(self, user_id: str, service: str, chat_id: str, init_agents: bool = True, checkpointer=None):
         load_dotenv()
-        # LangSmith 추적 환경 변수 확인
         if not os.getenv("LANGCHAIN_API_KEY"):
             print("경고: LANGCHAIN_API_KEY 환경 변수가 설정되지 않았습니다.")
-            print(".env 파일에 키를 추가하거나 직접 환경 변수를 설정해주세요.")
+        
+        # 이미지 처리에 필요한 환경 변수 설정
+        if not os.getenv("OPENAI_VISION_MODEL"):
+            os.environ["OPENAI_VISION_MODEL"] = "o4-mini"  # 기본값 설정
+        if not os.getenv("MAX_OUTPUT_TOKENS"):
+            os.environ["MAX_OUTPUT_TOKENS"] = "1200"  # 기본값 설정
+        
+        # TTL/길이 제한은 redis_memory.py에서 설정
+        # 메모리는 main에서 중앙집중식으로 관리합니다. Teacher 내부에서는 메모리를 생성/저장하지 않습니다.
+        self.user_id = user_id
+        self.service = service
+        self.chat_id = chat_id
+        
+        # PDF 전처리기 초기화
+        from .unified_pdf_preprocessor import UnifiedPDFPreprocessor
+        self.pdf_preprocessor = UnifiedPDFPreprocessor()
+        
+        # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
+        if init_agents:
+            self.retriever_runner = retrieve_agent()
+            self.generator_runner = generate_agent()
+            self.solution_runner  = solution_agent()   # 추상클래스 구현체면 여기서 생성
+            self.score_runner     = score_agent()
+            self.analyst_runner   = AnalysisAgent()
+        else:
+            self.retriever_runner = None
+            self.generator_runner = None
+            self.solution_runner  = None
+            self.score_runner     = None
+            self.analyst_runner   = None
 
-        self.agents: Dict[str, BaseAgent] = {
-            "analysis": AnalysisAgent(),
-            "score": ScoreEngine(),  # ScoreEngine 등록
-        }
+        # LangGraph 기반 그래프 생성 (메인과 단일 체크포인터 공유 가능)
+        self.checkpointer = checkpointer or InMemorySaver()
+        self.graph = self._create_graph()
 
-    def get_available_agents(self) -> Dict[str, str]:
-        """등록된 에이전트들의 이름과 설명을 반환합니다."""
-        return {agent_key: agent.description for agent_key, agent in self.agents.items()}
+    # ── Memory IO ────────────────────────────────────────────────────────────
+    def load_state(self, state: TeacherState) -> TeacherState:
+        """메인에서 상태를 주입하므로 여기서는 no-op. shared 최소 보정만 수행."""
+        new_state = ensure_shared({**state})
+        new_state.setdefault("session", {})
+        new_state["session"]["loaded"] = True
+        return new_state
 
-    @traceable(name="Orchestrator Run")
-    def run(self, agent_name: str, input_file_path: str):
+    def persist_state(self, state: TeacherState) -> TeacherState:
+        """메모리 저장은 메인에서 처리. 여기서는 정리만 하고 상태 그대로 반환."""
+        try:
+            cleaned = self._dedupe_aligned_shared(state.get("shared", {}) or {})
+            state = {**state, "shared": cleaned}
+        except Exception:
+            pass
+        return state
+
+    # ── Helpers: selection & dedupe ─────────────────────────────────────────
+    def _normalize_text(self, text: Any) -> str:
+        try:
+            return " ".join(str(text or "").split()).strip().lower()
+        except Exception:
+            return str(text or "").strip().lower()
+
+    def _dedupe_aligned_shared(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """
         question/options/answer/explanation/subject/user_answer 리스트를
         question+options 조합 기준으로 중복 제거하여 정렬을 보존합니다.
@@ -366,106 +423,409 @@ class Teacher:
         상위 오케스트레이터에서 호출할 수 있는 실행 함수입니다.
         
         Args:
-            agent_name (str): 실행할 에이전트의 이름입니다.
-            input_file_path (str): 에이전트에 전달할 입력 데이터 파일 경로입니다.
+            state: TeacherState 형식의 상태 딕셔너리
+            config: LangGraph 설정 (선택사항)
+            
+        Returns:
+            Dict[str, Any]: 실행 결과 상태
         """
-        # 1. 에이전트 선택
-        agent = self.agents.get(agent_name)
-        if not agent:
-            print(f"오류: '{agent_name}'이라는 이름의 에이전트를 찾을 수 없습니다.")
-            sys.exit(1)
-            
-        # 2. 입력 파일 로드
-        input_file = Path(input_file_path)
-        if not input_file.exists():
-            print(f"오류: 입력 파일을 찾을 수 없습니다. ({input_file})")
-            sys.exit(1)
-            
         try:
-            with open(input_file, 'r', encoding='utf-8') as f:
-                input_data = json.load(f)
-            print(f"파일 '{input_file}' 로드 성공")
-        except json.JSONDecodeError:
-            print(f"오류: '{input_file}'이 올바른 JSON 형식이 아닙니다.")
-            sys.exit(1)
-        except Exception as e:
-            print(f"파일 로드 중 오류 발생: {e}")
-            sys.exit(1)
-
-        # 3. 에이전트 실행
-        try:
-            print(f"🚀 '{agent_name}' 에이전트 실행 시작...")
-            result = agent.execute(input_data)
-            
-            # 결과 검증
-            if not isinstance(result, dict):
-                raise ValueError("에이전트가 올바른 형식의 결과를 반환하지 않았습니다.")
-                
-            if result.get("status") == "error":
-                print(f"⚠️  에이전트 실행 중 내부 오류 발생: {result.get('error_message', '알 수 없는 오류')}")
-            else:
-                print(f"✅ '{agent_name}' 에이전트 실행 완료.")
-                
-        except Exception as e:
-            print(f"❌ 에이전트 실행 중 오류 발생: {e}")
-            # 오류 발생 시에도 기본 구조로 결과 생성
-            result = {
-                "status": "error",
-                "error_message": str(e),
-                "metadata": {
-                    "total_problems": 0,
-                    "correct_count": 0,
-                    "score": 0
-                },
-                "grading": {"results": [], "details": []},
-                "analysis": {},
-                "raw_data": {}
+            # TeacherState 형식으로 변환
+            teacher_state: TeacherState = {
+                "user_query": state.get("user_query", ""),
+                "intent": state.get("intent", ""),
+                "shared": state.get("shared", {}),
+                "work": state.get("work", {}),
+                "retrieval": state.get("retrieval", {}),
+                "generation": state.get("generation", {}),
+                "solution": state.get("solution", {}),
+                "score": state.get("score", {}),
+                "analysis": state.get("analysis", {}),
+                "history": state.get("history", []),
+                "session": state.get("session", {}),
+                "artifacts": state.get("artifacts", {}),
+                "routing": state.get("routing", {}),
+                "llm_response": state.get("llm_response", "")
             }
             
-        # 4. 결과 처리 및 저장
-        self.handle_result(result, agent_name, input_file)
-
-    def handle_result(self, result: Dict[str, Any], agent_name: str, input_file: Path):
-        """
-        에이전트 실행 결과를 처리하고 저장합니다.
-        
-        Args:
-            result (Dict[str, Any]): 에이전트 실행 결과.
-            agent_name (str): 실행된 에이전트의 이름.
-            input_file (Path): 원본 입력 파일의 경로.
-        """
-        # 결과 출력
-        if agent_name == "analysis":
-            print_analysis_result(result)
-        elif agent_name == "score":
-            print_score_result(cast(ScoreResult, result))
-        else:
-            # 다른 에이전트들의 결과 출력 로직
-            print("\n--- 실행 결과 ---")
-            if result.get("status") == "success":
-                print("✅ 성공적으로 완료되었습니다.")
-                if "metadata" in result:
-                    print("\n📊 메타데이터:")
-                    for key, value in result["metadata"].items():
-                        print(f"  - {key}: {value}")
-            else:
-                print("❌ 오류가 발생했습니다.")
-                if "error_message" in result:
-                    print(f"오류 메시지: {result['error_message']}")
+            # 워크플로우 실행
+            result = self.invoke(teacher_state, config)
             
-            print("\n전체 결과:")
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            # 결과를 딕셔너리로 변환하여 반환
+            return dict(result)
+            
+        except Exception as e:
+            print(f"❌ Teacher 실행 중 오류 발생: {e}")
+            # 오류 발생 시에도 현재 상태를 반환
+            return {
+                "error": str(e),
+                "user_query": state.get("user_query", ""),
+                "intent": state.get("intent", ""),
+                "shared": state.get("shared", {}),
+                "work": state.get("work", {}),
+                "retrieval": state.get("retrieval", {}),
+                "generation": state.get("generation", {}),
+                "solution": state.get("solution", {}),
+                "score": state.get("score", {}),
+                "analysis": state.get("analysis", {}),
+                "history": state.get("history", []),
+                "session": state.get("session", {}),
+                "artifacts": state.get("artifacts", {}),
+                "routing": state.get("routing", {}),
+                "llm_response": state.get("llm_response", "")
+            }
 
-        # 결과 파일 저장
-        output_file = input_file.with_name(f"{input_file.stem}_{agent_name}_result.json")
+    def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> TeacherState:
+        """Command(resume)을 사용하여 중단된 워크플로우를 재개합니다."""
+        if config is None:
+            config = {"configurable": {"thread_id": "default"}}
+        # 상위 그래프 재개 시, 노드별 재개 데이터를 임시로 보관
         try:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-            print(f"\n💾 결과가 '{output_file}'에 저장되었습니다.")
+            # 문자열/사전 모두 허용. 출력 방식/폼 답변 등 분기
+            if isinstance(resume_data, str) and resume_data.strip().lower() in ("pdf", "form"):
+                # decide_output_mode 용 선택값
+                self._pending_output_mode = resume_data.strip().lower()
+            elif isinstance(resume_data, dict):
+                # form_output 용 사용자 답안
+                if "user_answer" in resume_data:
+                    self._pending_form_answers = resume_data.get("user_answer")
+                # solution용 사용자 피드백 호환
+                if "user_feedback" in resume_data:
+                    self._pending_user_feedback = resume_data.get("user_feedback")
+                # 간단 문자열 모드 키 호환
+                if resume_data.get("output_mode") in ("pdf", "form"):
+                    self._pending_output_mode = resume_data.get("output_mode")
+            else:
+                self._pending_user_feedback = resume_data
+        except Exception:
+            pass
+        
+        # LangGraph Command import (간단 경로)
+        from langgraph.checkpoint.memory import Command
+        
+        try:
+            print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
+            print(f"🔍 체크포인터 상태 확인: {self.checkpointer}")
+            
+            # 메모리 복구는 메인에서 수행합니다. 여기서는 별도 복구를 하지 않습니다.
+            
+            # Command(resume)을 사용하여 중단된 지점부터 재개 (재개 데이터 원형 전달)
+            resume_command = Command(resume=resume_data)
+            print(f"📤 Command(resume) 전송: {resume_command}")
+            
+            # 체크포인터가 설정된 그래프로 재개
+            result = self.graph.invoke(resume_command, config)
+            print("✅ 워크플로우 재개 완료")
+            return result
+        except Exception as e:
+            print(f"❌ 워크플로우 재개 실패: {e}")
+            print(f"🔍 오류 상세: {type(e).__name__}: {str(e)}")
+            raise
+
+    # ── Intent & Routing ────────────────────────────────────────────────────
+
+    @traceable(name="teacher.intent_classifier")
+    def intent_classifier(self, state: TeacherState) -> TeacherState:
+        uq = (state.get("user_query") or "").strip()
+
+        # LLM 기반 의도 분류만 담당
+        try:
+            raw = user_intent(uq) if uq else ""
+            intent = raw
+            print(f"🤖 LLM 기반 분류: {intent} (raw={raw!r})")
+        except Exception as e:
+            print(f"⚠️ LLM 분류 실패, 기본값 사용: {e}")
+            intent = "retrieve"
+            
+        return {**state, "user_query": uq, "intent": intent}
+
+    def select_agent(self, state: TeacherState) -> str:
+        intent = (state.get("intent") or "").strip().strip('"\'' ).lower()
+
+        mapping = {
+            "retrieve": "retrieve",
+            "generate": "generator",
+            "analyze": "route_analysis",
+            "solution": "preprocess",  # solution 의도일 때 preprocess를 먼저 거침
+            "score": "route_score",
+        }
+        chosen = mapping.get(intent, "retrieve")
+        print(f"[router] intent={intent} → {chosen}")
+        return chosen
+
+    # ── Router (의존성 자동 보장) ───────────────────────────────────────────
+
+    # ── Nodes ───────────────────────────────────────────────────────────────
+    @traceable(name="teacher.preprocess")  
+    def preprocess(self, state: TeacherState) -> TeacherState:
+        """
+        PDF 및 이미지 파일에서 문제 추출하는 전처리 노드
+        - 사용자 입력에서 파일 경로 추출 및 메타데이터 파싱
+        - 파일 종류에 따라 적절한 처리 방법 선택
+        - 인덱스 기록을 'extend 이전' 길이로 고정해 올바른 범위를 남깁니다.
+        """
+        print("📄 PDF/이미지 문제 추출 전처리 노드 실행")
+
+        uq = state.get("user_query", "")
+        current_artifacts = state.get("artifacts", {}) or {}
+        
+        # PDF 전처리 모듈 import (편의 함수들)
+        from .pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
+
+        # PDF 경로 추출 및 artifacts 업데이트
+        extracted_pdfs = extract_pdf_paths(uq)
+        if extracted_pdfs:
+            # 사용자가 명시적으로 파일 경로를 제공한 경우, 해당 파일만 사용
+            pdf_filenames = []
+            for path in extracted_pdfs:
+                filename = path.split('\\')[-1].split('/')[-1]  # Windows/Unix 경로 모두 처리
+                pdf_filenames.append(filename)
+            
+            # 사용자 지정 파일이 우선 (기존 파일은 무시)
+            current_artifacts["pdf_ids"] = pdf_filenames
+            print(f"📁 사용자 지정 PDF 파일: {pdf_filenames}")
+            print(f"🎯 이 파일들만 처리됩니다: {pdf_filenames}")
+
+        # 이미지 파일 경로 추출
+        extracted_images = extract_image_paths(uq)
+        if extracted_images:
+            image_filenames = []
+            for path in extracted_images:
+                filename = path.split('\\')[-1].split('/')[-1]  # Windows/Unix 경로 모두 처리
+                image_filenames.append(filename)
+            
+            current_artifacts["image_ids"] = image_filenames
+            print(f"🖼️ 사용자 지정 이미지 파일: {image_filenames}")
+            print(f"🎯 이 이미지들만 처리됩니다: {image_filenames}")
+
+        # 문제 번호 범위 추출
+        problem_range = extract_problem_range(uq)
+        if problem_range:
+            current_artifacts["problem_range"] = problem_range
+            print(f"🔢 문제 번호 범위: {problem_range}")
+
+        # 문제 소스 결정
+        problem_source = determine_problem_source(uq)
+        if problem_source:
+            current_artifacts["problem_source"] = problem_source
+            print(f"📚 문제 소스: {problem_source}")
+
+        # artifacts 업데이트
+        state["artifacts"] = current_artifacts
+
+        # 파일 경로 매핑
+        file_mapper = FilePathMapper()
+        external_file_paths = file_mapper.map_artifacts_to_paths(current_artifacts)
+
+        # 동일 파일 중복 제거 (경로 정규화 기반)
+        try:
+            _seen_paths = set()
+            _unique_paths = []
+            for _p in external_file_paths or []:
+                try:
+                    _key = os.path.normcase(os.path.abspath((_p or "").strip()))
+                except Exception:
+                    _key = ((_p or "").strip()).lower()
+                if _key in _seen_paths:
+                    continue
+                _seen_paths.add(_key)
+                _unique_paths.append(_p)
+            if _unique_paths is not None:
+                external_file_paths = _unique_paths
+        except Exception:
+            pass
+
+        if not external_file_paths:
+            print("⚠️ 전처리할 파일이 없습니다.")
+            print(f"🔍 user_query: {uq}")
+            
+            # user_query에서 문제와 보기 추출 시도
+            if uq and uq.strip():
+                print("🔍 user_query에서 문제와 보기 추출 시도...")
+                try:
+                    print(f"🔍 extract_problem_and_options 함수 호출 시작...")
+                    extracted = extract_problem_and_options(uq.strip())
+                    print(f"🔍 추출 결과: {extracted}")
+                    
+                    if extracted and isinstance(extracted, dict):
+                        has_problem = extracted.get("has_problem", False)
+                        problem = extracted.get("problem", "")
+                        options = extracted.get("options", [])
+                        
+                        print(f"🔍 has_problem: {has_problem}")
+                        print(f"🔍 problem: {problem}")
+                        print(f"🔍 options: {options}")
+                        
+                        if has_problem and problem and options and len(options) > 0:
+                            print(f"✅ 문제 추출 성공: {problem[:100]}...")
+                            print(f"✅ 보기 추출 성공: {len(options)}개")
+                            
+                            # 추출된 문제를 shared 상태에 추가
+                            new_state = ensure_shared({**state})
+                            shared = new_state["shared"]
+                            
+                            # 중복 여부 확인 (동일 문제/보기 존재 시 재추가 방지)
+                            shared.setdefault("question", [])
+                            shared.setdefault("options", [])
+                            existing_index = None
+                            try:
+                                for idx, (q0, o0) in enumerate(zip(shared["question"], shared["options"])):
+                                    if str(q0).strip() == str(problem).strip() and [str(x).strip() for x in (o0 or [])] == [str(x).strip() for x in (options or [])]:
+                                        existing_index = idx
+                                        break
+                            except Exception:
+                                existing_index = None
+
+                            if existing_index is not None:
+                                print(f"⚠️ 중복 문제 감지 → 기존 인덱스: {existing_index}; 재처리 생략")
+                                # 이미 존재하므로 이번 턴에는 solution 재호출이 일어나지 않게 count=0 처리
+                                current_artifacts["extracted_problem_count"] = 0
+                                # 인덱스는 변경하지 않음
+                            else:
+                                shared["question"].append(problem)
+                                shared["options"].append(options)
+                                print("✅ 문제/보기 추가 완료 (중복 아님)")
+                                current_artifacts["extracted_problem_count"] = 1
+                                current_artifacts["extracted_problem_start_index"] = len(shared["question"]) - 1
+                                current_artifacts["extracted_problem_end_index"] = len(shared["question"]) - 1
+                            
+                            print(f"📝 추출된 문제를 shared state에 추가: 1개")
+                            print(f"📂 shared state 총 문제 수: {len(shared['question'])}개")
+                            print(f"📂 artifacts: {current_artifacts}")
+                            
+                            # artifacts 업데이트
+                            new_state["artifacts"] = current_artifacts
+                            return new_state
+                        else:
+                            print("⚠️ user_query에서 문제와 보기를 추출할 수 없습니다.")
+                            print(f"🔍 has_problem: {has_problem}")
+                            print(f"🔍 problem: {problem}")
+                            print(f"🔍 options: {options}")
+                    else:
+                        print("⚠️ extract_problem_and_options 함수가 올바른 형식의 결과를 반환하지 않았습니다.")
+                        print(f"🔍 반환된 결과: {extracted}")
+                        
+                except Exception as e:
+                    print(f"❌ 문제 추출 중 오류 발생: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("⚠️ user_query가 비어있거나 None입니다.")
+            
+            return state
+
+        try:
+            # 파일 종류별로 분류
+            pdf_files = []
+            image_files = []
+            
+            for file_path in external_file_paths:
+                if file_path.lower().endswith(('.pdf')):
+                    pdf_files.append(file_path)
+                elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')):
+                    image_files.append(file_path)
+                else:
+                    print(f"⚠️ 지원하지 않는 파일 형식: {file_path}")
+            
+            print(f"📁 PDF 파일: {len(pdf_files)}개, 이미지 파일: {len(image_files)}개")
+            
+            extracted_problems = []
+            
+            # PDF 파일 처리
+            if pdf_files:
+                # 중복 제거 보강 (확장자별 리스트에도 적용)
+                try:
+                    _seen_pdf = set()
+                    _uniq_pdf = []
+                    for _p in pdf_files:
+                        try:
+                            _key = os.path.normcase(os.path.abspath((_p or "").strip()))
+                        except Exception:
+                            _key = ((_p or "").strip()).lower()
+                        if _key in _seen_pdf:
+                            continue
+                        _seen_pdf.add(_key)
+                        _uniq_pdf.append(_p)
+                    pdf_files = _uniq_pdf
+                except Exception:
+                    pass
+                print("📄 PDF 파일에서 문제 추출 중...")
+                pdf_problems = extract_problems_from_pdf(self.pdf_preprocessor, pdf_files)
+                extracted_problems.extend(pdf_problems or [])
+                print(f"📄 PDF에서 {len(pdf_problems or [])}개 문제 추출")
+            
+            # 이미지 파일 처리
+            if image_files:
+                # 중복 제거 보강
+                try:
+                    _seen_img = set()
+                    _uniq_img = []
+                    for _p in image_files:
+                        try:
+                            _key = os.path.normcase(os.path.abspath((_p or "").strip()))
+                        except Exception:
+                            _key = ((_p or "").strip()).lower()
+                        if _key in _seen_img:
+                            continue
+                        _seen_img.add(_key)
+                        _uniq_img.append(_p)
+                    image_files = _uniq_img
+                except Exception:
+                    pass
+                print("🖼️ 이미지 파일에서 문제 추출 중...")
+                image_problems = extract_problems_from_images(image_files)
+                extracted_problems.extend(image_problems or [])
+                print(f"🖼️ 이미지에서 {len(image_problems or [])}개 문제 추출")
+
+            new_state = ensure_shared({**state})
+            shared = new_state["shared"]
+
+            # extend 이전 길이를 고정 저장
+            start_index = len(shared.get("question", []))
+
+            questions: List[str] = []
+            options: List[List[str]] = []
+
+            for problem in extracted_problems or []:
+                if not isinstance(problem, dict):
+                    continue
+                q = str(problem.get("question", "")).strip()
+                opt = problem.get("options", [])
+                if isinstance(opt, str):
+                    opt = [x.strip() for x in opt.splitlines() if x.strip()]
+                if not isinstance(opt, list):
+                    opt = []
+                opt = [str(x).strip() for x in opt if str(x).strip()]
+                if q and opt:
+                    questions.append(q)
+                    options.append(opt)
+
+            # 실제 반영
+            if questions:
+                prev_cnt = len(shared["question"])
+                shared["question"].extend(questions)
+                shared["options"].extend(options)
+                new_cnt = len(shared["question"])
+
+                added_count = len(questions)
+                end_index = start_index + added_count - 1
+
+                arts = new_state.setdefault("artifacts", {})
+                arts["pdf_added_count"] = added_count
+                arts["pdf_added_start_index"] = start_index
+                arts["pdf_added_end_index"] = end_index
+
+                print(f"📄 파일에서 문제를 shared state에 추가: {added_count}개")
+                print(f"📂 shared state 총 문제 수: {prev_cnt}개 → {new_cnt}개")
+                print(f"🔢 추가된 문제 인덱스: {start_index} ~ {end_index}")
+            else:
+                print("⚠️ 유효한 문제를 찾지 못했습니다.")
+
+            return new_state
 
         except Exception as e:
-            print(f"❌ 결과 저장 중 오류 발생: {e}")
-            print("결과가 저장되지 않았지만, 분석은 완료되었습니다.")
+            print(f"❌ 파일 문제 추출 중 오류: {e}")
+            return state
 
     @traceable(name="teacher.solution")
     def solution(self, state: TeacherState) -> TeacherState:
@@ -1882,34 +2242,157 @@ def create_app() -> Any:
     return orch.graph
 
 if __name__ == "__main__":
-    # 명령줄 인자 파싱
-    # 예: python teacher.py analysis "path/to/your/input.json"
-    if len(sys.argv) < 3:
-        print("🔧 사용법: python teacher.py [agent_name] [input_file_path]")
-        
-        # 오케스트레이터 인스턴스 생성하여 등록된 에이전트 정보 가져오기
-        orchestrator = Orchestrator()
-        available_agents = orchestrator.get_available_agents()
-        
-        print("\n📋 사용 가능한 에이전트:")
-        for agent_name, description in available_agents.items():
-            print(f"  - {agent_name}: {description}")
-        
-        print("\n💡 예시:")
-        if "analysis" in available_agents:
-            print("  python teacher.py analysis ./test_sample/analysis_sample.json")
-            print("  python teacher.py analysis C:/path/to/student_answers.json")
-        else:
-            # 첫 번째 등록된 에이전트를 예시로 사용
-            first_agent = next(iter(available_agents.keys())) if available_agents else "agent_name"
-            print(f"  python teacher.py {first_agent} ./path/to/input.json")
-        sys.exit(1)
-        
-    agent_to_run = sys.argv[1]
-    file_path = sys.argv[2]
-    
-    print("🎓 LLM-T Teacher System")
-    print("=" * 40)
-    
-    orchestrator = Orchestrator()
-    orchestrator.run(agent_name=agent_to_run, input_file_path=file_path)
+    """
+    간단 테스트 런너:
+      - 콘솔에서 사용자 질의(Q>)를 입력
+      - 그래프 한 턴 실행
+      - 핵심 결과 요약 출력
+      - 'exit' / 'quit' 입력 시 종료
+    """
+    import os
+    import traceback
+
+    # 테스트용 식별자 (환경변수로 바꿔도 됩니다)
+    USER_ID  = os.getenv("TEST_USER_ID", "demo_user")
+    SERVICE  = os.getenv("TEST_SERVICE", "teacher")
+    CHAT_ID  = os.getenv("TEST_CHAT_ID", "local")
+
+    # 오케스트레이터 & 그래프 컴파일
+    orch = Teacher(user_id=USER_ID, service=SERVICE, chat_id=CHAT_ID)
+    app = orch.graph
+
+    print("\n=== Teacher Graph 테스트 ===")
+    print("질문을 입력하세요. (종료: exit/quit)\n")
+
+    try:
+        while True:
+            try:
+                user_query = input("Q> ").strip()
+            except EOFError:
+                # 파이프 입력 등에서 EOF 들어오면 종료
+                print("\n[EOF] 종료합니다.")
+                break
+
+            if not user_query:
+                continue
+            if user_query.lower() in {"exit", "quit"}:
+                print("종료합니다.")
+                break
+
+            # 그래프 입력 상태 (intent는 분류 노드가 채웁니다)
+            init_state: Dict[str, Any] = {
+                "user_query": user_query,
+                "intent": "",
+                # artifacts는 intent_classifier에서 사용자 입력을 기반으로 동적으로 설정됩니다
+                "artifacts": {},
+            }
+
+            try:
+                # 체크포인터 필수 키(thread_id)를 기본으로 설정하여 모든 에이전트가 정상 실행되도록 함
+                result: Dict[str, Any] = orch.invoke(init_state)
+            except Exception:
+                print("[ERROR] 그래프 실행 중 예외가 발생했습니다:")
+                traceback.print_exc()
+                continue
+
+            # ─── 결과 요약 출력 ───
+            intent = result.get("intent", "(분류실패)")
+            shared = (result.get("shared") or {})
+            generation = (result.get("generation") or {})
+            solution = (result.get("solution") or {})
+            score = (result.get("score") or {})
+            analysis = (result.get("analysis") or {})
+            retrieval = (result.get("retrieval") or {})
+
+            print("\n--- 실행 요약 ---")
+            print(f"Intent: {intent}")
+
+            # 검색 요약
+            ra = shared.get("retrieve_answer")
+            if ra:
+                print(f"[Retrieve] {str(ra)[:200]}{'...' if len(str(ra))>200 else ''}")
+
+            # 문항/보기/정답/해설 개수
+            q_cnt = len(shared.get("question", []) or [])
+            a_cnt = len(shared.get("answer", []) or [])
+            e_cnt = len(shared.get("explanation", []) or [])
+            print(f"[QA] question={q_cnt}, answer={a_cnt}, explanation={e_cnt}")
+
+            # 문항 미리보기(있으면)
+            # if q_cnt:
+            #     print(f"\n=== 생성된 {q_cnt}개 문제 ===")
+            #     for i in range(q_cnt):
+            #         q = shared["question"][i] if i < len(shared["question"]) else ""
+            #         opts = (shared.get("options") or [[]] * q_cnt)[i] if i < len(shared.get("options") or []) else []
+            #         ans = (shared.get("answer") or [""] * q_cnt)[i] if i < len(shared.get("answer") or []) else ""
+            #         exp = (shared.get("explanation") or [""] * q_cnt)[i] if i < len(shared.get("explanation") or []) else ""
+                    
+            #         print(f"\n[문제 {i+1}] {str(q)[:150]}{'...' if len(str(q))>150 else ''}")
+            #         if opts:
+            #             print("  Options:", "; ".join(opts[:6]) + ("..." if len(opts) > 6 else ""))
+            #         if ans:
+            #             print(f"  Answer: {str(ans)[:100]}{'...' if len(str(ans))>100 else ''}")
+            #         if exp:
+            #             print(f"  Explanation: {str(exp)[:120]}{'...' if len(str(exp))>120 else ''}")
+            #     print("=" * 50)
+
+            # 최근 모델 풀이/해설 미리보기 제거 (각 문제마다 이미 표시됨)
+
+            # 분석/취약유형
+            weak = shared.get("weak_type")
+            if weak:
+                if isinstance(weak, list):
+                    print(f"[Weak Types] {', '.join(map(str, weak[:6]))}{'...' if len(weak)>6 else ''}")
+                else:
+                    print(f"[Weak Types] {weak}")
+
+            # 채점 결과 덤프(간단 표시)
+            if score:
+                # 특정 키가 있다면 골라서 노출하세요 (여기선 크기만)
+                print(f"[Score] keys={list(score.keys())}")
+
+            # 사용자 답변 출력
+            llm_response = result.get("llm_response")
+            if llm_response:
+                print(f"\n💬 [LLM 답변] {llm_response}")
+
+            print("-----------------\n")
+
+    except KeyboardInterrupt:
+        print("\n[Ctrl+C] 종료합니다.")
+
+    @traceable(name="teacher.build_form")
+    def build_form(self, state: TeacherState) -> TeacherState:
+        """
+        폼 출력용 payload를 구성하는 노드 (폼 생성 로직 분리)
+        - questions/options를 점검하고, UI가 바로 사용할 수 있는 form payload 생성
+        - artifacts.form_payload에 저장
+        - routing.output_mode를 form으로 확정
+        """
+        print("📝 폼 빌드 노드 실행 (build_form)")
+        new_state: TeacherState = ensure_shared({**state})
+        shared = new_state["shared"]
+        questions = shared.get("question", []) or []
+        options = shared.get("options", []) or []
+
+        if not questions or not options:
+            print("⚠️ 폼으로 표시할 문제/보기가 없습니다. PDF 경로로 우회")
+            new_state.setdefault("routing", {})
+            new_state["routing"]["output_mode"] = "pdf"
+            return new_state
+
+        total_n = min(len(questions), len(options))
+        form_payload = {
+            "type": "form_questions",
+            "title": "연습 문제 폼",
+            "message": "아래 문제에 대한 정답을 입력해 주세요.",
+            "questions": questions[:total_n],
+            "options": [opts if isinstance(opts, list) else [] for opts in options[:total_n]],
+            "count": total_n,
+        }
+
+        arts = new_state.setdefault("artifacts", {})
+        arts["form_payload"] = form_payload
+        new_state.setdefault("routing", {})
+        new_state["routing"]["output_mode"] = "form"
+        return new_state

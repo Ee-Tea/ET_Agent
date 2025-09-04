@@ -7,7 +7,7 @@ from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
 from pymilvus import connections, utility
-from teacher.agents.milvus_utils import connect_milvus_fallback
+# from teacher.agents.milvus_utils import connect_milvus_fallback
 
 
 def _build_embeddings() -> HuggingFaceEmbeddings:

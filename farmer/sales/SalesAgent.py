@@ -11,8 +11,9 @@ try:
 except ImportError:
     try:
         from konlpy.tag import Okt
+        okt = Okt()
         USE_KIWI = False
-    except Exception:
+    except:
         USE_KIWI = None
 import re
 from langchain_openai import ChatOpenAI
@@ -62,19 +63,20 @@ class GraphState(TypedDict):
 def extract_keywords(query):
     if USE_KIWI:
         # Kiwi 사용 (Java 불필요)
-        tokens = kiwi.analyze(query)
+        result = kiwi.analyze(query)
         nouns = []
-        for token in tokens[0][0]:
-            if token.tag in ['NNG', 'NNP', 'NNB']:  # 일반명사, 고유명사, 의존명사
+        for token in result[0][0]:
+            if token.tag.startswith('N'):  # 명사류 태그
                 nouns.append(token.form)
         return nouns
     elif USE_KIWI is False:
         # KoNLPy 사용 (Java 필요)
-        okt = Okt()
         return okt.nouns(query)
     else:
-        # 폴백: 간단한 공백 분리
-        return [word.strip() for word in query.split() if len(word.strip()) > 1]
+        # 둘 다 없으면 간단한 텍스트 분할
+        import re
+        # 한글 단어만 추출 (2글자 이상)
+        return re.findall(r'[가-힣]{2,}', query)
 
 # ===============================
 # 사용자 질문 받기

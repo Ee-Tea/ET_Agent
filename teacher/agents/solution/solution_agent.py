@@ -73,9 +73,6 @@ from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
 import os, json, glob
 from datetime import datetime
-<<<<<<< HEAD
-# from teacher.agents.milvus_utils import connect_milvus_fallback
-=======
 from langchain_milvus import Milvus
 from pymilvus import connections, Collection
 from difflib import SequenceMatcher
@@ -109,7 +106,6 @@ try:
     HAS_CROSS_ENCODER = True
 except Exception:
     HAS_CROSS_ENCODER = False
->>>>>>> origin/dev/teacher
 
 
 

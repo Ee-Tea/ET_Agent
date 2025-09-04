@@ -4,7 +4,16 @@ import requests
 from dotenv import load_dotenv
 import os
 import pandas as pd
-from konlpy.tag import Okt
+try:
+    from kiwipiepy import Kiwi
+    kiwi = Kiwi()
+    USE_KIWI = True
+except ImportError:
+    try:
+        from konlpy.tag import Okt
+        USE_KIWI = False
+    except Exception:
+        USE_KIWI = None
 import re
 from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
@@ -51,8 +60,21 @@ class GraphState(TypedDict):
 
 # 키워드 추출
 def extract_keywords(query):
-    okt = Okt()
-    return okt.nouns(query)
+    if USE_KIWI:
+        # Kiwi 사용 (Java 불필요)
+        tokens = kiwi.analyze(query)
+        nouns = []
+        for token in tokens[0][0]:
+            if token.tag in ['NNG', 'NNP', 'NNB']:  # 일반명사, 고유명사, 의존명사
+                nouns.append(token.form)
+        return nouns
+    elif USE_KIWI is False:
+        # KoNLPy 사용 (Java 필요)
+        okt = Okt()
+        return okt.nouns(query)
+    else:
+        # 폴백: 간단한 공백 분리
+        return [word.strip() for word in query.split() if len(word.strip()) > 1]
 
 # ===============================
 # 사용자 질문 받기

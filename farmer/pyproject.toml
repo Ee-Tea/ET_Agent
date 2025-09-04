@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "scikit-learn>=1.4.0",
     "konlpy>=0.6.0",
+    "kiwipiepy>=0.18.0",
     "spacy==3.7.5",
     "thinc==8.2.4",
     "blis==0.7.11",

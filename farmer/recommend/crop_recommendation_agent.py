@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# 이 파일이 UTF-8 인코딩을 사용함을 명시합니다.
-
 import os
 import re
 from pathlib import Path
@@ -46,7 +42,7 @@ if not OPENAI_API_KEY:
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus as MilvusVectorStore
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from langchain_openai import ChatOpenAI
 
 # =========[ 전역 변수 ]=========
@@ -577,7 +573,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         print("TAVILY API 키 없음. 웹 검색 건너뜁니다.")
         return {**state, "web_search_results": "웹 검색 비활성화", "web_contexts": []}
     
-    search_tool = TavilySearchResults(max_results=3)
+    search_tool = TavilySearch(max_results=3)
     results = search_tool.invoke({"query": question})
     
     web_contexts: List[str] = []

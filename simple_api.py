@@ -108,22 +108,21 @@ async def chat(request: ChatRequest):
     # ET-Agent가 사용 가능한 경우
     if orchestrator and ET_AGENT_AVAILABLE:
         try:
-            # ET-Agent 상태 초기화
+            # ET-Agent 상태 초기화 (MainState 구조에 맞게)
             initial_state = {
                 "user_query": request.message,
-                "intent": "",
-                "shared": {},
-                "work": {},
-                "retrieval": {},
-                "generation": {},
-                "solution": {},
-                "score": {},
-                "analysis": {},
-                "history": [],
-                "session": {},
-                "artifacts": {},
-                "routing": {},
-                "llm_response": ""
+                "user_id": request.user_id,
+                "chat_id": request.chat_id,
+                "session_key": f"{request.user_id}_{request.chat_id}",
+                "existing_questions": [],
+                "locked_service": None,
+                "short_term_data": {},
+                "is_relevant": True,
+                "classified_service": "",
+                "service_consistent": True,
+                "teacher_result": None,
+                "farmer_result": None,
+                "final_response": ""
             }
             
             # ET-Agent 실행 (체크포인터 설정 포함)
@@ -133,10 +132,10 @@ async def chat(request: ChatRequest):
                     "checkpoint_id": "api_checkpoint"
                 }
             }
-            result = orchestrator.app.invoke(initial_state, config=config)
+            result = orchestrator.graph.invoke(initial_state, config=config)
             
             # 응답 구성
-            response_text = result.get("llm_response", "응답을 생성할 수 없습니다.")
+            response_text = result.get("final_response", "응답을 생성할 수 없습니다.")
             
             return ChatResponse(
                 response=response_text,

@@ -855,7 +855,14 @@ def get_optimal_batch_size(text_lengths: List[int], base_batch_size: int = BATCH
     avg_length = sum(text_lengths) / len(text_lengths) if text_lengths else 100
     
     # 메모리 사용률에 따른 배치 크기 조정
-    if gpu_usage > GPU_MEMORY_THRESHOLD:
+    if gpu_usage > GPU_CRITICAL_THRESHOLD:
+        # 메모리 심각 부족 시 CPU 모드로 전환
+        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → CPU 모드로 전환 시도")
+        switch_to_cpu_mode()
+        # CPU 모드에서는 더 작은 배치 크기 사용
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.2))
+        print(f"   - 🔧 CPU 모드 배치 크기: {base_batch_size} → {adjusted_size}")
+    elif gpu_usage > GPU_MEMORY_THRESHOLD:
         # 메모리 부족 시 배치 크기 대폭 감소
         adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.3))
         print(f"   - 🔧 GPU 메모리 부족 ({gpu_usage:.1%}) → 배치 크기 감소: {base_batch_size} → {adjusted_size}")
@@ -929,7 +936,13 @@ def embed_texts_batch(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) 
     if not texts:
         return np.array([], dtype="float32").reshape(0, 768)
     
-    # CPU 모드 전환 확인
+    # GPU 메모리 사용률 즉시 확인 및 CPU 모드 전환
+    gpu_usage = get_gpu_memory_usage()
+    if gpu_usage > GPU_CRITICAL_THRESHOLD and not _force_cpu_mode:
+        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → 즉시 CPU 모드로 전환")
+        switch_to_cpu_mode()
+    
+    # CPU 모드 전환 확인 (기존 로직)
     check_and_switch_to_cpu_if_needed()
     
     # 텍스트 길이 분석

@@ -9,14 +9,14 @@ from typing import List, Dict, Any, Optional, TypedDict
 from langchain_community.document_loaders.csv_loader import CSVLoader
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Milvus as LangChainMilvus
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from langchain.retrievers import EnsembleRetriever
 
 # RAGAS 라이브러리
@@ -91,7 +91,7 @@ VALIDATION_PROMPT = """
 답변:
 """
 
-tavily_tool = TavilySearchResults(max_results=5, api_key=TAVILY_API_KEY)
+tavily_tool = TavilySearch(max_results=5, api_key=TAVILY_API_KEY)
 
 # 전역 retriever 변수 (직렬화 문제 해결을 위해)
 _global_retriever = None

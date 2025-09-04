@@ -307,3 +307,7 @@ data/redis/
 data/
 docker-compose.yml
 volumes/
+
+# LangGraph API
+.langgraph_api
+volumes/

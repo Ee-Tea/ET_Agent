@@ -5,7 +5,7 @@ services:
   langgraph-api:
     # 소스 코드 변경 즉시 반영 (이미지 재빌드 불필요)
     volumes:
-      - ./:/deps/ET_Agent:rw
+      - ./:/deps/LLM-T:rw
     environment:
       # 개발 플래그 (애플리케이션이 참고하도록 선택적으로 사용)
       RUN_IN_CONTAINER: "1"

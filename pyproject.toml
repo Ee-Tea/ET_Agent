@@ -50,6 +50,8 @@ dependencies = [
     "datasets>=4.0.0",
     "ragas>=0.3.2",
     "matplotlib>=3.10.5",
+    "langchain-cli>=0.0.37",
+    "langserve>=0.3.1",
 ]
 
 [build-system]

@@ -348,7 +348,12 @@ def parse_generator_input(user_question: str) -> dict:
 def route_solution(state: Dict[str, Any]) -> Dict[str, Any]:
     """solution 노드 라우팅 - 항상 preprocess를 먼저 거침"""
     from .teacher_util import has_questions, extract_image_paths
-    from .pdf_preprocessor import extract_pdf_paths
+    try:
+        from .pdf_preprocessor import extract_pdf_paths
+    except ImportError:
+        # pdf_preprocessor가 없으면 빈 리스트 반환하는 함수로 대체
+        def extract_pdf_paths(text: str) -> List[str]:
+            return []
     
     print(f"🔍 [route_solution] 상태 확인:")
     print(f"   user_query: {state.get('user_query', '')}")

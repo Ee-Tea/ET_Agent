@@ -9,7 +9,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # 🔁 Milvus 관련 임포트 추가
 from langchain_milvus import Milvus
 from pymilvus import connections, utility
-from teacher.agents.milvus_utils import connect_milvus_fallback
+# from teacher.agents.milvus_utils import connect_milvus_fallback
 from collections import Counter
 
 

@@ -101,6 +101,7 @@ class GraphState(TypedDict, total=False):
     answer_source: Optional[str]
     ragas_score: Optional[float]
     retry_count: int
+    web_search_count: int
     is_retrieval_sufficient: bool
     is_answer_sufficient: bool
     original_docs: List[str]
@@ -326,7 +327,7 @@ def load_milvus_node(state: GraphState) -> Dict[str, Any]:
             connection_args={"uri": MILVUS_URI, "token": MILVUS_TOKEN},
         )
         print(f"Milvus 로드 완료: {MILVUS_COLLECTION}")
-        return {**state, "retry_count": 0, "ragas_score": None, "ragas_details": {}}  # vectorstore 제거
+        return {**state, "retry_count": 0, "web_search_count": 0, "ragas_score": None, "ragas_details": {}}  # vectorstore 제거
     except Exception as e:
         print(f"Milvus 로드 실패: {e}")
         raise ConnectionError("Milvus 벡터스토어 로드 실패")
@@ -617,13 +618,14 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
 
 # 웹 검색을 수행하는 노드 함수를 정의합니다.
 def web_search_node(state: GraphState) -> Dict[str, Any]:
-    print("--- 노드: 웹 검색 ---")
+    web_search_count = state.get("web_search_count", 0) + 1
+    print(f"--- 노드: 웹 검색 (시도 횟수: {web_search_count}/2) ---")
     question = state.get("question")
     if not question:
         raise ValueError("질문이 누락되었습니다.")
     if not TAVILY_API_KEY:
         print("TAVILY API 키 없음. 웹 검색 건너뜁니다.")
-        return {**state, "web_search_results": "웹 검색 비활성화", "web_contexts": []}
+        return {**state, "web_search_results": "웹 검색 비활성화", "web_contexts": [], "web_search_count": web_search_count}
     
     search_tool = TavilyClient(api_key=TAVILY_API_KEY)
     
@@ -632,7 +634,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     
     try:
         ***REMOVED***Client 사용 - search 메서드 호출
-        response = search_tool.search(query=question, max_results=3)
+        response = search_tool.search(query=question, max_results=5)
         
         ***REMOVED***Client 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
         if isinstance(response, dict) and "results" in response:
@@ -657,7 +659,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     # 웹 검색 결과를 web_context에 저장
     web_context = "\n\n".join(web_context_parts)
     
-    return {**state, "web_context": web_context}
+    return {**state, "web_context": web_context, "web_search_count": web_search_count}
 
 def fallback_answer_node(state: GraphState) -> Dict[str, Any]:
     fallback_msg = "죄송하지만 이 질문에 대한 답변은 제공할 수 없습니다. 다른 질문을 해주세요."
@@ -698,17 +700,24 @@ def build_graph():
 
     # 2차 검증 결과에 따라 종료/재시도/대체 답변 결정
     def decide_after_answer_validation(state: GraphState) -> str:
-        # 웹 검색이 이미 수행된 경우 (web_context가 있음)
+        web_search_count = state.get("web_search_count", 0)
+        
+        # 답변이 충분한 경우 바로 종료
+        if state["is_answer_sufficient"]:
+            return "end"
+        
+        # 웹 검색이 이미 수행된 경우
         if state.get("web_context"):
-            if state["is_answer_sufficient"]:
-                return "end"
+            # 웹 검색을 2번 미만 했고, 재시도 횟수가 3번 미만인 경우 재시도
+            if web_search_count < 2 and state["retry_count"] < 3:
+                print(f"   - 🔄 웹 검색 재시도 ({web_search_count}/2)")
+                return "retry"
             else:
+                print(f"   - ⚠️ 웹 검색 한계 도달 ({web_search_count}/2) 또는 재시도 한계 도달")
                 return "fallback"
-        # 일반적인 경우
+        # 웹 검색이 아직 수행되지 않은 경우
         else:
-            if state["is_answer_sufficient"]:
-                return "end"
-            elif state["retry_count"] >= 3:
+            if state["retry_count"] >= 3:
                 return "fallback"
             else:
                 return "retry"

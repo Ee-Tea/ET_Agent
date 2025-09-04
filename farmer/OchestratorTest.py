@@ -3,12 +3,11 @@ import requests
 import re
 import json
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import InMemorySaver
+
 from langchain_core.runnables import RunnableLambda
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
-from langchain_groq import ChatGroq
-# from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from typing import TypedDict, Annotated, List, Dict, Optional
 from tavily import TavilyClient
 import operator
@@ -73,14 +72,7 @@ class Farmer:
         self.chat_id = chat_id
         
         # LLM 설정
-        self.llm = ChatGroq(model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-                           temperature=0.8,
-                           api_key=os.getenv("OPENAI_KEY1"))
-        # gpt-4o-mini 사용 시 주석 해제
-        # self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY=REDACTED()
-        
-        # 체크포인터 초기화
-        self.checkpointer = InMemorySaver()
+        self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY=REDACTED()
         
         # 에이전트 함수들 로드
         self._load_agent_functions()
@@ -92,77 +84,41 @@ class Farmer:
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
     
     def _init_memory_system(self):
-        """메모리 시스템 초기화"""
-        try:
-            # Redis 메모리 시스템 시도
-            sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-            from common.short_term.redis_memory import RedisLangGraphMemory
-            
-            # Redis 포트를 6380으로 설정 (Docker 컨테이너 포트)
-            os.environ['REDIS_PORT'] = '6380'
-            self.memory = RedisLangGraphMemory(user_id=self.user_id, service=self.service, chat_id=self.chat_id)
-            print("✅ Redis 메모리 시스템 초기화 완료")
-        except Exception as e:
-            print(f"⚠️ Redis 연결 실패: {e}")
-            print("📝 메모리 기반으로 실행합니다.")
-            # 간단한 메모리 기반 메모리 클래스
-            class SimpleMemory:
-                def load(self, state): 
-                    return state
-                def save(self, state, _): 
-                    return state
-            self.memory = SimpleMemory()
+        """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
+        print("📝 메모리 시스템: Main에서 중앙집중식 관리")
     
     def load_state(self, state: RouterState) -> RouterState:
-        """그래프 시작 시 메모리에서 상태를 불러와 state에 병합"""
-        if (state.get("session") or {}).get("loaded"):
-            return state
-        loaded = self.memory.load(state)
-        loaded.setdefault("session", {})
-        loaded["session"]["loaded"] = True
-        return loaded
+        """그래프 시작 시 상태 초기화"""
+        print("[상태 초기화] 단일 질문 처리")
+        return self._initialize_clean_state(state)
+    
+    def _initialize_clean_state(self, state: RouterState) -> RouterState:
+        """깨끗한 상태로 초기화"""
+        # 모든 상태 초기화
+        state.clear()
+        state["session"] = {"loaded": True, "new_question": True}
+        state["query"] = []
+        state["selected_agents"] = []
+        state["question_parts"] = {}
+        state["execution_order"] = []
+        state["crop_info"] = []
+        state["selected_crop"] = []
+        state["agent_results"] = {}
+        state["output"] = []
+        state["routing"] = {}
+        state["error_info"] = {}
+    
+        return state
     
     def persist_state(self, state: RouterState) -> RouterState:
-        """그래프 리프 종료 후 메모리에 반영"""
-        try:
-            self.memory.save(state, state)
-        except Exception as e:
-            print(f"⚠️ 상태 저장 실패: {e}")
+        """그래프 종료 후 상태 저장"""
+        print("[상태 저장] 완료")
         return state
     
     def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> RouterState:
         """워크플로우 재개 기능"""
-        if config is None:
-            config = {"configurable": {"thread_id": "default"}}
-        
-        try:
-            print(f"🔄 워크플로우 재개 중... resume_data: {resume_data}")
-            
-            # LangGraph 버전에 따른 Command import 시도
-            try:
-                from langgraph.checkpoint.memory import Command
-            except ImportError:
-                try:
-                    from langgraph import Command
-                except ImportError:
-                    try:
-                        from langgraph.types import Command
-                    except ImportError:
-                        print("❌ Command를 import할 수 없습니다. LangGraph 버전을 확인해주세요.")
-                        raise ImportError("Command import 실패")
-            
-            # Command(resume)을 사용하여 중단된 지점부터 재개
-            resume_command = Command(resume=resume_data)
-            print(f"📤 Command(resume) 전송: {resume_command}")
-            
-            # 체크포인터가 설정된 그래프로 재개
-            result = self.graph.invoke(resume_command, config)
-            print("✅ 워크플로우 재개 완료")
-            return result
-        except Exception as e:
-            print(f"❌ 워크플로우 재개 실패: {e}")
-            print(f"🔍 오류 상세: {type(e).__name__}: {str(e)}")
-            raise
+        print("❌ 워크플로우 재개 기능은 지원되지 않습니다.")
+        raise Exception("워크플로우 재개는 지원되지 않습니다.")
     
     def _handle_error(self, state: RouterState, error: Exception, context: str = "") -> RouterState:
         """에러 처리 및 상태 복구"""
@@ -190,15 +146,17 @@ class Farmer:
     
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
-        from 작물추천.crop65pdfllm import run as crop_recommend_run
-        from 재배방법.crop_overall import run as crop_cultivation_run
-        from 재해대응.DisasterAgent import run as disaster_run
+        from recommend.crop_recommendation_agent import run as crop_recommend_run
+        from cultivation.CG_agent_edit import run as crop_cultivation_run
+        from disaster.DisasterAgent import run as disaster_run
+        from WeatherAgent import run as weather_run
         from sales.SalesAgent import run as market_run
         
         self.agent_functions = {
             "작물추천_agent": crop_recommend_run,
             "작물재배_agent": crop_cultivation_run,
             "재해_agent": disaster_run,
+            "날씨_agent": weather_run,
             "판매처_agent": market_run
         }
     
@@ -222,22 +180,70 @@ class Farmer:
             config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
         
         try:
-            # RouterState로 변환
+            # RouterState로 변환하고 초기 상태 설정
             router_state = RouterState()
             router_state["query"] = [state.get("query", "")]
+            router_state["session"] = {"loaded": True, "new_question": True}
             
-            # 체크포인터와 함께 그래프 실행
-            result = self.graph.invoke(router_state, config)
+            # Supervisor에서 전달받은 상태 정보를 반영
+            if state.get("selected_crop"):
+                router_state["selected_crop"] = [state.get("selected_crop", "")]
+            if state.get("crop_info"):
+                router_state["crop_info"] = [state.get("crop_info", "")]
+            
+            # 상태 초기화
+            router_state = self.load_state(router_state)
+            
+            # input 노드 건너뛰고 agent_select부터 시작
+            router_state = self.node_agent_select(router_state)
+            
+            # 에이전트 선택에 따른 분기 처리
+            selected_agents = router_state.get("selected_agents", [])
+            
+            # 작물추천_agent가 선택된 경우
+            if "작물추천_agent" in selected_agents:
+                router_state = self.node_crop_recommend(router_state)
+            
+            # 다른 에이전트들 실행
+            if len([agent for agent in selected_agents if agent != "작물추천_agent"]) > 0:
+                # 병렬 실행
+                agents_to_run = [agent for agent in selected_agents if agent != "작물추천_agent"]
+                for agent in agents_to_run:
+                    if agent == "작물재배_agent":
+                        router_state = self.node_crop_grow_agent(router_state)
+                    elif agent == "재해_agent":
+                        router_state = self.node_disaster_agent(router_state)
+                    elif agent == "날씨_agent":
+                        router_state = self.node_weather_agent(router_state)
+                    elif agent == "판매처_agent":
+                        router_state = self.node_sales_agent(router_state)
+            elif len(selected_agents) == 1:
+                # 단일 에이전트 실행
+                agent = selected_agents[0]
+                if agent == "작물재배_agent":
+                    router_state = self.node_crop_grow_agent(router_state)
+                elif agent == "재해_agent":
+                    router_state = self.node_disaster_agent(router_state)
+                elif agent == "날씨_agent":
+                    router_state = self.node_weather_agent(router_state)
+                elif agent == "판매처_agent":
+                    router_state = self.node_sales_agent(router_state)
+            
+            # 최종 응답 병합
+            router_state = self.node_merge_output(router_state)
+            
+            # 상태 저장
+            router_state = self.persist_state(router_state)
             
             # 결과 반환
             return {
-                "output": result.get("output", [""])[0] if result.get("output") else "",
-                "selected_agents": result.get("selected_agents", []),
-                "agent_results": result.get("agent_results", {}),
-                "selected_crop": result.get("selected_crop", [""])[0] if result.get("selected_crop") else "",
-                "crop_info": result.get("crop_info", [""])[0] if result.get("crop_info") else "",
+                "output": router_state.get("output", [""])[0] if router_state.get("output") else "",
+                "selected_agents": router_state.get("selected_agents", []),
+                "agent_results": router_state.get("agent_results", {}),
+                "selected_crop": router_state.get("selected_crop", [""])[0] if router_state.get("selected_crop") else "",
+                "crop_info": router_state.get("crop_info", [""])[0] if router_state.get("crop_info") else "",
                 "status": "success",
-                "error_info": result.get("error_info", {})
+                "error_info": router_state.get("error_info", {})
             }
             
         except Exception as e:
@@ -272,6 +278,10 @@ class Farmer:
             "폭염, 한파, 가뭄, 집중호우, 홍수 등 자연재해 및 이상기후로 인한 피해를 예방하고 대응하는 방법을 안내합니다. 재해 발생 전 대비, 재해 발생 중의 조치, 재해 후 작물 복구 및 피해 최소화 방안을 다룹니다."
             "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
         ),
+        "날씨_agent": (
+            "현재 날씨, 단기예보, 중기예보, 기상특보 등 실시간 기상 정보를 제공합니다. 기상청 API를 통해 정확한 날씨 데이터를 바탕으로 농업에 필요한 기상 정보를 안내합니다."
+            "※ 핵심 키워드: '날씨', '기온', '강수', '예보', '하늘상태', '바람', '습도', '오늘 날씨', '내일 날씨'"
+        ),
         "판매처_agent": (
             "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 실시간 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
@@ -293,7 +303,9 @@ class Farmer:
         
         3) 재해_agent: {self.agent_descriptions["재해_agent"]}
         
-        4) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
+        4) 날씨_agent: {self.agent_descriptions["날씨_agent"]}
+        
+        5) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
         
         질문: "{user_question}"
         
@@ -379,7 +391,7 @@ class Farmer:
         async def run_agent(agent_name: str, question_part: str):
             """개별 에이전트 실행"""
             try:
-                return agent_name, self.execute_agent_with_boundaries(agent_name, question_part)
+                return agent_name, await self.execute_agent_with_boundaries(agent_name, question_part)
             except Exception as e:
                 print(f"❌ {agent_name} 실행 실패: {e}")
                 return agent_name, f"{agent_name} 실행 중 오류가 발생했습니다: {e}"
@@ -432,7 +444,7 @@ class Farmer:
         print(f"=== 🎯 병렬 에이전트 실행 완료 ===")
         return state
 
-    def execute_agent_with_boundaries(self, agent_name, question_part):
+    async def execute_agent_with_boundaries(self, agent_name, question_part):
         agent_func = self.agent_functions.get(agent_name)
         if not agent_func:
             return f"{agent_name} 실행 함수가 연결되어 있지 않습니다."
@@ -441,17 +453,18 @@ class Farmer:
 
         try:
             agent_state = {"query": agent_prompt}
-            agent_result = agent_func(agent_state)
+            
+            # 날씨 에이전트는 비동기 함수이므로 await 사용
+            if agent_name == "날씨_agent":
+                agent_result = await agent_func(agent_state)
+            else:
+                agent_result = agent_func(agent_state)
+                
             answer = agent_result.get("agent_answer", "답변 생성 실패")
             return answer
 
         except Exception as e:
             return f"에이전트 실행 중 오류: {e}"
-
-
-
-
-
 
     def select_single_crop_from_recommendations(self, crop_recommendations):
         """
@@ -509,23 +522,21 @@ class Farmer:
             # 유효한 입력인 경우 루프 종료
             break
 
-        # 모든 상태 초기화
-        state["crop_info"] = []
-        state["selected_crop"] = []
-        state["selected_agents"] = []
-        state["question_parts"] = {}
-        state["execution_order"] = []
-        state["agent_results"] = {} # 에이전트별 결과 딕셔너리 초기화
-        state["output"] = []
-
-        # 유효한 입력인 경우 상태에 저장하고 다음 단계로 (리스트로 저장)
+        # 새로운 질문 플래그 설정
+            state.setdefault("session", {})
+            state["session"]["new_question"] = True
+        
+        # 새로운 질문 저장
         state["query"] = [user_input]
         print(f"\n[질문] {user_input}")
+        print(f"[새로운 질문 처리 시작]")
         
         return state
 
     @traceable(name="node_agent_select")
     def node_agent_select(self, state: RouterState) -> RouterState:
+        print(f"\n[에이전트 선택]")
+        
         # 기존 복잡한 로직을 단순화된 함수로 교체
         result = self.simple_agent_selector(state["query"][0] if state["query"] else "")
         # 기존 selected_agents 덮어쓰기 (중복 방지)
@@ -674,6 +685,42 @@ class Farmer:
         print(f"[✅ 판매처_agent 병렬 실행 완료]")
         print(f"[📤 응답 원본] {answer[:200]}...")
         return state
+
+    @traceable(name="node_weather_agent")
+    def node_weather_agent(self, state: RouterState) -> RouterState:
+        """날씨_agent 전용 노드 (비동기 처리)"""
+        if "날씨_agent" not in state.get("selected_agents", []):
+            return state
+        
+        print(f"\n=== 🌤️ 날씨_agent 병렬 실행 ===")
+        
+        # 질문 부분 가져오기
+        question_parts = state.get("question_parts", {})
+        if question_parts and "날씨_agent" in question_parts:
+            question_part = question_parts["날씨_agent"]
+        else:
+            question_part = state["query"][0] if state["query"] else ""
+        
+        print(f"[📝 담당 질문] {question_part}")
+        
+        # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
+        # (날씨는 지역과 시간이 중요하므로)
+        
+        # 에이전트 비동기 실행 (동기 함수 내에서 비동기 처리)
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            answer = loop.run_until_complete(self.execute_agent_with_boundaries("날씨_agent", question_part))
+        finally:
+            loop.close()
+        
+        # 전용 키에 답변 저장
+        state["agent_results"]["날씨_agent"] = answer
+        
+        print(f"[✅ 날씨_agent 병렬 실행 완료]")
+        print(f"[📤 응답 원본] {answer[:200]}...")
+        return state
         
     # 병렬 처리 노드 (개선된 비동기 처리)
     @traceable(name="node_parallel_agents")
@@ -814,11 +861,12 @@ class Farmer:
         workflow.add_node("parallel_execution", self.node_parallel_agents)
         workflow.add_node("crop_grow_agent", self.node_crop_grow_agent)
         workflow.add_node("disaster_agent", self.node_disaster_agent)
+        workflow.add_node("weather_agent", self.node_weather_agent)
         workflow.add_node("sales_agent", self.node_sales_agent)
 
         workflow.add_node("merge_output", self.node_merge_output)
         
-        # 기본 엣지 (메모리 시스템 포함)
+        # 기본 엣지
         workflow.add_edge("load_state", "input")
         workflow.add_edge("input", "agent_select")
         
@@ -836,6 +884,8 @@ class Farmer:
                     return "crop_grow_agent"
                 elif agent == "재해_agent":
                     return "disaster_agent"
+                elif agent == "날씨_agent":
+                    return "weather_agent"
                 elif agent == "판매처_agent":
                     return "sales_agent"
 
@@ -853,6 +903,7 @@ class Farmer:
                 "crop_recommend": "crop_recommend",
                 "crop_grow_agent": "crop_grow_agent",
                 "disaster_agent": "disaster_agent", 
+                "weather_agent": "weather_agent",
                 "sales_agent": "sales_agent",
                 "parallel_execution": "parallel_execution",
 
@@ -872,31 +923,26 @@ class Farmer:
         # 병렬 에이전트 실행
         workflow.add_edge("parallel_execution", "crop_grow_agent")
         workflow.add_edge("parallel_execution", "disaster_agent")
+        workflow.add_edge("parallel_execution", "weather_agent")
         workflow.add_edge("parallel_execution", "sales_agent")
         
         # 모든 에이전트 노드에서 병합 노드로
         workflow.add_edge("crop_grow_agent", "merge_output")
         workflow.add_edge("disaster_agent", "merge_output")
+        workflow.add_edge("weather_agent", "merge_output")
         workflow.add_edge("sales_agent", "merge_output")
 
         
-        # 병합 노드에서 메모리 저장 후 종료
+        # 병합 노드에서 종료
         workflow.add_edge("merge_output", "persist_state")
         workflow.add_edge("persist_state", END)
         
         workflow.set_entry_point("load_state")
         
-        return workflow.compile(checkpointer=self.checkpointer)
+        return workflow.compile()
 
     def run_orchestrator_langgraph(self):
         graph = self.create_workflow()
-        try:
-            graph_image_path = "ochestrator_workflow.png"
-            with open(graph_image_path, "wb") as f:
-                f.write(graph.get_graph().draw_mermaid_png())
-            print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        except Exception as e:
-            print(f"그래프 시각화 중 오류 발생: {e}")
 
         while True:
             try:
@@ -934,6 +980,14 @@ class Farmer:
 def run_orchestrator_langgraph():
     """기존 실행 방식과의 호환성을 위한 함수"""
     farmer = Farmer(user_id="default_user", service="farmer", chat_id="default_chat")
+    # graph = farmer.create_workflow()
+    # try:
+    #     graph_image_path = "ochestrator_workflow.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(graph.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류 발생: {e}")
     farmer.run_standalone()
 
 if __name__ == "__main__":

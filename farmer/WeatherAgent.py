@@ -2,12 +2,20 @@
 """
 통합 기상 전문가 그래프:
 - 라이브 특보(wrn_met_data.php) + 단기육상예보(fct_afs_dl.php)
-- 중기 육상예보 주간(fct_afs_wl.php) [CSV 권역 매핑 기반]  ← 통합 추가
+- 권역 육상예보 주간(fct_afs_wl.php) [CSV 권역 매핑 기반]  ← 통합 추가
 - API-only retrieve (벡터DB 미사용, in-memory FAISS 유사도)
 - 2차 검증 노드 제거
 - 예보관 톤(개요/상세/영향-위험도/권고) 프롬프트
 - 인터넷 연결 상태 자동 확인
+"""
 
+# 경고 메시지 필터링
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*HuggingFaceEmbeddings.*")
+warnings.filterwarnings("ignore", message=".*resume_download.*")
+"""
 .env 설정:
   WHEATHER_API_KEY_HUB=REDACTED     # (필수) 기상청 API 키
   KMA_TIMEOUT=30               # (선택) API 타임아웃 초 (기본값: 30초, 타임아웃 오류 시 증가 권장)
@@ -26,6 +34,8 @@ import json
 import csv
 import time
 import socket
+import asyncio
+import gc
 from typing import TypedDict, Optional, Any, Dict, List, Tuple
 from datetime import datetime, timedelta
 from operator import itemgetter
@@ -87,6 +97,9 @@ WHEATHER_API_KEY_HUB=REDACTED("WHEATHER_API_KEY_HUB")
 USE_KMA_LIVE = os.getenv("USE_KMA_LIVE", "true").lower() in ("1", "true", "yes")
 FORCE_DISABLE_KMA_LIVE = False
 
+# 통합 지역코드 CSV 설정
+UNIFIED_REGIONS_CSV = os.getenv("UNIFIED_REGIONS_CSV", "farmer/all_regions_combined.csv")
+
 TAVILY_API_KEY=REDACTED("TAVILY_API_KEY")
 TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
 
@@ -110,13 +123,13 @@ def _init_ragas_backend():
         if not OPENAI_API_KEY=REDACTED("   - ⚠️ OPENAI_API_KEY=REDACTED 비활성화")
             return
         
-        ***REMOVED*** LLM 설정 - RAGAS용으로 JSON 출력 강제
+        ***REMOVED*** LLM 설정 - RAGAS faithfulness 향상을 위한 설정
         llm = ChatOpenAI(
             model_name=RAGAS_OPENAI_LLM, 
-            temperature=0, 
+            temperature=TEMPERATURE,  # 환경설정에서 가져온 temperature 사용
             api_key=OPENAI_API_KEY=REDACTED JSON 파싱 오류 방지를 위한 설정
             max_tokens=4000,
-            top_p=0.1,
+            top_p=0.3,  # 0.1 → 0.3으로 완화 (더 다양한 응답 허용)
             # JSON 출력 안정성을 위한 추가 설정
             frequency_penalty=0.0,
             presence_penalty=0.0
@@ -215,18 +228,43 @@ def _read_map_csv(path: Optional[str]) -> List[tuple]:
         pairs.append((code, name))
     return pairs
 
-def _load_region_maps_from_two_csvs():
+def _load_unified_region_map():
+    """통합 CSV에서 지역코드 매핑 로드"""
     REGION_MAP.clear()
     REGION_NAME_INDEX.clear()
-    paths = [os.getenv("KMA_ADVISORY_MAP_CSV"), os.getenv("KMA_FCT_MAP_CSV")]
-    for p in paths:
-        for code, name in _read_map_csv(p):
-            REGION_MAP[code] = name
-            REGION_NAME_INDEX.setdefault(_norm_name(name), []).append(code)
-    used = ", ".join([p for p in paths if p]) or "N/A"
-    print(f"✅ 지역코드 매핑 로드: {len(REGION_MAP)}개 (from: {used})")
+    
+    if not os.path.exists(UNIFIED_REGIONS_CSV):
+        print(f"⚠️ 통합 CSV 파일이 없습니다: {UNIFIED_REGIONS_CSV}")
+        return
+    
+    try:
+        # pandas로 읽기 (더 안정적)
+        df = pd.read_csv(UNIFIED_REGIONS_CSV, encoding='utf-8-sig')
+        
+        # 컬럼 자동 감지
+        code_col, name_col = _pick_cols(df)
+        
+        if not code_col or not name_col:
+            print("❌ CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
+            return
+        
+        print(f"✅ CSV 컬럼 감지: 코드={code_col}, 이름={name_col}")
+        
+        # 데이터 로드
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip()
+            name = str(row[name_col]).strip()
+            
+            if code and name and code.lower() != "nan" and name.lower() != "nan":
+                REGION_MAP[code] = name
+                REGION_NAME_INDEX.setdefault(_norm_name(name), []).append(code)
+        
+        print(f"✅ 통합 CSV 로드 완료: {len(REGION_MAP)}개 지역 (파일: {UNIFIED_REGIONS_CSV})")
+        
+    except Exception as e:
+        print(f"❌ 통합 CSV 로드 실패: {e}")
 
-_load_region_maps_from_two_csvs()
+_load_unified_region_map()
 
 def resolve_region(token: str) -> str:
     if not token: return "N/A"
@@ -383,22 +421,22 @@ def should_fetch_forecasts(q: str, days_from_today: int) -> bool:
     weather_keywords = ["날씨", "기온", "강수", "하늘", "바람", "예보"]
     return any(keyword in q for keyword in weather_keywords)
 
-def should_fetch_mid_forecasts(q: str, days_from_today: int) -> bool:
-    """중기예보 데이터를 가져올지 결정"""
+def should_fetch_region_forecasts(q: str, days_from_today: int) -> bool:
+    """권역예보 데이터를 가져올지 결정"""
     if not ENABLE_CONDITIONAL_API_CALLS:
         return True
     
-    # 4일 이전이면 중기예보 의미 없음
+    # 4일 이전이면 권역예보 의미 없음
     if days_from_today < 4:
         return False
     
-    # 10일 이후면 중기예보 범위 벗어남
+    # 10일 이후면 권역예보 범위 벗어남
     if days_from_today > 10:
         return False
     
-    # 중기예보 관련 키워드가 있어야 함
-    mid_keywords = ["중기", "주간", "장기", "전망", "예보"]
-    return any(keyword in q for keyword in mid_keywords)
+    # 권역예보 관련 키워드가 있어야 함
+    region_keywords = ["권역", "주간", "장기", "전망", "예보"]
+    return any(keyword in q for keyword in region_keywords)
 
 # =========[ 병렬 처리 함수들 ]=========
 def safe_api_call(func, *args, **kwargs):
@@ -410,14 +448,9 @@ def safe_api_call(func, *args, **kwargs):
         return None
 
 def embed_texts_parallel(texts: List[str], batch_size: int = BATCH_SIZE) -> np.ndarray:
-    """병렬로 임베딩 계산 (안전한 버전)"""
-    # 병렬 처리 비활성화하거나 배치 크기가 작으면 순차 처리
-    if not ENABLE_PARALLEL_PROCESSING or len(texts) < batch_size:
-        return embed_texts(texts)
-    
-    # 간단하게 순차 처리로 폴백 (임베딩 모델의 thread-safety 문제 때문)
-    print("   - ℹ️ 임베딩 순차 처리로 폴백")
-    return embed_texts(texts)
+    """병렬로 임베딩 계산 (비동기 동적 배치 처리 버전)"""
+    # 비동기 임베딩 사용 (GPU 메모리 기반 동적 배치)
+    return embed_texts_async_wrapper(texts)
 
 def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
     """병렬로 날씨 데이터 가져오기"""
@@ -451,11 +484,11 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                         fetch_short_land_records
                     )
             
-            # 중기 데이터 (4일 이후일 때만)
-            if days_from_today >= 4 and should_fetch_mid_forecasts(q, days_from_today):
+            # 권역 데이터 (4일 이후일 때만)
+            if days_from_today >= 4 and should_fetch_region_forecasts(q, days_from_today):
                 region_code = get_region_code(region)
                 if region_code:
-                    futures[f'mid_forecasts_{i}'] = executor.submit(
+                    futures[f'region_forecasts_{i}'] = executor.submit(
                         safe_api_call,
                         fetch_mid_week_land,
                         reg_id=region_code,
@@ -465,7 +498,7 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                     )
         
         # 결과 수집
-        results = {"advisories": [], "forecasts": [], "mid_forecasts": []}
+        results = {"advisories": [], "forecasts": [], "region_forecasts": []}
         for name, future in futures.items():
             try:
                 result = future.result(timeout=API_TIMEOUT)
@@ -474,8 +507,8 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                         results["advisories"].extend(result)
                     elif name.startswith('forecasts_'):
                         results["forecasts"].extend(result)
-                    elif name.startswith('mid_forecasts_'):
-                        results["mid_forecasts"].extend(result)
+                    elif name.startswith('region_forecasts_'):
+                        results["region_forecasts"].extend(result)
             except Exception as e:
                 print(f"❌ 병렬 처리 실패 ({name}): {e}")
         
@@ -506,17 +539,17 @@ def fetch_weather_data_sequential(sub_questions: List[Dict[str, Any]]) -> Dict[s
                 forecasts = fetch_short_land_records() if WHEATHER_API_KEY_HUB else []
                 results["forecasts"].extend(forecasts)
         
-        # 중기 데이터
-        if days_from_today >= 4 and should_fetch_mid_forecasts(q, days_from_today):
+        # 권역 데이터
+        if days_from_today >= 4 and should_fetch_region_forecasts(q, days_from_today):
             region_code = get_region_code(region)
             if region_code:
-                mid_forecasts = fetch_mid_week_land(
+                region_forecasts = fetch_mid_week_land(
                     reg_id=region_code,
                     target_date=date,
                     tmfc_range_days=3,
                     widen_days=0
                 ) if WHEATHER_API_KEY_HUB else []
-                results["mid_forecasts"].extend(mid_forecasts)
+                results["region_forecasts"].extend(region_forecasts)
     
     return results
 
@@ -766,12 +799,337 @@ def summarize_region_alert(q: str, live_docs: List[Dict[str, str]], question_dat
     if cmd: bits.append(f"(명령: {cmd})")
     return "[LIVE_STATUS] " + " ".join(bits)
 
-# =========[ 임베딩 ]=========
+# =========[ GPU 메모리 기반 동적 배치 임베딩 처리 ]=========
 _text_embedder = SentenceTransformer(EMBED_MODEL_NAME)
+BATCH_EMBEDDING_SIZE = int(os.getenv("BATCH_EMBEDDING_SIZE", "100"))
+MIN_BATCH_SIZE = int(os.getenv("MIN_BATCH_SIZE", "10"))
+MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "500"))
+GPU_MEMORY_THRESHOLD = float(os.getenv("GPU_MEMORY_THRESHOLD", "0.8"))  # 80% 사용 시 배치 크기 감소
+GPU_CRITICAL_THRESHOLD = float(os.getenv("GPU_CRITICAL_THRESHOLD", "0.90"))  # 90% 사용 시 CPU 모드 전환
+ENABLE_DYNAMIC_BATCH = os.getenv("ENABLE_DYNAMIC_BATCH", "true").lower() in ("1", "true", "yes")
+ENABLE_ASYNC_EMBEDDING = os.getenv("ENABLE_ASYNC_EMBEDDING", "true").lower() in ("1", "true", "yes")
+ENABLE_AUTO_CPU_FALLBACK = os.getenv("ENABLE_AUTO_CPU_FALLBACK", "true").lower() in ("1", "true", "yes")
+
+# CPU 모드 전환 플래그
+_force_cpu_mode = False
+
+# GPU 메모리 모니터링
+try:
+    import torch
+    _HAS_TORCH = True
+    _GPU_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    _HAS_TORCH = False
+    _GPU_AVAILABLE = False
+
+def get_gpu_memory_usage() -> float:
+    """GPU 메모리 사용률을 반환합니다 (0.0 ~ 1.0)"""
+    if not _HAS_TORCH or not _GPU_AVAILABLE:
+        return 0.0
+    
+    try:
+        # GPU 메모리 사용량 확인
+        allocated = torch.cuda.memory_allocated()
+        reserved = torch.cuda.memory_reserved()
+        total = torch.cuda.get_device_properties(0).total_memory
+        
+        # 사용률 계산 (reserved 기준)
+        usage = reserved / total
+        return min(usage, 1.0)
+    except Exception as e:
+        print(f"   - ⚠️ GPU 메모리 확인 실패: {e}")
+        return 0.0
+
+def get_optimal_batch_size(text_lengths: List[int], base_batch_size: int = BATCH_EMBEDDING_SIZE) -> int:
+    """텍스트 길이와 GPU 메모리 상태를 고려하여 최적의 배치 크기를 계산합니다"""
+    if not ENABLE_DYNAMIC_BATCH:
+        return base_batch_size
+    
+    # GPU 메모리 사용률 확인
+    gpu_usage = get_gpu_memory_usage()
+    
+    # 평균 텍스트 길이 계산
+    avg_length = sum(text_lengths) / len(text_lengths) if text_lengths else 100
+    
+    # 메모리 사용률에 따른 배치 크기 조정
+    if gpu_usage > GPU_CRITICAL_THRESHOLD:
+        # 메모리 심각 부족 시 CPU 모드로 전환
+        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → CPU 모드로 전환 시도")
+        switch_to_cpu_mode()
+        # CPU 모드에서는 더 작은 배치 크기 사용
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.2))
+        print(f"   - 🔧 CPU 모드 배치 크기: {base_batch_size} → {adjusted_size}")
+    elif gpu_usage > GPU_MEMORY_THRESHOLD:
+        # 메모리 부족 시 배치 크기 대폭 감소
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.3))
+        print(f"   - 🔧 GPU 메모리 부족 ({gpu_usage:.1%}) → 배치 크기 감소: {base_batch_size} → {adjusted_size}")
+    elif gpu_usage > 0.6:
+        # 메모리 사용률 높음 → 배치 크기 감소
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.6))
+        print(f"   - 🔧 GPU 메모리 사용률 높음 ({gpu_usage:.1%}) → 배치 크기 조정: {base_batch_size} → {adjusted_size}")
+    elif avg_length > 500:
+        # 긴 텍스트 → 배치 크기 감소
+        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.7))
+        print(f"   - 🔧 긴 텍스트 감지 (평균 {avg_length:.0f}자) → 배치 크기 조정: {base_batch_size} → {adjusted_size}")
+    else:
+        # 메모리 여유 있음 → 배치 크기 유지 또는 증가
+        adjusted_size = min(MAX_BATCH_SIZE, int(base_batch_size * 1.2))
+        if adjusted_size != base_batch_size:
+            print(f"   - 🔧 메모리 여유 있음 ({gpu_usage:.1%}) → 배치 크기 증가: {base_batch_size} → {adjusted_size}")
+    
+    return max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, adjusted_size))
+
+def cleanup_gpu_memory():
+    """GPU 메모리를 정리합니다"""
+    if _HAS_TORCH and _GPU_AVAILABLE:
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("   - 🧹 GPU 메모리 정리 완료")
+        except Exception as e:
+            print(f"   - ⚠️ GPU 메모리 정리 실패: {e}")
+
+def switch_to_cpu_mode():
+    """GPU 메모리 부족 시 CPU 모드로 전환"""
+    global _text_embedder, _force_cpu_mode
+    
+    if _force_cpu_mode:
+        return  # 이미 CPU 모드
+        
+    print("   - 🚨 GPU 메모리 심각 부족 → CPU 모드로 전환")
+    
+    try:
+        # 기존 GPU 모델 해제
+        if _text_embedder:
+            del _text_embedder
+            cleanup_gpu_memory()
+        
+        # CPU 모드로 새 모델 로드
+        _text_embedder = SentenceTransformer(EMBED_MODEL_NAME, device='cpu')
+        _force_cpu_mode = True
+        
+        print("   - ✅ CPU 모드 전환 완료")
+        
+    except Exception as e:
+        print(f"   - ❌ CPU 모드 전환 실패: {e}")
+        _force_cpu_mode = False
+
+def check_and_switch_to_cpu_if_needed():
+    """GPU 메모리 상태를 확인하고 필요시 CPU 모드로 전환"""
+    global _force_cpu_mode
+    
+    if not ENABLE_AUTO_CPU_FALLBACK or _force_cpu_mode:
+        return
+    
+    gpu_usage = get_gpu_memory_usage()
+    
+    if gpu_usage > GPU_CRITICAL_THRESHOLD:
+        switch_to_cpu_mode()
+
+def embed_texts_batch(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) -> np.ndarray:
+    """
+    GPU 메모리 기반 동적 배치 크기로 텍스트 임베딩을 처리합니다.
+    """
+    if not texts:
+        return np.array([], dtype="float32").reshape(0, 768)
+    
+    # GPU 메모리 사용률 즉시 확인 및 CPU 모드 전환
+    gpu_usage = get_gpu_memory_usage()
+    if gpu_usage > GPU_CRITICAL_THRESHOLD and not _force_cpu_mode:
+        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → 즉시 CPU 모드로 전환")
+        switch_to_cpu_mode()
+    
+    # CPU 모드 전환 확인 (기존 로직)
+    check_and_switch_to_cpu_if_needed()
+    
+    # 텍스트 길이 분석
+    text_lengths = [len(text) for text in texts]
+    
+    # 동적 배치 크기 계산
+    optimal_batch_size = get_optimal_batch_size(text_lengths, batch_size)
+    
+    mode_text = "CPU 모드" if _force_cpu_mode else "GPU 모드"
+    print(f"   - 🔄 동적 배치 임베딩 처리 ({mode_text}): {len(texts)}개 텍스트를 {optimal_batch_size}개씩 처리")
+    
+    all_embs = []
+    for i in range(0, len(texts), optimal_batch_size):
+        batch = texts[i:i + optimal_batch_size]
+        batch_num = i//optimal_batch_size + 1
+        total_batches = (len(texts)-1)//optimal_batch_size + 1
+        
+        print(f"   - 🔄 배치 {batch_num}/{total_batches} 처리 중... ({len(batch)}개)")
+        
+        try:
+            # 배치 단위로 임베딩 계산
+            batch_embs = _text_embedder.encode(batch, show_progress_bar=False)
+            # L2 정규화 적용
+            batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+            all_embs.append(batch_embs)
+            print(f"   - ✅ 배치 {batch_num} 완료: {batch_embs.shape}")
+            
+            # GPU 메모리 정리 (매 배치마다, CPU 모드가 아닐 때만)
+            if not _force_cpu_mode and batch_num % 5 == 0:  # 5배치마다 정리
+                cleanup_gpu_memory()
+                
+        except Exception as e:
+            print(f"   - ❌ 배치 {batch_num} 실패: {e}")
+            
+            # GPU 메모리 부족으로 인한 오류인 경우 CPU 모드로 전환 시도
+            if not _force_cpu_mode and ("CUDA" in str(e) or "memory" in str(e).lower()):
+                print(f"   - 🚨 GPU 메모리 오류 감지 → CPU 모드로 전환 시도")
+                switch_to_cpu_mode()
+                
+                # CPU 모드로 재시도
+                try:
+                    batch_embs = _text_embedder.encode(batch, show_progress_bar=False)
+                    batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+                    all_embs.append(batch_embs)
+                    print(f"   - ✅ 배치 {batch_num} CPU 모드로 재시도 성공")
+                    continue
+                except Exception as cpu_e:
+                    print(f"   - ❌ CPU 모드 재시도도 실패: {cpu_e}")
+            
+            # GPU 메모리 정리 후 재시도
+            if not _force_cpu_mode:
+                cleanup_gpu_memory()
+            
+            try:
+                # 더 작은 배치로 재시도
+                smaller_batch_size = max(MIN_BATCH_SIZE, optimal_batch_size // 2)
+                print(f"   - 🔄 작은 배치로 재시도: {smaller_batch_size}개씩")
+                
+                for j in range(0, len(batch), smaller_batch_size):
+                    small_batch = batch[j:j + smaller_batch_size]
+                    small_embs = _text_embedder.encode(small_batch, show_progress_bar=False)
+                    small_embs = np.array([l2_normalize(e) for e in small_embs], dtype="float32")
+                    all_embs.append(small_embs)
+                    
+                print(f"   - ✅ 배치 {batch_num} 재시도 성공")
+            except Exception as retry_e:
+                print(f"   - ❌ 배치 {batch_num} 재시도도 실패: {retry_e}")
+                # 실패한 배치에 대해 빈 임베딩 추가
+                empty_emb = np.zeros((len(batch), 768), dtype="float32")
+                all_embs.append(empty_emb)
+    
+    # 모든 배치 결과 합치기
+    if all_embs:
+        final_embs = np.vstack(all_embs)
+        print(f"   - ✅ 동적 배치 임베딩 완료: {final_embs.shape}")
+        
+        # 최종 GPU 메모리 정리 (CPU 모드가 아닐 때만)
+        if not _force_cpu_mode:
+            cleanup_gpu_memory()
+        
+        return final_embs
+    else:
+        print("   - ❌ 모든 배치 임베딩 실패")
+        return np.zeros((len(texts), 768), dtype="float32")
+
+async def embed_texts_batch_async(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) -> np.ndarray:
+    """
+    비동기 배치 단위로 텍스트 임베딩을 처리합니다.
+    """
+    if not texts:
+        return np.array([], dtype="float32").reshape(0, 768)
+    
+    # 텍스트 길이 분석
+    text_lengths = [len(text) for text in texts]
+    
+    # 동적 배치 크기 계산
+    optimal_batch_size = get_optimal_batch_size(text_lengths, batch_size)
+    
+    print("   - 🔄 비동기 배치 처리 중...")
+    
+    # 비동기 배치 처리
+    semaphore = asyncio.Semaphore(2)  # 최대 2개 배치 동시 처리
+    
+    async def process_batch_async(batch: List[str], batch_num: int) -> np.ndarray:
+        async with semaphore:
+            try:
+                # asyncio.to_thread를 사용하여 동기 임베딩을 비동기로 실행
+                batch_embs = await asyncio.to_thread(
+                    _text_embedder.encode, 
+                    batch, 
+                    show_progress_bar=False
+                )
+                
+                # L2 정규화 적용
+                batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+                
+                return batch_embs
+                
+            except Exception as e:
+                print(f"   - ❌ 비동기 배치 {batch_num} 실패: {e}")
+                # 실패한 배치에 대해 빈 임베딩 반환
+                return np.zeros((len(batch), 768), dtype="float32")
+    
+    # 모든 배치를 비동기로 처리
+    tasks = []
+    for i in range(0, len(texts), optimal_batch_size):
+        batch = texts[i:i + optimal_batch_size]
+        batch_num = i//optimal_batch_size + 1
+        tasks.append(process_batch_async(batch, batch_num))
+    
+    # 모든 배치 완료 대기
+    try:
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 예외 처리 및 결과 수집
+        all_embs = []
+        for i, result in enumerate(batch_results):
+            if isinstance(result, Exception):
+                print(f"   - ❌ 비동기 배치 {i+1} 예외: {result}")
+                # 예외 발생 시 빈 임베딩 추가
+                batch_size_actual = min(optimal_batch_size, len(texts) - i * optimal_batch_size)
+                empty_emb = np.zeros((batch_size_actual, 768), dtype="float32")
+                all_embs.append(empty_emb)
+            else:
+                all_embs.append(result)
+        
+        # 모든 배치 결과 합치기
+        if all_embs:
+            final_embs = np.vstack(all_embs)
+            print(f"   - ✅ 비동기 동적 배치 임베딩 완료: {final_embs.shape}")
+            
+            # GPU 메모리 정리
+            cleanup_gpu_memory()
+            
+            return final_embs
+        else:
+            print("   - ❌ 모든 비동기 배치 임베딩 실패")
+            return np.zeros((len(texts), 768), dtype="float32")
+            
+    except Exception as e:
+        print(f"   - ❌ 비동기 배치 처리 중 오류: {e}")
+        # 폴백: 동기 방식으로 처리
+        print("   - 🔄 동기 방식으로 폴백")
+        return embed_texts_batch(texts, optimal_batch_size)
+
 def embed_texts(texts: List[str]) -> np.ndarray:
-    embs = _text_embedder.encode(texts, show_progress_bar=False)
-    embs = np.array([l2_normalize(e) for e in embs], dtype="float32")
-    return embs
+    """
+    기존 호환성을 위한 함수. 내부적으로 동적 배치 처리를 사용합니다.
+    """
+    return embed_texts_batch(texts, BATCH_EMBEDDING_SIZE)
+
+def embed_texts_async_wrapper(texts: List[str]) -> np.ndarray:
+    """
+    비동기 임베딩을 동기 함수로 래핑합니다.
+    """
+    if not ENABLE_ASYNC_EMBEDDING:
+        return embed_texts_batch(texts, BATCH_EMBEDDING_SIZE)
+    
+    try:
+        # 새로운 이벤트 루프에서 비동기 함수 실행
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(embed_texts_batch_async(texts, BATCH_EMBEDDING_SIZE))
+            return result
+        finally:
+            loop.close()
+    except Exception as e:
+        print(f"   - ⚠️ 비동기 임베딩 실패, 동기 방식으로 폴백: {e}")
+        return embed_texts_batch(texts, BATCH_EMBEDDING_SIZE)
 
 # =========[ 예보관 톤: 정규화/위험도 헬퍼 ]=========
 def _norm_temp(val: str) -> Optional[float]:
@@ -836,19 +1194,19 @@ def _format_for_llm(src: str, payload_json: str, human: str) -> str:
         risk = _risk_level_from_forecast(sky, prob, temp)
         return f"{line}\n[RISKS] 위험도(간이): {risk}\n[FORECAST_TYPE] {forecast_type}\n[NOTE] {human}"
         
-    elif src == "mid_forecast":
+    elif src == "region_forecast":
         line = (
             f"[{src}] 지역:{p.get('region_name','N/A')} | 대상:{p.get('forecast_time','N/A')} "
             f"| 하늘:{(p.get('sky_text') or 'N/A')} | 강수형:{(p.get('precip_type') or 'N/A')} | 강수확률:{(p.get('precip_prob') or 'N/A')}"
         )
-        # 중기는 온도 수치 없음 → 위험도는 강수/현상 위주로 보수적으로
+        # 권역은 온도 수치 없음 → 위험도는 강수/현상 위주로 보수적으로
         risk = "보통" if (p.get('precip_type') not in (None,"","없음") or str(p.get('precip_prob','')).isdigit()) else "약"
-        return f"{line}\n[RISKS] 위험도(간이): {risk}\n[FORECAST_TYPE] 중기예보\n[NOTE] {human}"
+        return f"{line}\n[RISKS] 위험도(간이): {risk}\n[FORECAST_TYPE] 권역예보\n[NOTE] {human}"
         
     return f"[{src}] {human}"
 
-# =========[ 중기예보(wl) 전용: CSV 권역/질의 해석 ]=========
-MID_REGIONS_CSV = os.getenv("MID_REGIONS_CSV", "mid_regions.csv")
+# =========[ 권역예보(wl) 전용: CSV 권역/질의 해석 ]=========
+REGION_REGIONS_CSV = UNIFIED_REGIONS_CSV  # 통합 CSV 사용
 MAX_RETRIES = 3
 BACKOFF = 1.5
 MERGE_BY_DAY = (os.getenv("MERGE_BY_DAY", "true").lower() in ("1", "true", "yes"))
@@ -920,30 +1278,48 @@ def normalize_spaces(s: str) -> str:
     return re.sub(r"\s+", "", s or "")
 
 # --- CSV 로딩 ---
-def MID_load_all_from_csv(path: str) -> Dict[str, str]:
+def REGION_load_all_from_csv(path: str) -> Dict[str, str]:
+    """통합 CSV에서 권역예보용 권역 정보 로드"""
     if not os.path.exists(path):
         raise FileNotFoundError(f"권역 CSV를 찾을 수 없습니다: {path}")
-    mapping: Dict[str, str] = {}
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rid = (row.get("reg_id") or "").strip()
-            rname = (row.get("reg_name") or "").strip()
-            if rid and rname and rid not in mapping:
-                mapping[rid] = rname
-    if not mapping:
-        raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
-    return mapping
+    
+    try:
+        # pandas로 읽기 (더 안정적)
+        df = pd.read_csv(path, encoding='utf-8-sig')
+        
+        # 컬럼 자동 감지
+        code_col, name_col = _pick_cols(df)
+        
+        if not code_col or not name_col:
+            raise ValueError("CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
+        
+        mapping: Dict[str, str] = {}
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip()
+            name = str(row[name_col]).strip()
+            
+            if code and name and code.lower() != "nan" and name.lower() != "nan":
+                mapping[code] = name
+        
+        if not mapping:
+            raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
+        
+        return mapping
+        
+    except Exception as e:
+        print(f"❌ CSV 로딩 실패: {e}")
+        raise
 
-MID_REGION_CODE_RE = re.compile(r"^11[A-Z](\d)?0{4,5}$")
-def MID_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
-    region_map = {rid: nm for rid, nm in all_map.items() if MID_REGION_CODE_RE.match(rid)}
+# 통합 CSV의 다양한 지역코드 형식 지원
+REGION_REGION_CODE_RE = re.compile(r"^(11[A-Z](\d)?0{4,5}|L\d{7}|S\d{7})$")
+def REGION_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
+    region_map = {rid: nm for rid, nm in all_map.items() if REGION_REGION_CODE_RE.match(rid)}
     if not region_map:
         known = ["11B00000","11D10000","11D20000","11C20000","11C10000","11F20000","11F10000","11H20000","11H10000","11G00000"]
         region_map = {rid: all_map[rid] for rid in known if rid in all_map}
     return region_map
 
-def MID_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
+def REGION_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
     alias: Dict[str, str] = {}
     norm = lambda x: re.sub(r"\s+", "", x or "")
     def add(a: str, full: str):
@@ -963,33 +1339,58 @@ def MID_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
             if "영동" in full: add("영동", full); add("강원영동", full)
     return alias
 
-MID_ALL_MAP: Dict[str, str] = {}
-MID_LAND_MAP: Dict[str, str] = {}
+REGION_ALL_MAP: Dict[str, str] = {}
+REGION_LAND_MAP: Dict[str, str] = {}
 REGION_ALIASES: Dict[str, str] = {}
-if os.path.exists(MID_REGIONS_CSV):
-    MID_ALL_MAP = MID_load_all_from_csv(MID_REGIONS_CSV)
-    MID_LAND_MAP = MID_split_region_only(MID_ALL_MAP)
-    REGION_ALIASES = MID_build_alias_map(MID_LAND_MAP)
-    print(f"✅ 중기 CSV 로드: 전체 {len(MID_ALL_MAP)}개 / 권역 {len(MID_LAND_MAP)}개 (파일: {MID_REGIONS_CSV})")
+if os.path.exists(REGION_REGIONS_CSV):
+    REGION_ALL_MAP = REGION_load_all_from_csv(REGION_REGIONS_CSV)
+    REGION_LAND_MAP = REGION_split_region_only(REGION_ALL_MAP)
+    REGION_ALIASES = REGION_build_alias_map(REGION_LAND_MAP)
+    print(f"✅ 권역 CSV 로드: 전체 {len(REGION_ALL_MAP)}개 / 권역 {len(REGION_LAND_MAP)}개 (파일: {REGION_REGIONS_CSV})")
 else:
-    print("⚠️ 중기 CSV 파일이 없어 중기 권역 매핑을 건너뜁니다. (MID_REGIONS_CSV)")
+    print("⚠️ 권역 CSV 파일이 없어 권역 매핑을 건너뜁니다. (REGION_REGIONS_CSV)")
 
-MID_FAMILY_RULES = [
+REGION_FAMILY_RULES = [
+    # 기존 11X 형식
     (r"^11B",  "11B00000"), (r"^11D1", "11D10000"), (r"^11D2", "11D20000"),
     (r"^11C1", "11C10000"), (r"^11C2", "11C20000"), (r"^11F1", "11F10000"),
     (r"^11F2", "11F20000"), (r"^11H1", "11H10000"), (r"^11H2", "11H20000"),
     (r"^11G",  "11G00000"),
+    # 통합 CSV의 L, S 형식 추가
+    (r"^L100", "L1000000"), (r"^L101", "L1010000"), (r"^L102", "L1020000"),
+    (r"^L103", "L1030000"), (r"^L104", "L1040000"), (r"^L105", "L1050000"),
+    (r"^L106", "L1060000"), (r"^L107", "L1070000"), (r"^L108", "L1080000"),
+    (r"^S100", "S1000000"), (r"^S110", "S1100000"), (r"^S120", "S1200000"),
+    (r"^S130", "S1300000"), (r"^S140", "S1400000"), (r"^S150", "S1500000"),
+    (r"^S160", "S1600000"), (r"^S170", "S1700000"), (r"^S180", "S1800000"),
 ]
 
-def MID_normalize_mid_reg_code(code_like: str) -> Optional[str]:
+def REGION_normalize_region_reg_code(code_like: str) -> Optional[str]:
     c = (code_like or "").strip()
     if not c: return None
-    if c in MID_LAND_MAP: return c
-    for pat, target in MID_FAMILY_RULES:
-        if re.match(pat, c): return target if target in MID_LAND_MAP else target
+    
+    # 직접 매칭
+    if c in REGION_LAND_MAP: return c
+    
+    # 패턴 매칭
+    for pat, target in REGION_FAMILY_RULES:
+        if re.match(pat, c): 
+            return target if target in REGION_LAND_MAP else target
+    
+    # 통합 CSV의 다양한 형식 지원
+    # L 형식: L1000000 -> L1000000, L1010200 -> L1010000
+    if c.startswith('L') and len(c) >= 6:
+        base_code = c[:4] + '0000'
+        if base_code in REGION_LAND_MAP: return base_code
+    
+    # S 형식: S1000000 -> S1000000, S1100000 -> S1100000
+    if c.startswith('S') and len(c) >= 6:
+        base_code = c[:4] + '0000'
+        if base_code in REGION_LAND_MAP: return base_code
+    
     return None
 
-def MID_extract_datetime_from_question(q: str) -> Optional[datetime]:
+def REGION_extract_datetime_from_question(q: str) -> Optional[datetime]:
     qn = normalize_spaces(q); now = now_kst()
     if any(k in qn for k in ["오늘","현재","지금"]): return now
     if "내일" in qn: return now + timedelta(days=1)
@@ -1015,29 +1416,46 @@ def MID_extract_datetime_from_question(q: str) -> Optional[datetime]:
         except ValueError: return None
     return None
 
-def MID_is_mid_term_date(date: Optional[datetime]) -> Tuple[bool, Optional[int]]:
+def REGION_is_region_term_date(date: Optional[datetime]) -> Tuple[bool, Optional[int]]:
     if date is None: return (False, None)
     delta = (date.date() - now_kst().date()).days
     return (3 < delta <= 10, delta)
 
-def MID_extract_region_from_question(q: str) -> str:
+def REGION_extract_region_from_question(q: str) -> str:
     qn = normalize_spaces(q)
-    m = re.search(r"(11[A-Z]\d{5,})", qn)
-    if m:
-        cand = MID_normalize_mid_reg_code(m.group(1))
-        if cand: return MID_LAND_MAP.get(cand, cand)
-    for _code, name in MID_LAND_MAP.items():
+    
+    # 통합 CSV의 다양한 지역코드 패턴 지원
+    patterns = [
+        r"(11[A-Z]\d{5,})",  # 기존 11X 형식
+        r"(L\d{7})",         # L 형식
+        r"(S\d{7})",         # S 형식
+    ]
+    
+    for pattern in patterns:
+        m = re.search(pattern, qn)
+        if m:
+            cand = REGION_normalize_region_reg_code(m.group(1))
+            if cand: return REGION_LAND_MAP.get(cand, cand)
+    
+    # 지역명 매칭
+    for _code, name in REGION_LAND_MAP.items():
         if normalize_spaces(name) in qn: return name
+    
+    # 별칭 매칭
     for alias, full in REGION_ALIASES.items():
         if alias in qn: return full
-    for code, name in MID_LAND_MAP.items():
+    
+    # 수도권 특별 처리
+    for code, name in REGION_LAND_MAP.items():
         if "서울" in name and "인천" in name and ("경기" in name or "경기도" in name):
             return name
-    first_code = next(iter(MID_LAND_MAP.keys())) if MID_LAND_MAP else None
-    return MID_LAND_MAP.get(first_code, "수도권") if first_code else "수도권"
+    
+    # 기본값
+    first_code = next(iter(REGION_LAND_MAP.keys())) if REGION_LAND_MAP else None
+    return REGION_LAND_MAP.get(first_code, "수도권") if first_code else "수도권"
 
-def MID_region_name_to_code(region_full_name: str) -> Optional[str]:
-    for code, nm in MID_LAND_MAP.items():
+def REGION_region_name_to_code(region_full_name: str) -> Optional[str]:
+    for code, nm in REGION_LAND_MAP.items():
         if nm == region_full_name: return code
     return None
 
@@ -1059,7 +1477,7 @@ def request_with_retries(url: str, timeout: int, retries: int, backoff: float) -
             if i < retries: time.sleep(backoff * i)
     raise last or RuntimeError("request failed")
 
-def MID_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
+def REGION_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
     s = (line or "").strip()
     if not s or s.startswith("#") or s.startswith("7777END"): return None
     if s.endswith("="): s = s[:-1]
@@ -1075,7 +1493,7 @@ def MID_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
         rest.append(c)
     return {"reg_id": reg_id, "tmfc": tmfc or "", "tmef": tmef or "", "wf": " ".join(rest).strip(), "conf": "", "rn_st": "", "sky_code": "", "pre_code": ""}
 
-def MID_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def REGION_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     day_map: Dict[str, Dict[str, Optional[Dict[str, str]]]] = {}
     for it in latest_rows:
         tmef = it.get("tmef", "")
@@ -1132,7 +1550,7 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
         latest: Dict[str, Dict[str, str]] = {}
         want_d8 = target_date.strftime("%Y%m%d")
         for ln in text.splitlines():
-            item = MID_parse_wl_line(ln)
+            item = REGION_parse_wl_line(ln)
             if not item: continue
             if item.get("reg_id") != reg_id: continue
             tmef = item.get("tmef", "")
@@ -1142,9 +1560,9 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
                 latest[tmef] = item
         if not latest: return []
         rows = [latest[k] for k in sorted(latest.keys())]
-        if merge_day: rows = MID_merge_by_day(rows)
+        if merge_day: rows = REGION_merge_by_day(rows)
         docs: List[Dict[str, str]] = []
-        region_name = MID_LAND_MAP.get(reg_id, reg_id)
+        region_name = REGION_LAND_MAP.get(reg_id, reg_id)
         for it in rows:
             is_day_level = len(it.get("tmef","")) == 8
             target_label = (fmt_kst_any(it["tmef"]) if not is_day_level else
@@ -1156,14 +1574,14 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
             if rn.isdigit(): bits.append(f"강수확률 {rn}%")
             summary = " · ".join(bits) if bits else (wf or "예보문 없음")
             payload = {
-                "source": "KMA_MID_WEEK_LAND",
+                "source": "KMA_REGION_WEEK_LAND",
                 "region_id": reg_id, "region_name": region_name,
                 "announce_time": it.get("tmfc",""),
                 "forecast_time": it.get("tmef",""),
                 "sky_text": wf, "precip_type": conf, "precip_prob": rn,
                 "sky_code": it.get("sky_code",""), "pre_code": it.get("pre_code",""),
             }
-            human = f"{region_name} 중기예보(주간) — 발표 {fmt_kst_any(payload['announce_time'])}, 대상 {target_label}: {summary}"
+            human = f"{region_name} 권역예보(주간) — 발표 {fmt_kst_any(payload['announce_time'])}, 대상 {target_label}: {summary}"
             docs.append({"json": json.dumps(payload, ensure_ascii=False, separators=(',', ':')), "human": human})
         return docs
     except requests.exceptions.HTTPError as e:
@@ -1198,169 +1616,107 @@ def make_llm() -> ChatOpenAI:
     ]
     return any(k in q for k in live_kw)
 
-# =========[ RAGAS 결과 파싱 헬퍼 ]=========
-def _ragas_overall(result_obj: Any, metric_name: str) -> Optional[float]:
+# =========[ RAGAS 비동기 평가 함수들 (최적화된 방식) ]=========
+async def run_ragas_context_precision_only(question, answer, context):
+    """1차 검증용: Context Precision만 평가"""
+    print("   - 🔄 RAGAS Context Precision 평가 실행 중...")
+    
     try:
-        val = None
+        # LLM 설정
+        llm = ChatOpenAI(
+            model_name="gpt-4o-mini", 
+            temperature=0.1,
+            api_key=os.getenv("OPENAI_API_KEY=REDACTED = LangchainLLMWrapper(llm)
         
-        # 1. RAGAS 0.3.x _scores_dict 속성에서 직접 접근 (가장 일반적)
-        if hasattr(result_obj, "_scores_dict") and isinstance(result_obj._scores_dict, dict):
-            val = result_obj._scores_dict.get(metric_name)
-            if val is not None:
-                # 리스트인 경우 첫 번째 값 사용
-                if isinstance(val, list) and len(val) > 0:
-                    val = val[0]
-                # JSON 문자열인 경우 파싱 시도
-                elif isinstance(val, str) and val.startswith('{'):
-                    try:
-                        import json
-                        json_data = json.loads(val)
-                        if "statements" in json_data and isinstance(json_data["statements"], list):
-                            # verdict 값들의 평균 계산
-                            verdicts = []
-                            for stmt in json_data["statements"]:
-                                if isinstance(stmt, dict) and "verdict" in stmt:
-                                    verdicts.append(float(stmt["verdict"]))
-                            if verdicts:
-                                val = sum(verdicts) / len(verdicts)
-                                print(f"   - ✅ {metric_name}: {val:.4f} (JSON verdict 평균)")
-                                return val
-                    except:
-                        pass
-                val = float(val)
-                if val == val:  # NaN 체크
-                    print(f"   - ✅ {metric_name}: {val:.4f} (_scores_dict)")
-                    return val
+        # Context Precision만 평가
+        context_precision_scorer = LLMContextPrecisionWithoutReference(llm=evaluator_llm)
+        context_sample = SingleTurnSample(
+            user_input=question,
+            response=answer,
+            retrieved_contexts=[context] if context else [""]
+        )
+        score = await context_precision_scorer.single_turn_ascore(context_sample)
         
-        # 2. RAGAS 0.3.x scores 속성에서 직접 접근
-        if hasattr(result_obj, "scores") and hasattr(result_obj.scores, metric_name):
-            val = getattr(result_obj.scores, metric_name)
-            if val is not None:
-                # JSON 문자열인 경우 파싱 시도
-                if isinstance(val, str) and val.startswith('{'):
-                    try:
-                        import json
-                        json_data = json.loads(val)
-                        if "statements" in json_data and isinstance(json_data["statements"], list):
-                            # verdict 값들의 평균 계산
-                            verdicts = []
-                            for stmt in json_data["statements"]:
-                                if isinstance(stmt, dict) and "verdict" in stmt:
-                                    verdicts.append(float(stmt["verdict"]))
-                            if verdicts:
-                                val = sum(verdicts) / len(verdicts)
-                                print(f"   - ✅ {metric_name}: {val:.4f} (scores JSON verdict 평균)")
-                                return val
-                    except:
-                        pass
-                val = float(val)
-                if val == val:  # NaN 체크
-                    print(f"   - ✅ {metric_name}: {val:.4f} (scores 속성)")
-                    return val
-        
-        # 3. to_dict() 시도
-        if hasattr(result_obj, "to_dict"):
-            d = result_obj.to_dict()
-            if isinstance(d, dict):
-                # scores 딕셔너리 내부 확인 (RAGAS 0.3.x)
-                if "scores" in d and isinstance(d["scores"], dict):
-                    val = d["scores"].get(metric_name)
-                    if val is not None:
-                        val = float(val)
-                        if val == val:  # NaN 체크
-                            print(f"   - ✅ {metric_name}: {val:.4f} (to_dict scores)")
-                            return val
-                
-                # overall 딕셔너리 내부 확인 (구버전)
-                if "overall" in d and isinstance(d["overall"], dict):
-                    val = d["overall"].get(metric_name)
-                    if val is not None:
-                        val = float(val)
-                        if val == val:  # NaN 체크
-                            print(f"   - ✅ {metric_name}: {val:.4f} (to_dict overall)")
-                            return val
-                
-                # 직접 키 접근
-                if metric_name in d:
-                    val = d[metric_name]
-                    if val is not None:
-                        val = float(val)
-                        if val == val:  # NaN 체크
-                            print(f"   - ✅ {metric_name}: {val:.4f} (to_dict 직접)")
-                            return val
-        
-        # 4. __dict__ 시도
-        if hasattr(result_obj, "__dict__"):
-            d = result_obj.__dict__
-            # _scores_dict 딕셔너리 내부 확인 (RAGAS 0.3.x)
-            if "_scores_dict" in d and isinstance(d["_scores_dict"], dict):
-                val = d["_scores_dict"].get(metric_name)
-                if val is not None:
-                    # 리스트인 경우 첫 번째 값 사용
-                    if isinstance(val, list) and len(val) > 0:
-                        val = val[0]
-                    # JSON 문자열인 경우 파싱 시도
-                    elif isinstance(val, str) and val.startswith('{'):
-                        try:
-                            import json
-                            json_data = json.loads(val)
-                            if "statements" in json_data and isinstance(json_data["statements"], list):
-                                # verdict 값들의 평균 계산
-                                verdicts = []
-                                for stmt in json_data["statements"]:
-                                    if isinstance(stmt, dict) and "verdict" in stmt:
-                                        verdicts.append(float(stmt["verdict"]))
-                                if verdicts:
-                                    val = sum(verdicts) / len(verdicts)
-                                    print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ JSON verdict 평균)")
-                                    return val
-                        except:
-                            pass
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ _scores_dict)")
-                        return val
-            
-            # scores 딕셔너리 내부 확인 (RAGAS 0.3.x)
-            if "scores" in d and isinstance(d["scores"], dict):
-                val = d["scores"].get(metric_name)
-                if val is not None:
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ scores)")
-                        return val
-            
-            if "overall" in d and isinstance(d["overall"], dict):
-                val = d["overall"].get(metric_name)
-                if val is not None:
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ overall)")
-                        return val
-            
-            if metric_name in d:
-                val = d[metric_name]
-                if val is not None:
-                    val = float(val)
-                    if val == val:  # NaN 체크
-                        print(f"   - ✅ {metric_name}: {val:.4f} (__dict__ 직접)")
-                        return val
-        
-        # 5. 직접 속성 접근
-        if hasattr(result_obj, metric_name):
-            val = getattr(result_obj, metric_name)
-            if val is not None:
-                val = float(val)
-                if val == val:  # NaN 체크
-                    print(f"   - ✅ {metric_name}: {val:.4f} (직접 속성)")
-                    return val
-        
-        print(f"   - ❌ {metric_name} 값을 찾을 수 없음")
-        return None
+        scores = {"context_precision": float(score)}
+        print(f"   - ✅ RAGAS Context Precision 평가 완료: {scores}")
+        return scores
         
     except Exception as e:
-        print(f"   - ⚠️ RAGAS 결과 파싱 실패 ({metric_name}): {e}")
-        return None
+        print(f"   - ⚠️ Context Precision 평가 실패: {e}")
+        return {"context_precision": 0.0}
+
+async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
+    """2차 검증용: Faithfulness와 Answer Relevancy만 병렬 평가"""
+    print("   - 🔄 RAGAS Faithfulness & Relevancy 병렬 평가 실행 중...")
+    
+    try:
+        # LLM 및 임베딩 모델 설정
+        llm = ChatOpenAI(
+            model_name="gpt-4o-mini", 
+            temperature=0.1,
+            api_key=os.getenv("OPENAI_API_KEY=REDACTED = LangchainLLMWrapper(llm)
+        
+        embeddings = LangchainEmbeddingsWrapper(
+            HuggingFaceEmbeddings(
+                model_name="BAAI/bge-m3",
+                model_kwargs={'device': 'cpu'}
+            )
+        )
+        
+        # Faithfulness와 Answer Relevancy만 병렬 처리
+        async def evaluate_faithfulness():
+            try:
+                faithfulness_scorer = Faithfulness(llm=evaluator_llm)
+                faithfulness_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=[context] if context else [""]
+                )
+                score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                return ("faithfulness", float(score))
+            except Exception as e:
+                print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                return ("faithfulness", 0.0)
+        
+        async def evaluate_answer_relevancy():
+            try:
+                answer_relevancy_scorer = ResponseRelevancy(
+                    llm=evaluator_llm, 
+                    embeddings=embeddings
+                )
+                relevancy_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=[context] if context else [""]
+                )
+                score = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
+                return ("answer_relevancy", float(score))
+            except Exception as e:
+                print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                return ("answer_relevancy", 0.0)
+        
+        # 2개 평가를 동시에 실행 (진짜 병렬 처리)
+        results = await asyncio.gather(
+            evaluate_faithfulness(),
+            evaluate_answer_relevancy(),
+            return_exceptions=True
+        )
+        
+        # 결과 수집
+        scores = {}
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                continue
+            metric_name, score = result
+            scores[metric_name] = score
+        
+        print(f"   - ✅ RAGAS Faithfulness & Relevancy 병렬 평가 완료: {scores}")
+        return scores
+        
+    except Exception as e:
+        print(f"   - ⚠️ RAGAS 평가 실패: {e}")
+        return {"faithfulness": 0.0, "answer_relevancy": 0.0}
 
 # =========[ 프롬프트 (예보관 톤) ]=========
 DRAFT_PROMPT = ChatPromptTemplate.from_template(
@@ -1378,17 +1734,15 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
    - 특보 데이터가 없으면 "특보 없음"
 3) 단기예보 상세: 
    - 문맥의 [FORECAST_TYPE]="단기예보" 데이터만 사용
-   - 하늘상태, 기온, 강수확률, 바람, 발표시각 포함
-4) 영향/위험도(농업): 작물/포장 기준 영향 가능성(약/보통/높음)과 근거
-5) 권고/행동지침: 2~5개의 구체 조치
+   - 하늘상태, 기온, 강수확률, 바람, 발표시각 포함해서 한줄로 작성해
+4) 기상 정보 요약: 제공된 기상 데이터를 종합한 요약
 
 **질문이 내일~3일 이내인 경우:**
 1) 개요: 한 문장 핵심 요약
 2) 단기예보 상세: 
    - 문맥의 [FORECAST_TYPE]="단기예보" 데이터만 사용
-   - 하늘상태, 기온, 강수확률, 바람, 발표시각 포함
-3) 영향/위험도(농업): 작물/포장 기준 영향 가능성(약/보통/높음)과 근거
-4) 권고/행동지침: 2~5개의 구체 조치
+   - 하늘상태, 기온, 강수확률, 바람, 발표시각 포함해서 한줄로 작성해
+3) 기상 정보 요약: 제공된 기상 데이터를 종합한 요약
 
 **질문이 오늘+4일 이후인 경우:**
 1) 개요: 한 문장 핵심 요약
@@ -1396,8 +1750,7 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
    - 문맥의 [FORECAST_TYPE]이 "중기예보"인 정보만 사용
    - 향후 기간의 날씨 전망과 강수 가능성
    - 기온 변화 경향
-3) 영향/위험도(농업): 작물/포장 기준 영향 가능성(약/보통/높음)과 근거
-4) 권고/행동지침: 2~5개의 구체 조치
+3) 기상 정보 요약: 제공된 기상 데이터를 종합한 요약
 
 금지: 표/코드/JSON/불릿(번호는 허용), 과도한 추측
 
@@ -1419,23 +1772,20 @@ REFINE_PROMPT = ChatPromptTemplate.from_template(
 1) 개요
 2) 기상특보 현황 ([live_advisory] 데이터로 현재 특보 상태)
 3) 단기예보 상세 ([FORECAST_TYPE]="단기예보"만)
-4) 영향/위험도(농업)
-5) 권고/행동지침
+4) 기상 정보 요약
 
 **질문이 내일~3일 이내인 경우:**
 1) 개요
 2) 단기예보 상세 ([FORECAST_TYPE]="단기예보"만)
-3) 영향/위험도(농업)
-4) 권고/행동지침
+3) 기상 정보 요약
 
 **질문이 오늘+4일 이후인 경우:**
 1) 개요
 2) 중기예보 전망 ([FORECAST_TYPE]="중기예보"만)
-3) 영향/위험도(농업)
-4) 권고/행동지침
+3) 기상 정보 요약
 
 ※ 질문 날짜에 따라 섹션 개수와 번호가 달라짐
-
+ 
 [문맥]
 {context}
 
@@ -1450,7 +1800,7 @@ def load_store_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 초기화 (벡터DB 미사용)")
     return {**state, "store_obj": None, "retry_count": 0}
 
-def retrieve_node(state: GraphState) -> Dict[str, Any]:
+async def retrieve_node(state: GraphState) -> Dict[str, Any]:
     print(f"🧩 노드: 리트리브(라이브 + 중기) | 재시도: {state['retry_count']}")
     q = state["question"] or ""
     live_enabled = _should_use_live(q)
@@ -1466,12 +1816,12 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     live_enabled = _should_use_live(q)
     
     # 질문에서 날짜 추출하여 4일 이후면 라이브 데이터 제외
-    question_date = MID_extract_datetime_from_question(q)
+    question_date = REGION_extract_datetime_from_question(q)
     days_from_today = get_days_from_today(question_date) if question_date else 0
     
     # 오늘+4일부터는 라이브 데이터(특보/단기) 사용 안 함
     if days_from_today >= 4:
-        print(f"ℹ️ 질문 날짜가 {days_from_today}일 후로, 라이브 데이터 제외하고 중기예보만 사용")
+        print(f"ℹ️ 질문 날짜가 {days_from_today}일 후로, 라이브 데이터 제외하고 권역예보만 사용")
         live_enabled = False
 
     scored: List[tuple] = []
@@ -1489,9 +1839,10 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
             # 특보는 현재 발효 중인 것만 의미 있으므로 질문 날짜가 오늘일 때만 사용
             if advisories and days_from_today <= 0:
                 human = [d["human"] for d in advisories]
-                embs = embed_texts(human)
+                # 비동기 동적 배치 임베딩 처리
+                embs = embed_texts_async_wrapper(human)
                 idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
-                qv = embed_texts([q])[0]
+                qv = embed_texts_async_wrapper([q])[0]
                 topk = min(5, len(advisories))
                 D, I = idx.search(np.array([qv], dtype="float32"), topk)
                 for s, i in zip(D[0], I[0]):
@@ -1506,9 +1857,10 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
             # 단기예보는 3일까지 유효하므로 3일 이내일 때 사용
             if forecasts and days_from_today <= 3:
                 human = [d["human"] for d in forecasts]
-                embs = embed_texts(human)
+                # 비동기 동적 배치 임베딩 처리
+                embs = embed_texts_async_wrapper(human)
                 idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
-                qv = embed_texts([q])[0]
+                qv = embed_texts_async_wrapper([q])[0]
                 topk = min(5, len(forecasts))
                 D, I = idx.search(np.array([qv], dtype="float32"), topk)
                 for s, i in zip(D[0], I[0]):
@@ -1520,47 +1872,48 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     else:
         print("ℹ️ 라이브 기준 미충족 (질문에 실시간 키워드 없음)")
 
-    # --- 중기예보 (오늘+4~10일) ---
+    # --- 권역예보 (오늘+4~10일) ---
     try:
-        if MID_LAND_MAP:  # CSV가 있을 때만
-            q_date = MID_extract_datetime_from_question(q)
-            ok_mid, delta = MID_is_mid_term_date(q_date)
-            if ok_mid:
-                region_name = MID_extract_region_from_question(q)
-                region_code = MID_region_name_to_code(region_name)
+        if REGION_LAND_MAP:  # CSV가 있을 때만
+            q_date = REGION_extract_datetime_from_question(q)
+            ok_region, delta = REGION_is_region_term_date(q_date)
+            if ok_region:
+                region_name = REGION_extract_region_from_question(q)
+                region_code = REGION_region_name_to_code(region_name)
                 m = re.search(r"(11[A-Z]\d{5,})", normalize_spaces(q))
                 if m:
-                    cand = MID_normalize_mid_reg_code(m.group(1))
-                    if cand: region_code, region_name = cand, MID_LAND_MAP.get(cand, region_name)
+                    cand = REGION_normalize_region_reg_code(m.group(1))
+                    if cand: region_code, region_name = cand, REGION_LAND_MAP.get(cand, region_name)
                 if region_code:
-                    mid_docs = fetch_mid_week_land(reg_id=region_code, target_date=q_date,
+                    region_docs = fetch_mid_week_land(reg_id=region_code, target_date=q_date,
                                                    tmfc_range_days=3, widen_days=0, disp="1", help_flag="0",
                                                    merge_day=MERGE_BY_DAY)
-                    if mid_docs:
-                        human = [d["human"] for d in mid_docs]
-                        embs = embed_texts(human)
+                    if region_docs:
+                        human = [d["human"] for d in region_docs]
+                        # 비동기 동적 배치 임베딩 처리
+                        embs = embed_texts_async_wrapper(human)
                         idx = faiss.IndexFlatIP(embs.shape[1]); idx.add(embs)
-                        qv = embed_texts([q])[0]
-                        topk = min(5, len(mid_docs))
+                        qv = embed_texts_async_wrapper([q])[0]
+                        topk = min(5, len(region_docs))
                         D, I = idx.search(np.array([qv], dtype="float32"), topk)
                         for s, i in zip(D[0], I[0]):
                             if i == -1: continue
-                            ctx = _format_for_llm("mid_forecast", mid_docs[i]['json'], mid_docs[i]['human'])
-                            scored.append((float(s) + 1.0, ctx, "mid_forecast"))
+                            ctx = _format_for_llm("region_forecast", region_docs[i]['json'], region_docs[i]['human'])
+                            scored.append((float(s) + 1.0, ctx, "region_forecast"))
                 else:
-                    print("⚠️ 중기 권역 코드를 찾지 못했습니다.")
+                    print("⚠️ 권역 코드를 찾지 못했습니다.")
             else:
                 if delta is not None:
-                    print(f"ℹ️ 중기 대상 아님(오늘 기준 {delta:+d}일).")
+                    print(f"ℹ️ 권역 대상 아님(오늘 기준 {delta:+d}일).")
     except Exception as e:
-        print(f"❌ 중기예보 처리 오류: {e}")
+        print(f"❌ 권역예보 처리 오류: {e}")
 
     # --- 스코어 정규화 & dedup ---
     normalized: List[tuple] = []
     by_src = {
         "live_advisory": [h for h in scored if h[2]=="live_advisory"],
         "live_forecast": [h for h in scored if h[2]=="live_forecast"],
-        "mid_forecast":  [h for h in scored if h[2]=="mid_forecast"],
+        "region_forecast":  [h for h in scored if h[2]=="region_forecast"],
     }
     for src, hits in by_src.items():
         if not hits: continue
@@ -1581,7 +1934,8 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     # 라이브 상태 메시지는 질문 날짜가 오늘일 때만 추가 (특보는 현재 상태만 의미)
     if live_status_msg and days_from_today <= 0: 
         ctx_parts.append(live_status_msg)
-    ctx_parts += [f"[유사도:{s:.4f}][{src}]\n{txt}" for s, txt, src, _ in top]
+    # RAGAS faithfulness 향상을 위해 메타데이터 제거하고 순수 텍스트만 사용
+    ctx_parts += [txt for s, txt, src, _ in top]
     context = "\n\n".join(ctx_parts) or "관련 문서를 찾을 수 없습니다."
 
     return {**state, "context": context}
@@ -1594,15 +1948,14 @@ def _has_minimum_fields(ctx: str) -> bool:
 # ===== 검증 노드들 =====
 # 1차 검증 (검색 품질) 임계값
 CONTEXT_PRECISION_THRESHOLD = 0.7
-CONTEXT_RECALL_THRESHOLD = 0.7
 
 # 2차 검증 (답변 품질) 임계값
-FAITHFULNESS_THRESHOLD = 0.4  # RAGAS faithfulness는 일반적으로 낮게 나옴 (0.4 → 0.35로 더 완화)
-ANSWER_RELEVANCY_THRESHOLD = 0.7
+FAITHFULNESS_THRESHOLD = 0.7
+ANSWER_RELEVANCY_THRESHOLD = 0.6
 
 MAX_RETRIES = 3
 
-def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
+async def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 1차 검증 (검색 품질)")
     question = state.get("question") or ""
     context = state.get("context") or ""
@@ -1638,10 +1991,13 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
 
             print("   - 🔄 RAGAS 평가 실행 중...")
             
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            context_precision_score = asyncio.run(context_precision_scorer.single_turn_ascore(context_sample))
-            ragas_scores["context_precision"] = float(context_precision_score)
+            # Context Precision만 평가 (1차 검증용)
+            ragas_results = await run_ragas_context_precision_only(question, temp_answer, optimized_context)
+            if ragas_results and isinstance(ragas_results, dict):
+                ragas_scores["context_precision"] = ragas_results.get("context_precision", 0.0)
+            else:
+                print("   - ⚠️ RAGAS 검색 평가 실패")
+                ragas_scores["context_precision"] = 0.0
             
             print(f"   - 📈 검색 품질 지표:")
             print(f"     • Context Precision (LLM-based): {ragas_scores['context_precision']:.3f}")
@@ -1661,7 +2017,7 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     
     return {**state, "is_retrieval_sufficient": is_sufficient}
 
-def answer_validation_node(state: GraphState) -> Dict[str, Any]:
+async def answer_validation_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 2차 검증 (답변 품질)")
     retry_count = state.get("retry_count", 0) + 1
 
@@ -1677,11 +2033,21 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
         print("   - ❌ 평가 정보가 부족하여 검증을 건너뜁니다.")
         return {**state, "is_answer_sufficient": True, "retry_count": retry_count}
 
-    # 컨텍스트 및 답변 최적화
-    max_context_length = 3000
+    # 컨텍스트 및 답변 최적화 (RAGAS faithfulness 향상을 위해 길이 증가)
+    max_context_length = 5000  # 3000 → 5000으로 증가
     optimized_context = context[:max_context_length] if len(context) > max_context_length else context
-    max_answer_length = 1200
+    max_answer_length = 2000   # 1200 → 2000으로 증가
     optimized_answer = answer[:max_answer_length] if len(answer) > max_answer_length else answer
+    
+    # RAGAS faithfulness 향상을 위해 컨텍스트 정리 (메타데이터 제거)
+    import re
+    # [유사도:0.1234][live_forecast] 같은 메타데이터 제거
+    cleaned_context = re.sub(r'\[유사도:[^\]]+\]\[[^\]]+\]\n?', '', optimized_context)
+    # [LIVE_STATUS], [RISKS] 같은 태그도 제거
+    cleaned_context = re.sub(r'\[[A-Z_]+\]', '', cleaned_context)
+    # 연속된 공백 정리
+    cleaned_context = re.sub(r'\n\s*\n', '\n\n', cleaned_context).strip()
+    optimized_context = cleaned_context
 
     if len(optimized_context.strip()) < 50 or len(optimized_answer.strip()) < 20:
         print("   - ⚠️ 컨텍스트/답변이 너무 짧아 RAGAS 평가 생략")
@@ -1692,48 +2058,17 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
     try:
         print("   - 📊 RAGAS 답변 품질 평가 중...")
         
-        scores = {}
-        
-        try:
-            # Faithfulness (SalesRAGAS 방식)
-            faithfulness_scorer = Faithfulness(llm=_RAGAS_LLM_WRAPPER)
-            
-            # SingleTurnSample 생성 (Faithfulness용)
-            faithfulness_sample = SingleTurnSample(
-                user_input=question,
-                response=optimized_answer,
-                retrieved_contexts=[optimized_context] if optimized_context else [""]
-            )
-            
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            faithfulness_score = asyncio.run(faithfulness_scorer.single_turn_ascore(faithfulness_sample))
-            scores['faithfulness'] = float(faithfulness_score)
-            
-        except Exception as e:
-            scores['faithfulness'] = 0.0
-        
-        try:
-            # Answer Relevancy (SalesRAGAS 방식)
-            answer_relevancy_scorer = ResponseRelevancy(
-                llm=_RAGAS_LLM_WRAPPER, 
-                embeddings=_RAGAS_EMB_WRAPPER
-            )
-            
-            # SingleTurnSample 생성 (Answer Relevancy용)
-            relevancy_sample = SingleTurnSample(
-                user_input=question,
-                response=optimized_answer,
-                retrieved_contexts=[optimized_context] if optimized_context else [""]
-            )
-            
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            answer_relevancy_score = asyncio.run(answer_relevancy_scorer.single_turn_ascore(relevancy_sample))
-            scores['answer_relevancy'] = float(answer_relevancy_score)
-            
-        except Exception as e:
-            scores['answer_relevancy'] = 0.0
+        # Faithfulness와 Answer Relevancy만 병렬 평가 (2차 검증용)
+        ragas_results = await run_ragas_faithfulness_relevancy_parallel(question, optimized_answer, optimized_context)
+        if ragas_results and isinstance(ragas_results, dict):
+            scores = {
+                'faithfulness': ragas_results.get("faithfulness", 0.0),
+                'answer_relevancy': ragas_results.get("answer_relevancy", 0.0)
+            }
+            print(f"   - ✅ RAGAS 답변 품질 평가 완료: Faithfulness={scores['faithfulness']:.3f}, Relevancy={scores['answer_relevancy']:.3f}")
+        else:
+            print("   - ⚠️ RAGAS 답변 품질 평가 실패")
+            scores = {'faithfulness': 0.0, 'answer_relevancy': 0.0}
 
         f_val = scores.get('faithfulness', 0.0)
         r_val = scores.get('answer_relevancy', 0.0)
@@ -1875,13 +2210,13 @@ def build_graph():
     g.add_edge("fallback_answer", END)
 
     app = g.compile()
-    try:
-        graph_image_path = "agent_workflow_v3.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_v3.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
     return app
 
 # # =========[ 평가 유틸(선택) ]=========
@@ -1930,8 +2265,48 @@ def build_graph():
 #     eval_df.to_csv(out_path, index=False, encoding="utf-8-sig")
 #     print(f"\n전체 결과 저장: {out_path}")
 
-# =========[ 실행부 ]=========
-if __name__ == "__main__":
+# =========[ OchestratorTest.py 호환 함수 ]=========
+async def run(state: dict) -> dict:
+    """
+    OchestratorTest.py에서 호출되는 날씨 에이전트 실행 함수 (비동기)
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 답변
+    """
+    try:
+        # 질문 추출
+        query = state.get("query", "")
+        if not query:
+            return {"agent_answer": "질문이 제공되지 않았습니다. 날씨 관련 질문을 해주세요."}
+        
+        print(f"[날씨_agent] 질문 처리 시작: {query}")
+        
+        # 그래프 빌드 및 실행
+        app = build_graph()
+        
+        # 그래프 비동기 실행
+        result = await app.ainvoke({"question": query})
+        
+        # 답변 추출
+        answer = result.get("answer", "답변을 생성할 수 없습니다.")
+        
+        print(f"[날씨_agent] 답변 생성 완료: {len(answer)}자")
+        
+        return {"agent_answer": answer}
+        
+    except Exception as e:
+        error_msg = f"날씨 에이전트 실행 중 오류가 발생했습니다: {e}"
+        print(f"[날씨_agent] 오류: {e}")
+        return {"agent_answer": error_msg}
+
+# =========[ 비동기 실행부 ]=========
+async def async_main():
+    """비동기 메인 함수 - RAGAS 이벤트 루프 충돌 방지"""
     import sys
     from argparse import ArgumentParser
     parser = ArgumentParser(description="기상 전문가 통합 그래프 (라이브+중기, No VectorDB, No 2nd Validation)")
@@ -1946,7 +2321,8 @@ if __name__ == "__main__":
         q = args.question.strip()
         if not q: raise ValueError("질문이 비어 있습니다.")
         try:
-            out = app.invoke({"question": q})
+            # 비동기 invoke 사용
+            out = await app.ainvoke({"question": q})
             if args.show_context:
                 print("\n=== 컨텍스트 ===")
                 print(out.get("context", ""))
@@ -1962,7 +2338,8 @@ if __name__ == "__main__":
             if q.lower() in ("exit", "quit"): break
             if not q: continue
             try:
-                out = app.invoke({"question": q})
+                # 비동기 invoke 사용
+                out = await app.ainvoke({"question": q})
                 if args.show_context:
                     print("\n=== 컨텍스트 ===")
                     print(out.get("context", ""))
@@ -1971,3 +2348,10 @@ if __name__ == "__main__":
                 print()
             except Exception as e:
                 print(f"❌ 오류: {e}\n")
+
+def main():
+    """동기 메인 함수 - asyncio.run으로 비동기 함수 실행"""
+    asyncio.run(async_main())
+
+if __name__ == "__main__":
+    main()

@@ -1,10 +1,13 @@
 # redis_memory.py  (et_agent/common/short_term/redis_memory.py)
 import json
-import os
-import time
 import redis
+<<<<<<< HEAD
 import hashlib
 from urllib.parse import urlparse
+=======
+import time
+import hashlib
+>>>>>>> origin
 from typing import Any, Dict, List, Optional
 
 # 길이 제한/TTL 설정 (필요에 맞게 조정)
@@ -22,11 +25,6 @@ except Exception:
         "answer": [],
         "explanation": [],
         "subject": [],
-        "wrong_question": [],
-        "weak_type": [],
-        "notes": [],
-        "user_answer": [],
-        "retrieve_answer": "",
     }
     def ensure_shared(state: Dict[str, Any]) -> Dict[str, Any]:
         state = dict(state or {})
@@ -38,6 +36,7 @@ except Exception:
 
 
 class RedisLangGraphMemory:
+<<<<<<< HEAD
     """Redis 기반 단기 메모리.
 
     환경변수(.env) 우선 순위:
@@ -50,6 +49,9 @@ class RedisLangGraphMemory:
 
     사용자가 매개변수 redis_host / redis_port 를 직접 넘기면 가장 높은 우선순위.
     
+=======
+    """
+>>>>>>> origin
     통합된 Redis 기반 숏텀 메모리
     - 기존 LangGraph 메모리 기능 (shared, history)
     - 문제 중심 스키마 (질문/풀이 분리 저장, 중복 검사)
@@ -61,21 +63,23 @@ class RedisLangGraphMemory:
         user_id: str,
         service: str,
         chat_id: str,
-        redis_host: Optional[str] = None,
-        redis_port: Optional[int] = None,
+        redis_host: str = "localhost",
+        redis_port: int = 6380,
         ttl_seconds: Optional[int] = DEFAULT_TTL,
-        redis_url: Optional[str] = None,
-        **kwargs: Any,
     ):
         self.user_id = user_id
         self.service = service
         self.chat_id = chat_id
         self.ttl_seconds = ttl_seconds
+<<<<<<< HEAD
         self.redis = self._init_client(
             redis_host=redis_host,
             redis_port=redis_port,
             redis_url=redis_url,
         )
+=======
+        self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+>>>>>>> origin
         
         # 문제 중심 스키마를 위한 네임스페이스
         self.question_ns = f"{user_id}:{service}:{chat_id}:questions"
@@ -163,61 +167,6 @@ class RedisLangGraphMemory:
         except Exception:
             pass
 
-    # ---------- 초기화/클라이언트 ----------
-    @staticmethod
-    def _detect_container() -> bool:
-        try:
-            return os.path.exists("/.dockerenv")
-        except Exception:
-            return False
-
-    def _init_client(
-        self,
-        redis_host: Optional[str],
-        redis_port: Optional[int],
-        redis_url: Optional[str] = None,
-        retries: int = 3,
-        delay: float = 0.5,
-    ) -> redis.Redis:
-        url = redis_url or os.getenv("REDIS_URL")
-        if url:
-            parsed = urlparse(url)
-            password = parsed.password or os.getenv("REDIS_PASSWORD")
-            db = int(parsed.path.lstrip("/") or 0)
-            host = parsed.hostname
-            port = parsed.port or 6379
-        else:
-            in_container = self._detect_container()
-            default_host = "redis" if in_container else "localhost"
-            default_port = 6379 if in_container else 6380
-            host = redis_host or os.getenv("REDIS_HOST") or default_host
-            port = int(redis_port or os.getenv("REDIS_PORT") or default_port)
-            password = os.getenv("REDIS_PASSWORD") or None
-            db = int(os.getenv("REDIS_DB") or 0)
-        ssl_flag = os.getenv("REDIS_SSL", "false").lower() in {"1", "true", "yes"}
-        socket_timeout_raw = os.getenv("REDIS_SOCKET_TIMEOUT")
-        socket_timeout = float(socket_timeout_raw) if socket_timeout_raw else None
-        client_kwargs: Dict[str, Any] = dict(
-            host=host,
-            port=port,
-            db=db,
-            password=password,
-            decode_responses=True,
-            ssl=ssl_flag,
-        )
-        if socket_timeout is not None:
-            client_kwargs["socket_timeout"] = socket_timeout
-        last_err: Optional[Exception] = None
-        for attempt in range(1, retries + 1):
-            try:
-                client = redis.Redis(**client_kwargs)
-                client.ping()
-                return client
-            except Exception as e:
-                last_err = e
-                time.sleep(delay * attempt)
-        raise RuntimeError(f"Redis 연결 실패: {last_err}")
-
     @property
     def k_shared(self) -> str:
         return self._k("shared")
@@ -230,7 +179,7 @@ class RedisLangGraphMemory:
     def _load_shared(self) -> Dict[str, Any]:
         raw = self.redis.get(self.k_shared)
         if not raw:
-            return json.loads(json.dumps(SHARED_DEFAULTS))
+            return json.loads(json.dumps(SHARED_DEFAULTS))  # deepcopy
         try:
             data = json.loads(raw)
             tmp = {"shared": data}
@@ -861,4 +810,144 @@ class RedisLangGraphMemory:
             "question": questions,
             "options": options,
             "subject": subjects
+<<<<<<< HEAD
         }
+=======
+        }
+    
+    # --------------------------
+    # 10) 서비스별 숏텀 메모리 관리 메서드들
+    def save_service_short_term_data(self, service: str, data: Dict[str, Any]) -> None:
+        """서비스별 숏텀 메모리 데이터 저장"""
+        try:
+            key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+            self.redis.setex(key, 3600, json.dumps(data, ensure_ascii=False))  # 1시간 TTL
+            print(f"💾 {service} 서비스 숏텀 메모리 저장 완료: {key}")
+        except Exception as e:
+            print(f"❌ {service} 서비스 숏텀 메모리 저장 실패: {e}")
+    
+    def load_service_short_term_data(self, service: str) -> Dict[str, Any]:
+        """서비스별 숏텀 메모리 데이터 로드"""
+        try:
+            key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+            data = self.redis.get(key)
+            if data:
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                return json.loads(data)
+            return {}
+        except Exception as e:
+            print(f"❌ {service} 서비스 숏텀 메모리 로드 실패: {e}")
+            return {}
+    
+
+    
+    def save_chat_history(self, user_query: str, response: str) -> None:
+        """채팅 히스토리 저장"""
+        try:
+            key = f"chat_history:{self.user_id}:{self.chat_id}"
+            chat_entry = {
+                "user_query": user_query,
+                "response": response,
+                "timestamp": self._now_ts()
+            }
+            
+            # 기존 히스토리 로드
+            existing_history = self.redis.lrange(key, 0, -1)
+            history = []
+            for entry in existing_history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                history.append(json.loads(entry))
+            
+            # 새 엔트리 추가
+            history.append(chat_entry)
+            
+            # 최근 50개만 유지
+            if len(history) > 50:
+                history = history[-50:]
+            
+            # Redis에 저장
+            self.redis.delete(key)  # 기존 데이터 삭제
+            for entry in history:
+                self.redis.rpush(key, json.dumps(entry, ensure_ascii=False))
+            
+            self.redis.expire(key, 3600)  # 1시간 TTL
+            
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 저장 실패: {e}")
+    
+    def get_chat_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """채팅 히스토리 조회"""
+        try:
+            key = f"chat_history:{self.user_id}:{self.chat_id}"
+            history = self.redis.lrange(key, -limit, -1)  # 최근 N개
+            
+            result = []
+            for entry in history:
+                if isinstance(entry, bytes):
+                    entry = entry.decode('utf-8')
+                result.append(json.loads(entry))
+            
+            return result
+        except Exception as e:
+            print(f"❌ 채팅 히스토리 조회 실패: {e}")
+            return []
+    
+    def clear_short_term_memory(self, service: Optional[str] = None) -> None:
+        """숏텀 메모리 삭제 (특정 서비스 또는 전체)"""
+        try:
+            if service:
+                # 특정 서비스만 삭제
+                key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
+                self.redis.delete(key)
+                print(f"🗑️ {service} 서비스 숏텀 메모리 삭제 완료")
+            else:
+                # 전체 숏텀 메모리 삭제
+                pattern = f"short_term:{self.user_id}:{self.chat_id}:*"
+                keys = self.redis.keys(pattern)
+                if keys:
+                    self.redis.delete(*keys)
+                    print(f"🗑️ 전체 숏텀 메모리 삭제 완료: {len(keys)}개 키")
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 삭제 실패: {e}")
+    
+    def get_short_term_memory_stats(self) -> Dict[str, Any]:
+        """숏텀 메모리 통계 조회"""
+        try:
+            stats = {
+                "teacher": {},
+                "farmer": {},
+                "chat_history": {}
+            }
+            
+            # Teacher 데이터
+            teacher_data = self.load_service_short_term_data("teacher")
+            if teacher_data:
+                stats["teacher"] = {
+                    "questions_count": len(teacher_data.get("questions", [])),
+                    "added_count": teacher_data.get("added_count", 0),
+                    "timestamp": teacher_data.get("timestamp", 0)
+                }
+            
+            # Farmer 데이터
+            farmer_data = self.load_service_short_term_data("farmer")
+            if farmer_data:
+                stats["farmer"] = {
+                    "has_selected_crop": bool(farmer_data.get("selected_crop")),
+                    "has_crop_info": bool(farmer_data.get("crop_info")),
+                    "timestamp": farmer_data.get("timestamp", 0)
+                }
+            
+            # 채팅 히스토리
+            chat_history = self.get_chat_history(limit=100)
+            stats["chat_history"] = {
+                "count": len(chat_history),
+                "latest_timestamp": chat_history[-1].get("timestamp", 0) if chat_history else 0
+            }
+            
+            return stats
+        except Exception as e:
+            print(f"❌ 숏텀 메모리 통계 조회 실패: {e}")
+            return {}
+>>>>>>> origin

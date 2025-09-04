@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, TypedDict, Literal, Union, TypeGuard
-from agents.base_agent import BaseAgent
+from ..base_agent import BaseAgent
 
 # 상태 TypedDict 정의
 class ScoreSuccessResult(TypedDict):

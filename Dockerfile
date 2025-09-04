@@ -16,6 +16,7 @@ ENV LANGSERVE_GRAPHS='{"agent":"teacher.graph:graph"}'
 
 
 # -- Installing all local dependencies --
+RUN (uv pip uninstall --system -y uvloop || pip uninstall -y uvloop || true)
 
 RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e /deps/*
 

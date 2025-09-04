@@ -6,8 +6,15 @@ from typing import List, Dict, Any
 import pandas as pd
 
 from datasets import Dataset
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall  # 필요한 것만
+    return faithfulness, answer_relevancy, context_precision, context_recall
 
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -122,6 +129,7 @@ def recompute_ragas_and_leaderboard(out_dir: str, llm, emb) -> None:
     df = ensure_metadata_dict(df)
 
     ds = Dataset.from_pandas(df)
+    faithfulness, answer_relevancy, context_precision, context_recall = get_ragas_metrics()
 
     # 어떤 지표를 돌릴지 결정 (LLM 유무에 따라)
     if llm is None:
@@ -133,7 +141,7 @@ def recompute_ragas_and_leaderboard(out_dir: str, llm, emb) -> None:
 
     # 평가
     try:
-        ragas_result = evaluate(
+        ragas_result = evaluate_with_ragas(
             ds,
             metrics=metrics_to_run,
             llm=llm if llm is not None else None,

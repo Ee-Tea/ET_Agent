@@ -21,20 +21,46 @@ from langgraph.graph import StateGraph, END
 from tavily import TavilyClient
 from langchain.retrievers import EnsembleRetriever
 
-# RAGAS 라이브러리
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
 from datasets import Dataset
+# RAGAS 라이브러리
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
+    return faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
+
 
 # --- 1. 환경 설정 ---
 load_dotenv()
 OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("TAVILY_API_KEY")
 
-if not OPENAI_API_KEY=REDACTED("오류: OPENAI_API_KEY=REDACTED 파일을 확인해주세요.")
-    exit()
-if not TAVILY_API_KEY:
-    print("오류: TAVILY_API_KEY 환경 변수가 설정되지 않았습니다. .env 파일을 확인해주세요.")
-    exit()
+# (수정) 경고만 출력하고 플래그로 관리
+USE_OPENAI = bool(OPENAI_API_KEY=REDACTED = bool(TAVILY_API_KEY)
+
+if not USE_OPENAI:
+    print("⚠️ OPENAI_API_KEY=REDACTED 호출 시 실패할 수 있습니다.")
+if not USE_TAVILY:
+    print("⚠️ TAVILY_API_KEY 미설정: 웹검색을 비활성화합니다.")
+
+class _NoopTavily:
+    def search(self, query: str, max_results: int = 5):
+        print("⚠️ Tavily 비활성화: 키가 없거나 패키지가 없습니다.")
+        return {"results": []}  # 기존 파싱 로직과 호환
+
+tavily_tool = None
+if USE_TAVILY:
+    try:
+        from tavily import TavilyClient
+        tavily_tool = TavilyClient(api_key=TAVILY_API_KEY)
+    except Exception as e:
+        print(f"⚠️ Tavily 초기화 실패: {e}  → No-Op로 대체")
+        tavily_tool = _NoopTavily()
+else:
+    tavily_tool = _NoopTavily()
 
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
@@ -91,7 +117,6 @@ VALIDATION_PROMPT = """
 답변:
 """
 
-tavily_tool = TavilyClient(api_key=TAVILY_API_KEY)
 
 # 전역 retriever 변수 (직렬화 문제 해결을 위해)
 _global_retriever = None
@@ -351,6 +376,7 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     주어진 질문, 답변, 맥락으로 RAGAS 평가를 실행합니다. (asyncio.gather 병렬 처리)
     """
     print("\n--- RAGAS 자동 평가 시작 ---")
+    faithfulness, answer_relevancy , ContextUtilization, LLMContextPrecisionWithoutReference = get_ragas_metrics()
     data = {
         'question': [question],
         'answer': [answer],
@@ -366,6 +392,12 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     ]
 
     try:
+        result = evaluate_with_ragas(
+            dataset=dataset,
+            metrics=metrics_to_evaluate,
+            llm=ragas_llm,
+            embeddings=ragas_embeddings
+        )
         # 🚀 asyncio.gather를 사용한 직접 병렬 처리
         async def evaluate_faithfulness():
             try:

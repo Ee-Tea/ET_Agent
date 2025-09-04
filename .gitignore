@@ -311,3 +311,9 @@ volumes/
 # LangGraph API
 .langgraph_api
 volumes/
+
+# Redis runtime data
+/data/redis/
+*.rdb
+*.aof
+appendonlydir/

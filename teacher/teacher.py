@@ -29,7 +29,9 @@ from .agents.analysis.analysis_agent import AnalysisAgent
 from .agents.score.score_engine import ScoreEngine as score_agent
 from .agents.retrieve.retrieve_agent import retrieve_agent
 # from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
-from .agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
+def get_generate_agent():
+    from .agents.TestGenerator.generator import InfoProcessingExamAgent
+    return InfoProcessingExamAgent
 # from agents.TestGenerator.generator_backup import InfoProcessingExamAgent as generate_agent
 from .agents.solution.solution_agent import SolutionAgent as solution_agent
 # from .agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
@@ -112,6 +114,7 @@ class Teacher:
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
         if init_agents:
             self.retriever_runner = retrieve_agent()
+            generate_agent = get_generate_agent()
             self.generator_runner = generate_agent()
             self.solution_runner  = solution_agent()   # 추상클래스 구현체면 여기서 생성
             self.score_runner     = score_agent()

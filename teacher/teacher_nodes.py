@@ -449,7 +449,7 @@ def post_generator_route(state: Dict[str, Any]) -> str:
 def post_solution_route(state: Dict[str, Any]) -> str:
     """solution 실행 후 다음 노드 결정"""
     nxt = ((state.get("routing") or {}).get("after_solution") or "").strip()
-    return nxt if nxt else "generate_answer_pdf"  # 기본적으로 답안집 PDF 생성
+    return nxt if nxt else "persist_state"  # 기본적으로 persist_state로 이동
 
 def post_score_route(state: Dict[str, Any]) -> str:
     """score 실행 후 다음 노드 결정"""
@@ -535,7 +535,7 @@ def generate_user_response(state: Dict[str, Any]) -> str:
 실행된 작업들: {', '.join(executed_tasks) if executed_tasks else '없음'}
 주요 결과: {'; '.join(results_summary) if results_summary else '결과 없음'}
 
-위 정보를 바탕으로 사용자에게 친근하고 도움이 되는 답변을 해주세요."""
+위 정보를 바탕으로 실행된 내용을 요약해서 친절하게 알려주세요."""
 
     try:
         response = client.chat.completions.create(

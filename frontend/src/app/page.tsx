@@ -3,14 +3,12 @@
 // CopilotKit 의존성 제거
 import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
-import { softwareDesignQuestions, Question } from "./test/data/questions";
 
 // 테스트 세션 타입 정의
 type TestSession = {
   id: string;
   type: string;
   title: string;
-  questions: Question[];
   currentQuestion: number;
   answers: Record<number, string>;
   startTime: Date;
@@ -115,7 +113,6 @@ function YourMainContent({
           id: sessionId,
           type,
           title,
-          questions: softwareDesignQuestions.slice(0, questionCount), // 임시로 하드코딩된 문제 사용
           currentQuestion: 0,
           answers: {},
           startTime: new Date(),
@@ -136,7 +133,6 @@ function YourMainContent({
         id: sessionId,
         type,
         title,
-        questions: softwareDesignQuestions.slice(0, questionCount),
         currentQuestion: 0,
         answers: {},
         startTime: new Date(),
@@ -231,28 +227,7 @@ function YourMainContent({
             
             {/* 문제 목록 - 전체 높이 사용 */}
             <div className="flex-1 overflow-y-auto pr-4">
-              {softwareDesignQuestions.map((question, index) => (
-                <div key={question.id} className="mb-8 last:mb-0 bg-white rounded-lg p-6 shadow-sm">
-                  <h3 className="text-lg font-semibold text-gray-800 mb-4">
-                    문제 {question.id}: {question.question}
-                  </h3>
-                  
-                  {/* 보기 선택 */}
-                  <div className="space-y-3">
-                    {Object.entries(question.options).map(([key, value]) => (
-                      <label key={key} className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
-                        <input 
-                          type="radio" 
-                          name={`q${question.id}`} 
-                          value={key} 
-                          className="mr-3" 
-                        />
-                        <span className="font-medium">{key}. {value}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ))}
+              
             </div>
             
             {/* 전체 답안 제출 버튼 */}

@@ -1,7 +1,3 @@
-# 주의 무시
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 # 설정
 from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, list_collections, utility
 import requests
@@ -14,7 +10,7 @@ from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 import asyncio
@@ -294,7 +290,7 @@ def execute_milvus_search(query: str) -> list[str]:
 
         results = search_market_docs(query, collection, top_k=3)
         connections.disconnect("default")
-        return results
+        return results 
     except Exception as e:
         print(f"❌ Milvus 연결 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
@@ -826,7 +822,7 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
             print("⚠️ Tavily API 키가 설정되지 않았습니다.")
             return supplemented_context
         
-        tavily_tool = TavilySearchResults(max_results=5, api_key=tavily_api_key)
+        tavily_tool = TavilySearch(max_results=3, api_key=tavily_api_key)
         
         search_queries = []
         if missing_info_type == "판매처":
@@ -897,12 +893,12 @@ def node_ragas_validation(state: GraphState) -> GraphState:
     
     # RAGAS 임계값 설정
     CONTEXT_PRECISION_THRESHOLD = 0.7
-    FAITHFULNESS_THRESHOLD = 0.7
-    ANSWER_RELEVANCY_THRESHOLD = 0.5
+    FAITHFULNESS_THRESHOLD = 0.65
+    ANSWER_RELEVANCY_THRESHOLD = 0.45
     
     try:
         # SalesRAGAS 모듈에서 필요한 함수들 import
-        from sales.SalesRAGAS import SalesRAGASEvaluator
+        from .SalesRAGAS import SalesRAGASEvaluator
         
         # 평가기 초기화
         evaluator = SalesRAGASEvaluator()

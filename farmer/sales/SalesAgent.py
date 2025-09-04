@@ -4,7 +4,17 @@ import requests
 from dotenv import load_dotenv
 import os
 import pandas as pd
-from konlpy.tag import Okt
+try:
+    from kiwipiepy import Kiwi
+    kiwi = Kiwi()
+    USE_KIWI = True
+except ImportError:
+    try:
+        from konlpy.tag import Okt
+        okt = Okt()
+        USE_KIWI = False
+    except:
+        USE_KIWI = None
 import re
 from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
@@ -48,8 +58,22 @@ llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("O
 
 # 키워드 추출
 def extract_keywords(query):
-    okt = Okt()
-    return okt.nouns(query)
+    if USE_KIWI:
+        # Kiwi 사용 (Java 불필요)
+        result = kiwi.analyze(query)
+        nouns = []
+        for token in result[0][0]:
+            if token.tag.startswith('N'):  # 명사류 태그
+                nouns.append(token.form)
+        return nouns
+    elif USE_KIWI is False:
+        # KoNLPy 사용 (Java 필요)
+        return okt.nouns(query)
+    else:
+        # 둘 다 없으면 간단한 텍스트 분할
+        import re
+        # 한글 단어만 추출 (2글자 이상)
+        return re.findall(r'[가-힣]{2,}', query)
 
 # ===============================
 # 사용자 질문 받기

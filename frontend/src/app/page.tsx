@@ -3,7 +3,59 @@
 // CopilotKit 의존성 제거
 import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
-import { softwareDesignQuestions, Question } from "./test/data/questions";
+import { Question } from "./test/data/questions";
+
+// AI 응답에서 문제를 파싱하는 함수
+function parseQuestionsFromAIResponse(aiResponse: string, questionCount: number): Question[] {
+  try {
+    const questions: Question[] = [];
+    
+    // AI 응답에서 문제 패턴을 찾기
+    const questionPattern = /문제\s*(\d+)[:：]\s*(.+?)(?=문제\s*\d+[:：]|$)/gs;
+    const matches = [...aiResponse.matchAll(questionPattern)];
+    
+    for (let i = 0; i < Math.min(matches.length, questionCount); i++) {
+      const match = matches[i];
+      const questionText = match[2].trim();
+      
+      // 선택지 패턴 찾기 (A, B, C, D)
+      const optionPattern = /([A-D])[:：]\s*([^\n]+)/g;
+      const options: Record<string, string> = {};
+      let optionMatch;
+      
+      while ((optionMatch = optionPattern.exec(questionText)) !== null) {
+        options[optionMatch[1]] = optionMatch[2].trim();
+      }
+      
+      // 정답 패턴 찾기
+      const correctAnswerPattern = /정답[:：]\s*([A-D])/i;
+      const correctMatch = questionText.match(correctAnswerPattern);
+      const correctAnswer = correctMatch ? correctMatch[1] : 'A';
+      
+      // 해설 패턴 찾기
+      const explanationPattern = /해설[:：]\s*(.+?)(?=문제\s*\d+[:：]|$)/s;
+      const explanationMatch = questionText.match(explanationPattern);
+      const explanation = explanationMatch ? explanationMatch[1].trim() : undefined;
+      
+      if (Object.keys(options).length >= 4) {
+        questions.push({
+          id: i + 1,
+          question: questionText.split('\n')[0].trim(),
+          options,
+          correctAnswer,
+          explanation,
+          category: 'AI Generated',
+          difficulty: 'Medium'
+        });
+      }
+    }
+    
+    return questions;
+  } catch (error) {
+    console.error('AI 응답 파싱 오류:', error);
+    return [];
+  }
+}
 
 // 테스트 세션 타입 정의
 type TestSession = {
@@ -93,9 +145,10 @@ function YourMainContent({
   // useCoAgent는 제거하고 필요시 다시 추가
 
   // 테스트 세션 생성 함수 (AI 동적 생성)
-  const createTestSession = async (type: string, title: string, questionCount: number, difficulty: string = 'intermediate', userLevel: string = 'intermediate') => {
+  const createTestSession = async (type: string, questionCount: number, difficulty: string, userLevel: string) => {
     try {
-      // 백엔드 API로 직접 요청
+      const title = `${type} ${questionCount}문제`;
+      
       const response = await fetch('http://localhost:8000/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -109,13 +162,15 @@ function YourMainContent({
       const data = await response.json();
       
       if (data.response) {
-        // 응답에서 문제를 파싱하거나 기본 문제 사용
+        // AI 응답에서 문제 파싱
+        const aiQuestions = parseQuestionsFromAIResponse(data.response, questionCount);
+        
         const sessionId = `session_${Math.random().toString(36).substr(2, 9)}`;
         const newSession: TestSession = {
           id: sessionId,
           type,
           title,
-          questions: softwareDesignQuestions.slice(0, questionCount), // 임시로 하드코딩된 문제 사용
+          questions: aiQuestions.length > 0 ? aiQuestions : [], // AI 생성 문제 사용
           currentQuestion: 0,
           answers: {},
           startTime: new Date(),
@@ -130,13 +185,13 @@ function YourMainContent({
       }
     } catch (error) {
       console.error('Failed to create test session:', error);
-      // 폴백: 기존 하드코딩된 문제 사용
+      // 폴백: 빈 문제 배열로 세션 생성
       const sessionId = `session_${Math.random().toString(36).substr(2, 9)}`;
       const newSession: TestSession = {
         id: sessionId,
         type,
-        title,
-        questions: softwareDesignQuestions.slice(0, questionCount),
+        title: `${type} ${questionCount}문제`,
+        questions: [], // 빈 배열로 시작
         currentQuestion: 0,
         answers: {},
         startTime: new Date(),
@@ -231,28 +286,35 @@ function YourMainContent({
             
             {/* 문제 목록 - 전체 높이 사용 */}
             <div className="flex-1 overflow-y-auto pr-4">
-              {softwareDesignQuestions.map((question, index) => (
-                <div key={question.id} className="mb-8 last:mb-0 bg-white rounded-lg p-6 shadow-sm">
-                  <h3 className="text-lg font-semibold text-gray-800 mb-4">
-                    문제 {question.id}: {question.question}
-                  </h3>
-                  
-                  {/* 보기 선택 */}
-                  <div className="space-y-3">
-                    {Object.entries(question.options).map(([key, value]) => (
-                      <label key={key} className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
-                        <input 
-                          type="radio" 
-                          name={`q${question.id}`} 
-                          value={key} 
-                          className="mr-3" 
-                        />
-                        <span className="font-medium">{key}. {value}</span>
-                      </label>
-                    ))}
+              {currentSession && currentSession.questions.length > 0 ? (
+                currentSession.questions.map((question, index) => (
+                  <div key={question.id} className="mb-8 last:mb-0 bg-white rounded-lg p-6 shadow-sm">
+                    <h3 className="text-lg font-semibold text-gray-800 mb-4">
+                      문제 {question.id}: {question.question}
+                    </h3>
+                    
+                    {/* 보기 선택 */}
+                    <div className="space-y-3">
+                      {Object.entries(question.options).map(([key, value]) => (
+                        <label key={key} className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
+                          <input 
+                            type="radio" 
+                            name={`q${question.id}`} 
+                            value={key} 
+                            className="mr-3" 
+                          />
+                          <span className="font-medium">{key}. {value}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
+                ))
+              ) : (
+                <div className="text-center py-8">
+                  <p className="text-gray-500">AI가 문제를 생성 중입니다...</p>
+                  <p className="text-sm text-gray-400 mt-2">잠시만 기다려주세요.</p>
                 </div>
-              ))}
+              )}
             </div>
             
             {/* 전체 답안 제출 버튼 */}

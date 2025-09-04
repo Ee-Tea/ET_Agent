@@ -144,7 +144,7 @@ class MainOrchestrator:
 
         위 키워드를 참고하여 다음 중 하나로 분류해주세요:
         - teacher: 교육/학습 관련 질문
-        - farmer: 농업/재배 관련 질문
+        - farmer: 농업/재배 관련 질문 [ex) 판매처, 시세, 날씨, 재해, 재배방법, 작물추천]
         - irrelevant: 위 두 분야와 무관한 질문
 
         분류 결과만 출력하세요 (teacher/farmer/irrelevant):

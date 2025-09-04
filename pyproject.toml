@@ -37,6 +37,7 @@ dependencies = [
     "groq>=0.31.0",
     "langchain-groq>=0.3.7",
     "langchain-tavily>=0.1.0",
+    "kiwipiepy>=0.18.0",
     "graphviz>=0.21",
     "groq>=0.31.0",
     "docling>=2.43.0",

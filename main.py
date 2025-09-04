@@ -26,7 +26,7 @@ from langgraph.types import interrupt
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-from teacher.teacher import Teacher, TeacherState
+from teacher.teacher_graph import Teacher, TeacherState
 from common.short_term.redis_memory import RedisLangGraphMemory
 
 # 환경 변수 로드
@@ -130,13 +130,12 @@ class MainOrchestrator:
         # 3) LangGraph 체크포인터(중단/재개 스냅샷용)
         self.checkpointer = LGMemorySaver()
 
-        # 4) Teacher 서브그래프도 동일 체크포인터 공유
+        # 4) Teacher 서브그래프 초기화
         self.teacher = Teacher(
             user_id=self.user_id,
             service="teacher",
             chat_id=self.chat_id,
-            init_agents=True,
-            checkpointer=self.checkpointer,  # 꼭 동일 인스턴스!
+            init_agents=True
         )
 
         # 5) 그래프 컴파일도 동일 체크포인터
@@ -1029,6 +1028,110 @@ class MainOrchestrator:
         
         return builder
     
+    # FastAPI용 비동기 메서드들 추가
+    async def process_message_async(self, message: str, user_id: str, chat_id: str) -> Dict[str, Any]:
+        """FastAPI용 비동기 메시지 처리"""
+        try:
+            # 새로운 오케스트레이터 인스턴스 생성
+            orchestrator = MainOrchestrator(
+                user_id=user_id,
+                chat_id=chat_id
+            )
+            
+            # 메시지 처리
+            result = orchestrator.run(message)
+            
+            return {
+                "response": result.get("final_response", "응답을 생성할 수 없습니다"),
+                "service_used": result.get("service_classification", "unknown"),
+                "confidence": result.get("classification_confidence", 0.8),
+                "artifacts": result.get("artifacts", {}),
+                "shared": result.get("shared", {}),
+                "score": result.get("score", {})
+            }
+            
+        except Exception as e:
+            return {
+                "response": f"처리 중 오류가 발생했습니다: {str(e)}",
+                "service_used": "error",
+                "confidence": 0.0,
+                "error": str(e)
+            }
+    
+    async def process_teacher_message_async(self, message: str, user_id: str, chat_id: str) -> Dict[str, Any]:
+        """Teacher 서비스 전용 비동기 메시지 처리"""
+        try:
+            # Teacher 서비스로 직접 라우팅
+            from teacher.teacher_graph import Teacher
+            
+            teacher = Teacher(
+                user_id=user_id,
+                service="teacher",
+                chat_id=chat_id,
+                init_agents=True
+            )
+            
+            # Teacher 상태 생성
+            teacher_state = {
+                "user_query": message,
+                "intent": "",
+                "shared": {},
+                "work": {},
+                "retrieval": {},
+                "generation": {},
+                "solution": {},
+                "score": {},
+                "analysis": {},
+                "history": [],
+                "session": {},
+                "artifacts": {},
+                "routing": {},
+                "llm_response": ""
+            }
+            
+            # Teacher 실행
+            result = teacher.execute(teacher_state)
+            
+            return {
+                "response": result.get("llm_response", "Teacher 서비스 응답을 생성할 수 없습니다"),
+                "service_used": "teacher",
+                "confidence": 0.9,
+                "artifacts": result.get("artifacts", {}),
+                "shared": result.get("shared", {}),
+                "score": result.get("score", {})
+            }
+            
+        except Exception as e:
+            return {
+                "response": f"Teacher 서비스 처리 중 오류가 발생했습니다: {str(e)}",
+                "service_used": "teacher",
+                "confidence": 0.0,
+                "error": str(e)
+            }
+    
+    async def process_farmer_message_async(self, message: str, user_id: str, chat_id: str) -> Dict[str, Any]:
+        """Farmer 서비스 전용 비동기 메시지 처리"""
+        try:
+            # Farmer 서비스 실행 (기본 응답)
+            farmer_response = f"Farmer 서비스: {message}에 대한 농업 관련 답변을 제공합니다."
+            
+            return {
+                "response": farmer_response,
+                "service_used": "farmer",
+                "confidence": 0.9,
+                "artifacts": {},
+                "shared": {},
+                "score": {}
+            }
+            
+        except Exception as e:
+            return {
+                "response": f"Farmer 서비스 처리 중 오류가 발생했습니다: {str(e)}",
+                "service_used": "farmer",
+                "confidence": 0.0,
+                "error": str(e)
+            }
+    
     def run(self, user_query: str, config: Optional[Dict] = None) -> Dict[str, Any]:
         """
         오케스트레이터 실행
@@ -1470,5 +1573,234 @@ def main():
         # 다음 루프에서 곧바로 pending/상태를 다시 보고 resume 프롬프트를 띄웁니다.
 
 
+# FastAPI 서버 추가
+def start_fastapi_server():
+    """FastAPI 서버를 시작하는 함수"""
+    try:
+        from fastapi import FastAPI, HTTPException
+        from fastapi.middleware.cors import CORSMiddleware
+        from pydantic import BaseModel
+        import uvicorn
+        
+        # FastAPI 앱 생성
+        app = FastAPI(
+            title="ET-Agent API",
+            description="농업 자격증 및 교육 관련 AI 에이전트 API",
+            version="1.0.0"
+        )
+        
+        # CORS 미들웨어 설정
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        # Pydantic 모델
+        class ChatRequest(BaseModel):
+            message: str
+            user_id: str = "api_user"
+            chat_id: str = "api_chat"
+        
+        class ChatResponse(BaseModel):
+            response: str
+            service_used: str
+            confidence: float
+            session_id: str
+        
+        # 전역 오케스트레이터 인스턴스
+        orchestrator = None
+        
+        @app.on_event("startup")
+        async def startup_event():
+            """서버 시작 시 오케스트레이터 초기화"""
+            global orchestrator
+            try:
+                orchestrator = MainOrchestrator()
+                print("✅ 오케스트레이터 초기화 완료")
+            except Exception as e:
+                print(f"⚠️ 오케스트레이터 초기화 실패: {e}")
+                orchestrator = None
+        
+        @app.get("/")
+        async def root():
+            return {
+                "message": "ET-Agent API",
+                "version": "1.0.0",
+                "status": "running",
+                "docs": "/docs"
+            }
+        
+        @app.get("/health")
+        async def health_check():
+            return {
+                "status": "healthy",
+                "version": "1.0.0",
+                "orchestrator": "ready" if orchestrator else "not_ready"
+            }
+        
+        @app.post("/chat", response_model=ChatResponse)
+        async def chat(request: ChatRequest):
+            """채팅 엔드포인트"""
+            if not orchestrator:
+                raise HTTPException(status_code=503, detail="오케스트레이터가 초기화되지 않았습니다")
+            
+            try:
+                # 오케스트레이터를 사용하여 응답 생성
+                response = await orchestrator.process_message_async(
+                    request.message, 
+                    request.user_id, 
+                    request.chat_id
+                )
+                
+                return ChatResponse(
+                    response=response.get("response", "응답을 생성할 수 없습니다"),
+                    service_used=response.get("service_used", "unknown"),
+                    confidence=response.get("confidence", 0.8),
+                    session_id=f"{request.user_id}:{request.chat_id}"
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"처리 중 오류 발생: {str(e)}")
+        
+        @app.post("/chat/teacher", response_model=ChatResponse)
+        async def chat_teacher(request: ChatRequest):
+            """Teacher 서비스 전용 채팅"""
+            if not orchestrator:
+                raise HTTPException(status_code=503, detail="오케스트레이터가 초기화되지 않았습니다")
+            
+            try:
+                # Teacher 서비스로 직접 라우팅
+                response = await orchestrator.process_teacher_message_async(
+                    request.message, 
+                    request.user_id, 
+                    request.chat_id
+                )
+                
+                return ChatResponse(
+                    response=response.get("response", "응답을 생성할 수 없습니다"),
+                    service_used="teacher",
+                    confidence=response.get("confidence", 0.9),
+                    session_id=f"{request.user_id}:{request.chat_id}"
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"처리 중 오류 발생: {str(e)}")
+        
+        @app.post("/chat/farmer", response_model=ChatResponse)
+        async def chat_farmer(request: ChatRequest):
+            """Farmer 서비스 전용 채팅"""
+            if not orchestrator:
+                raise HTTPException(status_code=503, detail="오케스트레이터가 초기화되지 않았습니다")
+            
+            try:
+                # Farmer 서비스로 직접 라우팅
+                response = await orchestrator.process_farmer_message_async(
+                    request.message, 
+                    request.user_id, 
+                    request.chat_id
+                )
+                
+                return ChatResponse(
+                    response=response.get("response", "응답을 생성할 수 없습니다"),
+                    service_used="farmer",
+                    confidence=response.get("confidence", 0.9),
+                    session_id=f"{request.user_id}:{request.chat_id}"
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"처리 중 오류 발생: {str(e)}")
+        
+        # LangGraph 호환 엔드포인트 추가
+        @app.post("/runs/stream")
+        async def langgraph_stream(request: dict):
+            """LangGraph 스트림 엔드포인트"""
+            if not orchestrator:
+                raise HTTPException(status_code=503, detail="오케스트레이터가 초기화되지 않았습니다")
+            
+            try:
+                # 요청에서 메시지 추출
+                input_data = request.get("input", {})
+                messages = input_data.get("messages", [])
+                
+                if not messages:
+                    raise HTTPException(status_code=400, detail="메시지가 없습니다")
+                
+                # 마지막 메시지의 내용 추출
+                last_message = messages[-1]
+                user_message = last_message.get("content", "")
+                
+                # 오케스트레이터 실행
+                result = orchestrator.run(
+                    user_query=user_message,
+                    config={
+                        "configurable": {
+                            "thread_id": f"copilotkit:{input_data.get('thread_id', 'default')}",
+                        }
+                    }
+                )
+                
+                # LangGraph 형식으로 응답 반환
+                response_data = {
+                    "run_id": f"run_{hash(user_message)}",
+                    "status": "success",
+                    "output": {
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "content": result.get("final_response", "응답을 생성할 수 없습니다")
+                            }
+                        ]
+                    }
+                }
+                
+                return response_data
+                
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"처리 중 오류 발생: {str(e)}")
+        
+        @app.get("/assistants")
+        async def get_assistants():
+            """어시스턴트 목록 반환"""
+            return {
+                "assistants": [
+                    {
+                        "assistant_id": "sample_agent",
+                        "name": "ET-Agent",
+                        "description": "농업 자격증 및 교육 관련 AI 에이전트"
+                    }
+                ]
+            }
+        
+        # 서버 시작
+        print("🚀 ET-Agent FastAPI 서버 시작")
+        print("📍 주소: http://localhost:8000")
+        print("📚 API 문서: http://localhost:8000/docs")
+        print("🔍 헬스 체크: http://localhost:8000/health")
+        print("-" * 50)
+        
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=8000,
+            reload=False,
+            log_level="info"
+        )
+        
+    except ImportError as e:
+        print(f"❌ FastAPI 관련 패키지가 설치되지 않았습니다: {e}")
+        print("다음 명령어로 설치해주세요: pip install fastapi uvicorn")
+        return False
+    except Exception as e:
+        print(f"❌ FastAPI 서버 시작 실패: {e}")
+        return False
+
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    # 명령행 인수 확인
+    if len(sys.argv) > 1 and sys.argv[1] == "--api":
+        # FastAPI 서버 모드
+        start_fastapi_server()
+    else:
+        # 기존 콘솔 모드
+        main()

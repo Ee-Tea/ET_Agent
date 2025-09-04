@@ -3,12 +3,8 @@ import json
 import os
 import time
 import redis
-<<<<<<< HEAD
-from urllib.parse import urlparse
-=======
-import time
 import hashlib
->>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
+from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
 
 # 길이 제한/TTL 설정 (필요에 맞게 조정)
@@ -42,7 +38,6 @@ except Exception:
 
 
 class RedisLangGraphMemory:
-<<<<<<< HEAD
     """Redis 기반 단기 메모리.
 
     환경변수(.env) 우선 순위:
@@ -54,13 +49,11 @@ class RedisLangGraphMemory:
       - 로컬 개발이면 host='localhost', port=6380 (docker-compose 포트 매핑 가정)
 
     사용자가 매개변수 redis_host / redis_port 를 직접 넘기면 가장 높은 우선순위.
-=======
-    """
+    
     통합된 Redis 기반 숏텀 메모리
     - 기존 LangGraph 메모리 기능 (shared, history)
     - 문제 중심 스키마 (질문/풀이 분리 저장, 중복 검사)
     - 부분 선택 실행, 취약점 분석, 맞춤형 문제 생성 지원
->>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
     """
     
     def __init__(
@@ -78,21 +71,17 @@ class RedisLangGraphMemory:
         self.service = service
         self.chat_id = chat_id
         self.ttl_seconds = ttl_seconds
-<<<<<<< HEAD
         self.redis = self._init_client(
             redis_host=redis_host,
             redis_port=redis_port,
             redis_url=redis_url,
         )
-=======
-        self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         
         # 문제 중심 스키마를 위한 네임스페이스
         self.question_ns = f"{user_id}:{service}:{chat_id}:questions"
         
         # LangGraph checkpointer를 위한 버전 관리
         self._version_key = f"{self.user_id}:{self.service}:{self.chat_id}:version"
->>>>>>> ae5f9b38a2ce87245ab53ee4eba7ce2fc2f3efca
 
     # ==================== 기존 LangGraph 메모리 기능 ====================
     

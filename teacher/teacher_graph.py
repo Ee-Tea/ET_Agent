@@ -28,22 +28,22 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from common.short_term.redis_memory import RedisLangGraphMemory
 
-from agents.analysis.analysis_agent import AnalysisAgent
-from agents.score.score_engine import ScoreEngine as score_agent
-from agents.retrieve.retrieve_agent import retrieve_agent
-# from agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
-from agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
-# from agents.TestGenerator.generator_backup import InfoProcessingExamAgent as generate_agent
-# from agents.solution.solution_agent import SolutionAgent as solution_agent
-from agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
-from teacher_nodes import (
+from .agents.analysis.analysis_agent import AnalysisAgent
+from .agents.score.score_engine import ScoreEngine as score_agent
+from .agents.retrieve.retrieve_agent import retrieve_agent
+# from .agents.TestGenerator.pdf_quiz_groq_class import InfoProcessingExamAgent as generate_agent
+from .agents.TestGenerator.generator import InfoProcessingExamAgent as generate_agent
+# from .agents.TestGenerator.generator_backup import InfoProcessingExamAgent as generate_agent
+# from .agents.solution.solution_agent import SolutionAgent as solution_agent
+from .agents.solution.solution_agent_hitl import SolutionAgent as solution_agent
+from .teacher_nodes import (
     get_user_answer, parse_generator_input, user_intent,                                    
     route_solution, route_score, route_analysis,
     mark_after_generator_solution, mark_after_solution_score, mark_after_score_analysis,
     post_generator_route, post_solution_route, post_score_route, post_analysis_route,
     generate_user_response, extract_problem_and_options
 )
-from file_path_mapper import FilePathMapper
+from .file_path_mapper import FilePathMapper
 from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 from .teacher_util import (
@@ -51,7 +51,7 @@ from .teacher_util import (
     has_questions, has_solution_answers, has_score, has_files_to_preprocess,
     extract_image_paths, extract_problems_from_images, SupportsExecute
 )
-from pdf_preprocessor import PDFPreprocessor
+# from pdf_preprocessor import PDFPreprocessor
 
 # ========== 타입/프로토콜 ==========
 
@@ -127,8 +127,8 @@ class Teacher:
             self.memory = SimpleMemory()
         
         # PDF 전처리기 초기화
-        from unified_pdf_preprocessor import UnifiedPDFPreprocessor
-        self.pdf_preprocessor = UnifiedPDFPreprocessor()
+        # from unified_pdf_preprocessor import UnifiedPDFPreprocessor
+        # self.pdf_preprocessor = UnifiedPDFPreprocessor()
         
         # ⬇️ 에이전트는 옵션으로 초기화 (시각화 때는 False로)
         if init_agents:
@@ -609,7 +609,13 @@ class Teacher:
         current_artifacts = state.get("artifacts", {}) or {}
         
         # PDF 전처리 모듈 import (편의 함수들)
-        from pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
+        # from pdf_preprocessor import extract_pdf_paths, extract_problem_range, determine_problem_source
+        try:
+            from .pdf_preprocessor import extract_pdf_paths
+        except ImportError:
+            # pdf_preprocessor가 없으면 빈 리스트 반환하는 함수로 대체
+            def extract_pdf_paths(text: str) -> List[str]:
+                return []
 
         # PDF 경로 추출 및 artifacts 업데이트
         extracted_pdfs = extract_pdf_paths(uq)

@@ -766,18 +766,9 @@ class Farmer:
         agents_to_run = [agent for agent in selected_agents if agent != "작물추천_agent"]
         print(f"[📋 실행될 에이전트] {agents_to_run}")
         
-        try:
-            # 비동기 병렬 실행
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result_state = loop.run_until_complete(
-                self.execute_agents_parallel(agents_to_run, state)
-            )
-            loop.close()
-            return result_state
-        except Exception as e:
-            print(f"❌ 병렬 처리 노드 실행 실패: {e}")
-            return self._handle_error(state, e, "node_parallel_agents")
+        # LangGraph가 자동으로 병렬 처리하므로 상태만 반환
+        # 실제 에이전트 실행은 개별 노드들에서 처리됨
+        return state
 
     @traceable(name="node_merge_output")
     def node_merge_output(self, state: RouterState) -> RouterState:

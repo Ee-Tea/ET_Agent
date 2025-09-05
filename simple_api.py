@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import Optional, Dict, Any
 import uvicorn
 import glob
 
@@ -86,6 +87,7 @@ class ChatResponse(BaseModel):
     service_used: str
     confidence: float
     session_id: str
+    grading_results: Optional[Dict[str, Any]] = None
 
 # API 엔드포인트
 @app.get("/")
@@ -174,11 +176,58 @@ async def chat(request: ChatRequest):
             # 응답 구성
             response_text = result.get("final_response", "응답을 생성할 수 없습니다.")
             
+            # 채점 결과 추출 (채점 요청인 경우)
+            grading_results = None
+            print(f"🔍 [API] 채점 결과 추출 시작")
+            print(f"🔍 [API] result 키들: {list(result.keys())}")
+            print(f"🔍 [API] score 존재 여부: {'score' in result}")
+            
+            if "score" in result:
+                score_data = result["score"]
+                print(f"🔍 [API] score_data: {score_data}")
+                print(f"🔍 [API] score status: {score_data.get('status')}")
+                
+                if score_data.get("status") == "success":
+                    shared_data = result.get("shared", {})
+                    print(f"🔍 [API] shared_data 키들: {list(shared_data.keys())}")
+                    print(f"🔍 [API] user_answer: {shared_data.get('user_answer')}")
+                    print(f"🔍 [API] score results: {score_data.get('results')}")
+                    
+                    # 채점 결과가 있는 경우
+                    if "results" in score_data and shared_data.get("user_answer"):
+                        user_answers = shared_data["user_answer"]
+                        score_results = score_data["results"]
+                        
+                        print(f"🔍 [API] user_answers: {user_answers}")
+                        print(f"🔍 [API] score_results: {score_results}")
+                        
+                        # 각 문제별 채점 결과 구성
+                        grading_results = {}
+                        for i, (user_answer, score_result) in enumerate(zip(user_answers, score_results)):
+                            if user_answer:  # 답변이 있는 경우만
+                                question_id = f"question-{i+1}"
+                                is_correct = score_result == 1
+                                grading_results[question_id] = {
+                                    "isCorrect": is_correct,
+                                    "userAnswer": user_answer,
+                                    "score": score_result
+                                }
+                                print(f"🔍 [API] 문제 {i+1}: {user_answer} -> {score_result} ({'정답' if is_correct else '오답'})")
+                        
+                        print(f"🔍 [API] 최종 grading_results: {grading_results}")
+                    else:
+                        print(f"⚠️ [API] 채점 결과 또는 사용자 답안이 없음")
+                else:
+                    print(f"⚠️ [API] score status가 success가 아님: {score_data.get('status')}")
+            else:
+                print(f"⚠️ [API] result에 score가 없음")
+            
             return ChatResponse(
                 response=response_text,
                 service_used="et_agent",
                 confidence=1.0,
-                session_id=f"{request.user_id}:{request.chat_id}"
+                session_id=f"{request.user_id}:{request.chat_id}",
+                grading_results=grading_results
             )
             
         except Exception as e:

@@ -1,7 +1,6 @@
-from sentence_transformers import SentenceTransformer, util
-import requests
 import re
 import json
+import time
 from langgraph.graph import StateGraph, END
 
 from langchain_core.runnables import RunnableLambda
@@ -9,16 +8,20 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 from langchain_openai import ChatOpenAI
 from typing import TypedDict, Annotated, List, Dict, Optional
-from tavily import TavilyClient
 import operator
 from langsmith import traceable
 from dotenv import load_dotenv
 import os, sys
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import traceback
+import signal
 load_dotenv()
+
+# 전역 인터럽트 플래그
+_interrupt_flag = threading.Event()
 
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
 def merge_dicts(left: dict, right: dict) -> dict:
@@ -60,6 +63,13 @@ class RouterState(dict):
     artifacts: Annotated[Dict[str, any], merge_dicts] = {}
     routing: Annotated[Dict[str, any], merge_dicts] = {}
     error_info: Annotated[Dict[str, str], merge_dicts] = {}
+    crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = []
+
+def signal_handler(signum, frame):
+    """키보드 인터럽트 시그널 핸들러"""
+    _interrupt_flag.set()
+    # KeyboardInterrupt 예외 발생으로 정상적인 종료 처리
+    raise KeyboardInterrupt()
 
 class Farmer:
     """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
@@ -85,6 +95,10 @@ class Farmer:
         
         # 병렬 처리용 스레드 풀
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
+        
+        # 시그널 핸들러 등록 (메인 스레드에서만)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, signal_handler)
     
     def _init_memory_system(self):
         """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
@@ -92,7 +106,6 @@ class Farmer:
     
     def load_state(self, state: RouterState) -> RouterState:
         """그래프 시작 시 상태 초기화"""
-        print("[상태 초기화] 단일 질문 처리")
         return self._initialize_clean_state(state)
     
     def _initialize_clean_state(self, state: RouterState) -> RouterState:
@@ -110,6 +123,7 @@ class Farmer:
         state["output"] = []
         state["routing"] = {}
         state["error_info"] = {}
+        state["crop_recommendation_failed"] = []
     
         return state
     
@@ -118,10 +132,6 @@ class Farmer:
         print("[상태 저장] 완료")
         return state
     
-    def resume_workflow(self, resume_data: str, config: Optional[Dict] = None) -> RouterState:
-        """워크플로우 재개 기능"""
-        print("❌ 워크플로우 재개 기능은 지원되지 않습니다.")
-        raise Exception("워크플로우 재개는 지원되지 않습니다.")
     
     def _handle_error(self, state: RouterState, error: Exception, context: str = "") -> RouterState:
         """에러 처리 및 상태 복구"""
@@ -183,6 +193,9 @@ class Farmer:
             config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
         
         try:
+            # 인터럽트 플래그 초기화 (새로운 요청 시작)
+            _interrupt_flag.clear()
+            
             # RouterState로 변환하고 초기 상태 설정
             router_state = RouterState()
             router_state["query"] = [state.get("query", "")]
@@ -205,7 +218,6 @@ class Farmer:
                 "selected_agents": result.get("selected_agents", []),
                 "agent_results": result.get("agent_results", {}),
                 "selected_crop": result.get("selected_crop", [""])[0] if result.get("selected_crop") else "",
-                "crop_info": result.get("crop_info", [""])[0] if result.get("crop_info") else "",
                 "status": "success",
                 "error_info": result.get("error_info", {})
             }
@@ -218,7 +230,6 @@ class Farmer:
                 "selected_agents": [],
                 "agent_results": {},
                 "selected_crop": "",
-                "crop_info": "",
                 "status": "error",
                 "error": str(e),
                 "error_info": {
@@ -418,17 +429,69 @@ class Farmer:
         try:
             agent_state = {"query": agent_prompt}
             
-            # 날씨 에이전트는 비동기 함수이므로 await 사용
-            if agent_name == "날씨_agent":
-                agent_result = await agent_func(agent_state)
-            else:
-                agent_result = agent_func(agent_state)
+            # 모든 에이전트가 비동기 함수이므로 await 사용
+            agent_result = await agent_func(agent_state)
                 
             answer = agent_result.get("agent_answer", "답변 생성 실패")
             return answer
 
         except Exception as e:
             return f"에이전트 실행 중 오류: {e}"
+    
+    def run_agent_with_interrupt_support(self, agent_name: str, question_part: str) -> str:
+        """
+        인터럽트 지원이 가능한 에이전트 실행 함수
+        
+        Args:
+            agent_name: 실행할 에이전트 이름
+            question_part: 에이전트에 전달할 질문
+        
+        Returns:
+            str: 에이전트 실행 결과
+        """
+        def run_agent_in_thread():
+            try:
+                # 인터럽트 체크
+                if _interrupt_flag.is_set():
+                    return "⚠️ 키보드 인터럽트로 인해 실행이 중단되었습니다."
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self.execute_agent_with_boundaries(agent_name, question_part))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                return f"에이전트 실행 실패: {e}"
+        
+        result_container = [None]
+        exception_container = [None]
+        
+        def thread_target():
+            try:
+                result_container[0] = run_agent_in_thread()
+            except Exception as e:
+                exception_container[0] = e
+        
+        # 스레드 시작
+        thread = threading.Thread(target=thread_target, daemon=True)
+        thread.start()
+        
+        # 인터럽트를 지원하는 join
+        while thread.is_alive():
+            # 인터럽트 체크
+            if _interrupt_flag.is_set():
+                return "⚠️ 키보드 인터럽트로 인해 실행이 중단되었습니다."
+            
+            # 짧은 간격으로 대기 (인터럽트 감지를 위해)
+            thread.join(timeout=0.1)
+        
+        # 예외 처리
+        if exception_container[0]:
+            raise exception_container[0]
+        
+        return result_container[0] or f"{agent_name} 실행 결과를 가져올 수 없습니다."
 
     def select_single_crop_from_recommendations(self, crop_recommendations):
         """
@@ -454,9 +517,8 @@ class Farmer:
         
         try:
             print("[1단계] LLM에게 작물 추출 요청...")
-            selected_crop = self.llm.invoke(selection_prompt).content.strip()
-            print(f"[LLM 원본 응답] {selected_crop}")
-            
+            selected_crop = self.llm.invoke(selection_prompt).content.strip() 
+
             # "없음"이거나 빈 문자열인 경우 공백 반환
             if selected_crop in ["없음", "", "None", "null"]:
                 print(f"[⚠️ 작물을 찾을 수 없음 - 공백 반환]")
@@ -464,7 +526,6 @@ class Farmer:
             
             # 간단한 정리만 수행 (clean_crop_name 함수 사용 안함)
             cleaned_crop = selected_crop.split('\n')[0].split('.')[0].split(',')[0].strip()
-            print(f"[정리된 작물명] {cleaned_crop}")
             
             print(f"[✅ 최종 추출된 작물] {cleaned_crop}")
             return cleaned_crop
@@ -534,8 +595,9 @@ class Farmer:
         
         print(f"담당 질문: {question_part}")
         
-        # 명확한 경계가 설정된 프롬프트로 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("작물추천_agent", question_part))
+        # 인터럽트 지원 스레드 실행
+        print("🚀 작물추천_agent 실행 시작 (Ctrl+C로 중단 가능)")
+        answer = self.run_agent_with_interrupt_support("작물추천_agent", question_part)
         
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
@@ -545,8 +607,16 @@ class Farmer:
         state["crop_info"] = [answer]
         state["selected_crop"] = [selected_crop]  # 선택된 단일 작물 저장
         
-        print(f"\n[추출된 작물] {selected_crop}")
-        print(f"[작물 추출 완료]")
+        # 작물 추출 실패 시 fallback 플래그 설정
+        if not selected_crop or selected_crop.strip() == "":
+            print(f"\n[⚠️ 작물 추출 실패] 다른 에이전트 실행을 건너뛰고 작물추천 결과만 출력합니다.")
+            state["crop_recommendation_failed"] = [True]
+            # 최종 출력을 작물추천 답변으로 설정
+            state["output"] = [answer]
+            print(f"[📤 최종 출력 설정] 작물추천 결과를 그대로 출력합니다.")
+        else:
+            print(f"[작물 추출 완료]")
+            state["crop_recommendation_failed"] = []
         
         return state
 
@@ -574,8 +644,9 @@ class Farmer:
             question_part = f"{selected_crop} {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
 
-        # 에이전트 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("작물재배_agent", question_part))
+        # 인터럽트 지원 스레드 실행
+        print("🚀 작물재배_agent 실행 시작 (Ctrl+C로 중단 가능)")
+        answer = self.run_agent_with_interrupt_support("작물재배_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["작물재배_agent"] = answer
@@ -607,8 +678,9 @@ class Farmer:
             question_part = f"{selected_crop} 재배 중, {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
         
-        # 에이전트 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("재해_agent", question_part))
+        # 인터럽트 지원 스레드 실행
+        print("🚀 재해_agent 실행 시작 (Ctrl+C로 중단 가능)")
+        answer = self.run_agent_with_interrupt_support("재해_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["재해_agent"] = answer
@@ -640,8 +712,9 @@ class Farmer:
             question_part = f"{selected_crop} {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
         
-        # 에이전트 실행
-        answer = asyncio.run(self.execute_agent_with_boundaries("판매처_agent", question_part))
+        # 인터럽트 지원 스레드 실행
+        print("🚀 판매처_agent 실행 시작 (Ctrl+C로 중단 가능)")
+        answer = self.run_agent_with_interrupt_support("판매처_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["판매처_agent"] = answer
@@ -670,13 +743,9 @@ class Farmer:
         # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
         # (날씨는 지역과 시간이 중요하므로)
         
-        # 에이전트 비동기 실행 (동기 함수 내에서 비동기 처리)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            answer = loop.run_until_complete(self.execute_agent_with_boundaries("날씨_agent", question_part))
-        finally:
-            loop.close()
+        # 인터럽트 지원 스레드 실행
+        print("🚀 날씨_agent 실행 시작 (Ctrl+C로 중단 가능)")
+        answer = self.run_agent_with_interrupt_support("날씨_agent", question_part)
         
         # 전용 키에 답변 저장
         state["agent_results"]["날씨_agent"] = answer
@@ -798,7 +867,7 @@ class Farmer:
         print("\n[🤖 LLM 요약 시작...]")
         summary_prompt = (
             """
-            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘.
+            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 정보는 하나도 빼지 말고 출력해줘.
             사용자에게 최대한 자세하고 상세하게 한국어로 알려주세요.
             우선 순위는 작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent 순으로 최대 2800자 이내로 정리해줘.
             내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답해줘.
@@ -888,12 +957,26 @@ class Farmer:
         )
         
         # crop_recommend에서 조건부 분기
+        def crop_recommend_branch_condition(state):
+            # 작물추천 실패 시 바로 종료
+            failed_list = state.get("crop_recommendation_failed", [])
+            if failed_list and True in failed_list:
+                return "persist_state"
+            
+            # 다른 에이전트가 있는지 확인
+            other_agents = [agent for agent in state.get("selected_agents", []) if agent != "작물추천_agent"]
+            if len(other_agents) > 0:
+                return "parallel_execution"
+            else:
+                return "merge_output"
+        
         workflow.add_conditional_edges(
             "crop_recommend",
-            lambda state: "parallel_execution" if len([agent for agent in state.get("selected_agents", []) if agent != "작물추천_agent"]) > 0 else "merge_output",
+            crop_recommend_branch_condition,
             {
                 "parallel_execution": "parallel_execution",
-                "merge_output": "merge_output"
+                "merge_output": "merge_output",
+                "persist_state": "persist_state"
             }
         )
         
@@ -918,22 +1001,6 @@ class Farmer:
         
         return workflow.compile()
 
-    def run_orchestrator_langgraph(self):
-        graph = self.create_workflow()
-
-        while True:
-            try:
-                state = RouterState()
-                config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
-                result = graph.invoke(state, config)
-                
-            except KeyboardInterrupt:
-                print("\n\n프로그램을 종료합니다.")
-                break
-            except Exception as e:
-                print(f"\n오류가 발생했습니다: {e}")
-                traceback.print_exc()
-                continue
 
     
     def run_standalone(self):

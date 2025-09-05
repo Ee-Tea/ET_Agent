@@ -13,6 +13,8 @@ import os
 import re
 import json
 import time
+import asyncio
+import threading
 from typing import TypedDict, Optional, Any, Dict, List
 from operator import itemgetter
 from argparse import ArgumentParser
@@ -35,19 +37,53 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.graph import StateGraph, END
 
-# ===== (신규) RAGAS 관련 Import (0.3.x 호환) =====
+# ===== RAGAS lazy import 유틸 =====
 _HAS_RAGAS = False
-try:
-    from ragas import evaluate, SingleTurnSample
-    from ragas.metrics import ResponseRelevancy, Faithfulness
-    from ragas.metrics import LLMContextPrecisionWithoutReference
-    from ragas.llms import LangchainLLMWrapper
-    from ragas.embeddings import LangchainEmbeddingsWrapper
-    # RAGAS 0.3.x에서는 직접 LangChain 객체를 전달
-    from datasets import Dataset
-    _HAS_RAGAS = True
-except ImportError as e:
-    print(f"   - ⚠️ RAGAS/의존성 임포트 실패: {e}")
+_RAGAS_ERR = None
+
+def _ragas_try_import():
+    """필요 시점에만 ragas 로드. 성공 시 _HAS_RAGAS True로 세팅."""
+    global _HAS_RAGAS, _RAGAS_ERR
+    if _HAS_RAGAS:
+        return True
+    try:
+        import ragas  # noqa: F401
+        _HAS_RAGAS = True
+        _RAGAS_ERR = None
+        return True
+    except Exception as e:
+        _HAS_RAGAS = False
+        _RAGAS_ERR = e
+        return False
+
+def _get_ragas_core():
+    """evaluate, SingleTurnSample, Dataset 반환"""
+    if not _ragas_try_import():
+        return None, None, None
+    from ragas import evaluate, SingleTurnSample  # type: ignore
+    try:
+        from datasets import Dataset  # type: ignore
+    except Exception:
+        Dataset = None
+    return evaluate, SingleTurnSample, Dataset
+
+def _get_ragas_metrics():
+    """ResponseRelevancy, Faithfulness, LLMContextPrecisionWithoutReference 반환"""
+    if not _ragas_try_import():
+        return None, None, None
+    from ragas.metrics import (  # type: ignore
+        ResponseRelevancy, Faithfulness, LLMContextPrecisionWithoutReference
+    )
+    return ResponseRelevancy, Faithfulness, LLMContextPrecisionWithoutReference
+
+def _get_ragas_wrappers():
+    """LangchainLLMWrapper, LangchainEmbeddingsWrapper 반환"""
+    if not _ragas_try_import():
+        return None, None
+    from ragas.llms import LangchainLLMWrapper  # type: ignore
+    from ragas.embeddings import LangchainEmbeddingsWrapper  # type: ignore
+    return LangchainLLMWrapper, LangchainEmbeddingsWrapper
+
 
 # torch는 선택 사항
 try:
@@ -106,6 +142,7 @@ def _init_ragas_backend():
         )
         _RAGAS_LLM = llm
         _RAGAS_EMB = emb
+        LangchainLLMWrapper, LangchainEmbeddingsWrapper = _get_ragas_wrappers()
         
         # RAGAS Wrapper 설정 (SalesRAGAS 방식)
         global _RAGAS_LLM_WRAPPER, _RAGAS_EMB_WRAPPER
@@ -620,7 +657,7 @@ CONTEXT_PRECISION_THRESHOLD = 0.7
 
 # 2차 검증 (답변 품질) 임계값
 FAITHFULNESS_THRESHOLD = 0.5  # RAGAS faithfulness는 일반적으로 낮게 나옴
-ANSWER_RELEVANCY_THRESHOLD = 0.7
+ANSWER_RELEVANCY_THRESHOLD = 0.6
 
 MAX_RETRIES = 3
 
@@ -638,6 +675,9 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     if _HAS_RAGAS and _RAGAS_LLM_WRAPPER:
         try:
             print("   - 📊 RAGAS 검색 품질 평가 중...")
+            LLMContextPrecisionWithoutReference = _get_ragas_metrics().LLMContextPrecisionWithoutReference
+            SingleTurnSample = _get_ragas_core().SingleTurnSample
+
 
             # 컨텍스트 최적화
             max_context_length = 2500
@@ -660,9 +700,38 @@ def retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
 
             print("   - 🔄 RAGAS 평가 실행 중...")
             
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            context_precision_score = asyncio.run(context_precision_scorer.single_turn_ascore(context_sample))
+            # WeatherAgent 방식: asyncio.gather() 사용
+            async def evaluate_context_precision():
+                try:
+                    score = await context_precision_scorer.single_turn_ascore(context_sample)
+                    return float(score) if score is not None else 0.0
+                except Exception as e:
+                    print(f"   - ⚠️ Context Precision 평가 실패: {e}")
+                    return 0.0
+            
+            # 스레드 격리로 비동기 실행
+            def run_in_thread():
+                try:
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        return new_loop.run_until_complete(evaluate_context_precision())
+                    finally:
+                        new_loop.close()
+                        asyncio.set_event_loop(None)
+                except Exception as e:
+                    print(f"   - ⚠️ 스레드 내 Context Precision 평가 실패: {e}")
+                    return 0.0
+            
+            result_container = [None]
+            def thread_target():
+                result_container[0] = run_in_thread()
+            
+            thread = threading.Thread(target=thread_target)
+            thread.start()
+            thread.join()
+            
+            context_precision_score = result_container[0]
             ragas_scores["context_precision"] = float(context_precision_score)
             
             print(f"   - 📈 검색 품질 지표:")
@@ -713,48 +782,99 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
 
     try:
         print("   - 📊 RAGAS 답변 품질 평가 중...")
+        Faithfulness = _get_ragas_metrics().Faithfulness
+        ResponseRelevancy = _get_ragas_metrics().ResponseRelevancy
+        SingleTurnSample = _get_ragas_core().SingleTurnSample
+        
         
         scores = {}
         
+        # 🚀 WeatherAgent 방식: Faithfulness와 Answer Relevancy 병렬 처리
         try:
-            # Faithfulness (SalesRAGAS 방식)
+            # Faithfulness 설정
             faithfulness_scorer = Faithfulness(llm=_RAGAS_LLM_WRAPPER)
-            
-            # SingleTurnSample 생성 (Faithfulness용)
             faithfulness_sample = SingleTurnSample(
                 user_input=question,
                 response=optimized_answer,
                 retrieved_contexts=[optimized_context] if optimized_context else [""]
             )
             
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            faithfulness_score = asyncio.run(faithfulness_scorer.single_turn_ascore(faithfulness_sample))
-            scores['faithfulness'] = float(faithfulness_score)
-            
-        except Exception as e:
-            scores['faithfulness'] = 0.0
-        
-        try:
-            # Answer Relevancy (SalesRAGAS 방식)
+            # Answer Relevancy 설정
             answer_relevancy_scorer = ResponseRelevancy(
                 llm=_RAGAS_LLM_WRAPPER, 
                 embeddings=_RAGAS_EMB_WRAPPER
             )
-            
-            # SingleTurnSample 생성 (Answer Relevancy용)
             relevancy_sample = SingleTurnSample(
                 user_input=question,
                 response=optimized_answer,
                 retrieved_contexts=[optimized_context] if optimized_context else [""]
             )
             
-            # SingleTurnSample 방식으로 평가 (동기 방식으로 변경)
-            import asyncio
-            answer_relevancy_score = asyncio.run(answer_relevancy_scorer.single_turn_ascore(relevancy_sample))
-            scores['answer_relevancy'] = float(answer_relevancy_score)
+            # WeatherAgent 방식: asyncio.gather() 사용
+            async def evaluate_faithfulness():
+                try:
+                    score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                    return ("faithfulness", float(score) if score is not None else 0.0)
+                except Exception as e:
+                    print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                    return ("faithfulness", 0.0)
+            
+            async def evaluate_answer_relevancy():
+                try:
+                    score = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
+                    return ("answer_relevancy", float(score) if score is not None else 0.0)
+                except Exception as e:
+                    print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                    return ("answer_relevancy", 0.0)
+            
+            # 스레드 격리로 병렬 실행
+            def run_parallel_in_thread():
+                try:
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        # 2개 평가를 동시에 실행 (진짜 병렬 처리)
+                        results = new_loop.run_until_complete(
+                            asyncio.gather(
+                                evaluate_faithfulness(),
+                                evaluate_answer_relevancy(),
+                                return_exceptions=True
+                            )
+                        )
+                        
+                        # 결과 수집
+                        scores = {}
+                        for result in results:
+                            if isinstance(result, Exception):
+                                print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                                continue
+                            metric_name, score = result
+                            scores[metric_name] = score
+                        
+                        return scores
+                    finally:
+                        new_loop.close()
+                        asyncio.set_event_loop(None)
+                except Exception as e:
+                    print(f"   - ⚠️ 스레드 내 병렬 RAGAS 평가 실패: {e}")
+                    return {"faithfulness": 0.0, "answer_relevancy": 0.0}
+            
+            result_container = [None]
+            def thread_target():
+                result_container[0] = run_parallel_in_thread()
+            
+            print("   - 🔥 Faithfulness & Answer Relevancy 병렬 평가 시작!")
+            thread = threading.Thread(target=thread_target)
+            thread.start()
+            thread.join()
+            print("   - ✅ 병렬 평가 완료!")
+            
+            parallel_scores = result_container[0]
+            scores.update(parallel_scores)
             
         except Exception as e:
+            print(f"   - ❌ 병렬 RAGAS 평가 실패: {e}")
+            scores['faithfulness'] = 0.0
             scores['answer_relevancy'] = 0.0
 
         f_val = scores.get('faithfulness', 0.0)
@@ -843,9 +963,9 @@ def build_graph():
     return app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========
-def run(state: dict) -> dict:
+async def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수
+    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리

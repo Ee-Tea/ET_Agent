@@ -69,30 +69,40 @@ def _install_ragas_safe_parse():
         print(f"[RAGAS] safe patch not applied: {e}")
 
 _install_ragas_safe_parse()
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+
+
 import os, json, glob
 from datetime import datetime
 from langchain_milvus import Milvus
 from pymilvus import connections, Collection
 from difflib import SequenceMatcher
+
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy
+    return faithfulness, answer_relevancy
 # RAGAS 래퍼 & 데이터 스키마
-from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
-from ragas.dataset_schema import SingleTurnSample
+def get_ragas_wrappers():
+    from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
+    return RagasLLMWrapper, RagasEmbWrapper
 
-# RAGAS 지표
-from ragas.metrics import faithfulness, answer_relevancy
-from ragas import evaluate as ragas_evaluate
+def get_ragas_schema():
+    try:
+        from ragas import EvaluationDataset  # 신버전 권장 경로
+    except Exception:
+        from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
+    return EvaluationDataset
 
-try:
-    from ragas import EvaluationDataset  # 신버전 권장 경로
-except Exception:
-    from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
-try:
-    from ragas import EvaluationDataset  # 신버전
-except Exception:
-    from ragas.dataset_schema import EvaluationDataset  # 구버전 폴백
+def get_single_turn_sample():
+    from ragas.dataset_schema import SingleTurnSample
+    return SingleTurnSample
+
 
 
 try:
@@ -128,8 +138,9 @@ class SolutionState(TypedDict):
     user_problem: str
     user_problem_options: List[str]
     
-    vectorstore_p: Milvus
-    vectorstore_c: Milvus
+    vectorstore_p: Optional[Milvus]
+    vectorstore_c: Optional[Milvus]
+    vectorstore_config: Dict[str, str]
 
     problems_contexts: List[Document]
     problems_contexts_text : str
@@ -232,80 +243,65 @@ class SolutionAgent(BaseAgent):
             max_tokens=min(LLM_MAX_TOKENS, 2048),
         )
 
+    # def _ensure_vectorstores(
+    #     self,
+    #     host: str = "localhost",
+    #     port: str = "19530",
+    #     coll_p: str = "problems",
+    #     coll_c: str = "concepts",
+    #     model_name: str = "jhgan/ko-sroberta-multitask",
+    # ):
     def _ensure_vectorstores(
         self,
+        coll: str,
         host: str = "localhost",
         port: str = "19530",
-        coll_p: str = "problems",
-        coll_c: str = "concepts",
-        model_name: str = "jhgan/ko-sroberta-multitask",
-    ):
-        # 1) 이벤트 루프 보장
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            if sys.platform.startswith("win"):
-                try:
-                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-                except Exception:
-                    pass
-            asyncio.set_event_loop(asyncio.new_event_loop())
-
-        # 2) 동기 http 스킴으로 연결
+        *, text_field: str | None = None,
+        vector_field: str | None = None,
+        metric_type: str | None = None) -> Milvus:
+        
+        # 싱글톤 임베딩 모델 사용
+        if not hasattr(self, '_cached_embedding_model'):
+            try:
+                self._cached_embedding_model = HuggingFaceEmbeddings(
+                    model_name="jhgan/ko-sroberta-multitask",
+                    model_kwargs={
+                        "device": "cpu"
+                    },
+                    encode_kwargs={"normalize_embeddings": True}
+                )
+                print("✅ 임베딩 모델 캐시 생성 완료")
+            except Exception as e:
+                print(f"❌ 임베딩 모델 생성 실패: {e}")
+                raise
+        
+        emb = self._cached_embedding_model
         if "default" not in connections.list_connections():
-            connections.connect(alias="default", uri=f"http://{host}:{port}")
+            connections.connect(alias="default", host=host, port=port)
 
-        def infer_fields(coll_name: str):
-            c = Collection(coll_name)
-            vec_field, text_field, dim = None, None, None
+        actual_metric = metric_type
+        try:
+            col = Collection(coll)
+            if col.indexes:
+                params = col.indexes[0].params or {}
+                actual_metric = params.get("metric_type") or params.get("METRIC_TYPE") or actual_metric
+        except Exception:
+            pass
+        if not actual_metric:
+            actual_metric = "L2"
 
-            # 벡터 필드(FLOAT_VECTOR) 찾기
-            for f in c.schema.fields:
-                if f.dtype == DataType.FLOAT_VECTOR and vec_field is None:
-                    vec_field = f.name
-                    try:
-                        dim = int(f.params.get("dim") or 0)
-                    except Exception:
-                        dim = None
+        kwargs = {
+            "embedding_function": emb,
+            "collection_name": coll,
+            "connection_args": {"host": host, "port": port},
+            "search_params": {"metric_type": actual_metric, "params": {"nprobe": 10}},
+        }
+        if text_field is not None:
+            kwargs["text_field"] = text_field
+        if vector_field is not None:
+            kwargs["vector_field"] = vector_field
+        return Milvus(**kwargs)
 
-            # 텍스트 필드는 후보군에서 우선 선택, 없으면 첫 VARCHAR 사용
-            candidates = ("text", "page_content", "content", "question", "item_title", "title")
-            varchar_fields = [f.name for f in c.schema.fields if f.dtype == DataType.VARCHAR]
-            for name in candidates:
-                if name in varchar_fields:
-                    text_field = name
-                    break
-            if text_field is None and varchar_fields:
-                text_field = varchar_fields[0]
-
-            if vec_field is None:
-                raise RuntimeError(f"[Milvus] '{coll_name}'에 FLOAT_VECTOR 필드가 없습니다.")
-            print(f"[Milvus] '{coll_name}' → text_field='{text_field}', vector_field='{vec_field}', dim={dim}")
-            return text_field, vec_field, dim
-
-        emb = HuggingFaceEmbeddings(model_name=model_name, model_kwargs={"device": "cpu"})
-
-        if self.vectorstore_p is None:
-            txt_p, vec_p, _ = infer_fields(coll_p)
-            self.vectorstore_p = Milvus(
-                embedding_function=emb,
-                collection_name=coll_p,
-                connection_args={"uri": f"http://{host}:{port}"},
-                text_field=txt_p,
-                vector_field=vec_p,   # ← 자동 감지된 이름 사용 (대개 'vector')
-            )
-            print(f"✅ Milvus '{coll_p}' 연결 OK (text_field={txt_p}, vector_field={vec_p})")
-
-        if self.vectorstore_c is None:
-            txt_c, vec_c, _ = infer_fields(coll_c)
-            self.vectorstore_c = Milvus(
-                embedding_function=emb,
-                collection_name=coll_c,
-                connection_args={"uri": f"http://{host}:{port}"},
-                text_field=txt_c,     # concepts라면 보통 'content'
-                vector_field=vec_c,   # ← 여기서 반드시 'embedding'으로 잡힐 것
-            )
-            print(f"✅ Milvus '{coll_c}' 연결 OK (text_field={txt_c}, vector_field={vec_c})")
 
     def _reset_tunables(self):
         self.RETRIEVAL_FETCH_K = self.BASE_RETRIEVAL_FETCH_K
@@ -545,10 +541,26 @@ class SolutionAgent(BaseAgent):
         vectorstore_p = state.get("vectorstore_p")
 
         if vectorstore_p is None:
-            print("⚠️ vectorstore_p없음 → 유사 문제 검색 건너뜀")
-            state["problems_contexts"] = []
-            state["problems_contexts_text"] = ""
-            return state
+            # vectorstore_config를 사용하여 동적으로 생성
+            config = state.get("vectorstore_config", {})
+            if config:
+                try:
+                    vectorstore_p = self._ensure_vectorstores(
+                        config.get("problems_coll", "problems"),
+                        config.get("milvus_host", "localhost"),
+                        config.get("milvus_port", "19530")
+                    )
+                    print("✅ vectorstore_p 동적 생성 완료")
+                except Exception as e:
+                    print(f"❌ vectorstore_p 생성 실패: {e}")
+                    state["problems_contexts"] = []
+                    state["problems_contexts_text"] = ""
+                    return state
+            else:
+                print("⚠️ vectorstore_p없음 → 유사 문제 검색 건너뜀")
+                state["problems_contexts"] = []
+                state["problems_contexts_text"] = ""
+                return state
 
         q = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
 
@@ -744,9 +756,26 @@ class SolutionAgent(BaseAgent):
 
         vectorstore_c = state.get("vectorstore_c")
         if vectorstore_c is None:
-            print("⚠️ vectorstore_c 없음 → 개념 검색 건너뜀")
-            state["concept_contexts"], state["concept_contexts_text"] = [], ""
-            return state
+            # vectorstore_config를 사용하여 동적으로 생성
+            config = state.get("vectorstore_config", {})
+            if config:
+                try:
+                    vectorstore_c = self._ensure_vectorstores(
+                        config.get("concept_coll", "concepts"),
+                        config.get("milvus_host", "localhost"),
+                        config.get("milvus_port", "19530"),
+                        text_field="content",
+                        vector_field="embedding"
+                    )
+                    print("✅ vectorstore_c 동적 생성 완료")
+                except Exception as e:
+                    print(f"❌ vectorstore_c 생성 실패: {e}")
+                    state["concept_contexts"], state["concept_contexts_text"] = [], ""
+                    return state
+            else:
+                print("⚠️ vectorstore_c 없음 → 개념 검색 건너뜀")
+                state["concept_contexts"], state["concept_contexts_text"] = [], ""
+                return state
 
         q = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
 
@@ -1149,6 +1178,7 @@ class SolutionAgent(BaseAgent):
         - metrics  : faithfulness, answer_relevancy
         """
         print("\n🧪 [3단계] RAGAS 검증 시작")
+        RagasLLMWrapper, RagasEmbWrapper = get_ragas_wrappers()
 
         def _norm(s: str) -> str:
             return (s or "").strip()
@@ -1201,13 +1231,13 @@ class SolutionAgent(BaseAgent):
         print(f"[RAGAS] contexts 원문 사용: {len(ctx_list)}개")
 
         # 4) SingleTurnSample + EvaluationDataset
-        sample = SingleTurnSample(
+        sample = get_single_turn_sample(
             user_input=question_text,
             response=answer_text,
             retrieved_contexts=ctx_list,
             reference=None,   # ground_truth 없음
         )
-        dataset = EvaluationDataset(samples=[sample])
+        dataset = get_ragas_schema(samples=[sample])
 
         # 5) Wrappers
         eval_llm = ChatOpenAI(
@@ -1232,13 +1262,19 @@ class SolutionAgent(BaseAgent):
             from langchain_huggingface import HuggingFaceEmbeddings
             emb = HuggingFaceEmbeddings(
                 model_name=os.getenv("RAGAS_EMBED_MODEL", "jhgan/ko-sroberta-multitask"),
-                model_kwargs={"device": os.getenv("RAGAS_EMBED_DEVICE", "cpu")},
+                model_kwargs={
+                    "device": os.getenv("RAGAS_EMBED_DEVICE", "cpu")
+                },
+                encode_kwargs={"normalize_embeddings": True}
             )
         emb_wrapped = RagasEmbWrapper(emb)
 
+        faithfulness, answer_relevancy = get_ragas_metrics()
+
+
         # 6) 평가 함수 (콜백 완전 차단 → trace 파서 경로 차단)
         def _run(ds):
-            return ragas_evaluate(
+            return evaluate_with_ragas(
                 ds,
                 metrics=[faithfulness, answer_relevancy],
                 llm=llm_wrapped,
@@ -1252,8 +1288,8 @@ class SolutionAgent(BaseAgent):
         except Exception as e:
             print(f"[RAGAS] 1st pass failed: {e} -> retry with 1 ctx")
             subset = ctx_list[:1] or [""]
-            dataset2 = EvaluationDataset(samples=[
-                SingleTurnSample(
+            dataset2 = get_ragas_schema(samples=[
+                get_single_turn_sample(
                     user_input=question_text,
                     response=answer_text,
                     retrieved_contexts=subset,
@@ -1528,19 +1564,19 @@ class SolutionAgent(BaseAgent):
             recursion_limit: int = 1000,
         ) -> Dict:  
 
-        # # 1) 외부에서 하나라도 안 넘겼으면 내부 디폴트 준비
-        # if vectorstore_p is None or vectorstore_c is None:
-        #     self._ensure_vectorstores()
-
-        # # 2) 최종으로 쓸 벡터스토어 결정 (외부 > 내부)
-        # vs_p = vectorstore_p or self.vectorstore_p
-        # vs_c = vectorstore_c or self.vectorstore_c
-
-        # # (선택) 안전장치: 그래도 None이면 경고만 찍고 계속
-        # if vs_p is None:
-        #     print("⚠️ vectorstore_p가 없습니다. 유사 문제 검색이 비활성화됩니다.")
-        # if vs_c is None:
-        #     print("⚠️ vectorstore_c가 없습니다. 개념 검색이 비활성화됩니다.")
+        # # 1) 벡터스토어 설정 정보 준비 (Milvus 객체는 상태에 저장하지 않음)
+        milvus_host = os.getenv("MILVUS_HOST", "localhost")
+        milvus_port = os.getenv("MILVUS_PORT", "19530")
+        problems_coll = os.getenv("PROBLEMS_COLL", "problems")
+        concept_coll = os.getenv("CONCEPT_COLL", "concepts")
+        
+        # 벡터스토어 객체는 필요할 때마다 생성하도록 설정
+        vectorstore_config = {
+            "milvus_host": milvus_host,
+            "milvus_port": milvus_port,
+            "problems_coll": problems_coll,
+            "concept_coll": concept_coll
+        }
 
         self._reset_tunables()
         
@@ -1549,8 +1585,9 @@ class SolutionAgent(BaseAgent):
             "user_problem": user_problem,
             "user_problem_options": user_problem_options,
 
-            "vectorstore_p": vectorstore_p,
-            "vectorstore_c": vectorstore_c,
+            "vectorstore_p": None,  # Milvus 객체는 직렬화할 수 없으므로 None으로 설정
+            "vectorstore_c": None,  # 필요할 때 vectorstore_config를 사용하여 생성
+            "vectorstore_config": vectorstore_config,
 
             "problems_contexts": [],
             "problems_contexts_text": "",
@@ -1620,7 +1657,10 @@ if __name__ == "__main__":
                          metric_type: str | None = None) -> Milvus:
         emb = HuggingFaceEmbeddings(
             model_name="jhgan/ko-sroberta-multitask",
-            model_kwargs={"device": "cpu"},
+            model_kwargs={
+                "device": "cpu"
+            },
+            encode_kwargs={"normalize_embeddings": True}
         )
         if "default" not in connections.list_connections():
             connections.connect(alias="default", host=host, port=port)
@@ -1790,6 +1830,3 @@ if __name__ == "__main__":
             print(f"- 풀이:{r.get('generated_explanation','-')}")
             print(f"- faith={r.get('ragas_faithfulness')}, ans_rel={r.get('ragas_answer_relevancy')}, valid={r.get('validated')}")
         print("========================================\n")
-
-
-        

@@ -4,9 +4,15 @@ from dataclasses import dataclass
 import pandas as pd
 
 from datasets import Dataset
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
 
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall  # 필요한 것만
+    return faithfulness, answer_relevancy, context_precision, context_recall
 from teacher.agents.solution.solution_agent1 import SolutionAgent
 import glob
 from langchain_openai import ChatOpenAI
@@ -212,7 +218,9 @@ def run_eval(
     try:
         print(f"[RAGAS] using llm={type(llm).__name__}, embeddings={type(emb).__name__}")
         ds = Dataset.from_pandas(df)
-        ragas_result = evaluate(
+        faithfulness, answer_relevancy, context_precision, context_recall = get_ragas_metrics()
+
+        ragas_result = evaluate_with_ragas(
             ds,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
             llm=llm,

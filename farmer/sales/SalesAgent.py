@@ -3,6 +3,7 @@ from pymilvus import connections, Collection, FieldSchema, CollectionSchema, Dat
 import requests
 from dotenv import load_dotenv
 import os
+import threading
 import pandas as pd
 try:
     from kiwipiepy import Kiwi
@@ -20,7 +21,7 @@ from langchain_openai import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
-from langchain_tavily import TavilySearch
+from tavily import TavilyClient
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 import asyncio
@@ -69,14 +70,9 @@ def extract_keywords(query):
             if token.tag.startswith('N'):  # 명사류 태그
                 nouns.append(token.form)
         return nouns
-    elif USE_KIWI is False:
-        # KoNLPy 사용 (Java 필요)
-        return okt.nouns(query)
     else:
-        # 둘 다 없으면 간단한 텍스트 분할
-        import re
-        # 한글 단어만 추출 (2글자 이상)
-        return re.findall(r'[가-힣]{2,}', query)
+        # KoNLPy 사용 (JAVA_HOME 설정 필요)
+        return okt.nouns(query)
 
 # ===============================
 # 사용자 질문 받기
@@ -235,24 +231,38 @@ def fetch_api_data(query=None):
             item_name_full = safe_val(item.get('item_name', ''))
             item_name_parts = item_name_full.split('/')
             item_names = [part.strip() for part in item_name_parts]
-            match_count = sum([q == name for q in keywords for name in item_names])
-            partial_count = sum([q in name for q in keywords for name in item_names])
-            included_keywords = [q for q in keywords if any(q in name for name in item_names)]
+            # 개선된 점수 계산 로직
+            exact_matches = set()  # 완전 일치한 키워드들
+            partial_matches = set()  # 부분 일치한 키워드들
+            
+            for keyword in keywords:
+                for name in item_names:
+                    if keyword == name:
+                        exact_matches.add(keyword)
+                    elif keyword in name:
+                        partial_matches.add(keyword)
+            
+            # 완전 일치한 키워드는 부분 일치에서 제외
+            partial_matches = partial_matches - exact_matches
+            
             score = 0
             if keywords:
-                if match_count > 0:
-                    score = 3 + len(included_keywords)  # 완전 일치 + 키워드 개수
-                elif partial_count > 0:
-                    score = 2 + len(included_keywords)  # 부분 일치 + 키워드 개수
-                else:
-                    score = len(included_keywords)      # 키워드 일부만 포함
-            else:
-                score = 0
+                # 추가 보너스: 여러 키워드 매칭시 추가 점수
+                score = (len(exact_matches) * 10) + (len(partial_matches) * 5)
+                total_matches = len(exact_matches) + len(partial_matches)
+                if total_matches > 1:
+                    score += total_matches * 2  # 다중 매칭 보너스
+            
+            match_count = len(exact_matches)
+            partial_count = len(partial_matches)
+            included_keywords = list(exact_matches | partial_matches)
+            
             filtered_items.append((score, item))
 
         filtered_items.sort(key=lambda x: x[0], reverse=True)
         filtered_items = [item for _, item in filtered_items]
-
+        
+        processed_count = 0
         for item in filtered_items:
             category = safe_val(item.get('category_name', ''))
             if category not in ['수산물', '축산물'] and safe_val(item.get('product_cls_name', '')) != '소매':
@@ -846,7 +856,7 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
             print("⚠️ Tavily API 키가 설정되지 않았습니다.")
             return supplemented_context
         
-        tavily_tool = TavilySearch(max_results=3, api_key=tavily_api_key)
+        tavily_tool = TavilyClient(api_key=tavily_api_key)
         
         search_queries = []
         if missing_info_type == "판매처":
@@ -868,18 +878,33 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
         all_search_results = []
         seen_urls = set()
         for s_query in search_queries:
-            results = tavily_tool.invoke({"query": s_query})
-            for result in results:
-                url = result.get('url')
-                if url not in seen_urls:
-                    all_search_results.append(result)
-                    seen_urls.add(url)
+            try:
+                # TavilyClient 사용 - search 메서드 호출
+                response = tavily_tool.search(query=s_query, max_results=3)
+                
+                # TavilyClient 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
+                if isinstance(response, dict) and "results" in response:
+                    results = response["results"]
+                    for result in results:
+                        if isinstance(result, dict):
+                            url = result.get('url', '')
+                            if url not in seen_urls:
+                                all_search_results.append(result)
+                                seen_urls.add(url)
+                else:
+                    # 예상치 못한 응답 형식
+                    print(f"⚠️ 예상치 못한 Tavily 응답 형식: {type(response)}")
+                    
+            except Exception as e:
+                print(f"⚠️ Tavily 검색 오류: {e}")
         
         web_info = []
         if all_search_results:
             for result in all_search_results:
                 summary = result.get('content', '')[:150]
-                web_info.append(f"웹 검색: {result.get('title', '')} - {summary}... (출처: {result.get('url')})")
+                title = result.get('title', '')
+                url = result.get('url', '')
+                web_info.append(f"웹 검색: {title} - {summary}... (출처: {url})")
 
         if web_info:
             key = None
@@ -935,14 +960,37 @@ def node_ragas_validation(state: GraphState) -> GraphState:
         # 컨텍스트를 문자열로 변환 (SalesRAGAS의 _format_context 메서드 활용)
         context_str = evaluator._format_context(context)
         
-        # 개별 RAGAS 평가 실행 (비동기)
+        # asyncio.gather() 사용
         async def run_ragas_evaluation():
             return await evaluator._evaluate_single_ragas_simple(
                 question, answer, context_str
             )
         
-        # 비동기 실행
-        ragas_scores = asyncio.run(run_ragas_evaluation())
+        # 스레드 격리로 비동기 실행
+        def run_ragas_in_thread():
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(run_ragas_evaluation())
+                finally:
+                    new_loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                print(f"   - ⚠️ 스레드 내 RAGAS 평가 실패: {e}")
+                return None
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_ragas_in_thread()
+        
+        print("   - 🔄 RAGAS 평가 실행 중...")
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        print("   - ✅ RAGAS 평가 완료!")
+        
+        ragas_scores = result_container[0]
         
         if ragas_scores:
             state["ragas_scores"] = ragas_scores
@@ -1063,9 +1111,9 @@ graph.add_edge("output", END)
 graph.set_entry_point("input")
 
 # 실행 함수
-def run(state: dict) -> dict:
+async def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수
+    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수 (비동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리

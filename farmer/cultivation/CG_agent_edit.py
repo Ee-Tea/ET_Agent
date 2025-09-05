@@ -2,6 +2,8 @@ import os
 import sys
 import re
 import pandas as pd
+import asyncio
+import threading
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, TypedDict
 
@@ -16,35 +18,64 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
-from langchain_tavily import TavilySearch
 from langchain.retrievers import EnsembleRetriever
 
-# RAGAS 라이브러리
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, ContextUtilization, LLMContextPrecisionWithoutReference
 from datasets import Dataset
+# RAGAS 라이브러리
+def evaluate_with_ragas(dataset, metrics):
+    # 사용 직전에만 ragas import (지연 import)
+    from ragas import evaluate
+    return evaluate(dataset, metrics=metrics)
+
+def get_ragas_metrics():
+    # metrics도 내부에서 import
+    from ragas.metrics import Faithfulness, ResponseRelevancy, ContextUtilization, LLMContextPrecisionWithoutReference
+    return Faithfulness, ResponseRelevancy, ContextUtilization, LLMContextPrecisionWithoutReference
+
 
 # --- 1. 환경 설정 ---
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-if not OPENAI_API_KEY:
-    print("오류: OPENAI_API_KEY 환경 변수가 설정되지 않았습니다. .env 파일을 확인해주세요.")
-    exit()
-if not TAVILY_API_KEY:
-    print("오류: TAVILY_API_KEY 환경 변수가 설정되지 않았습니다. .env 파일을 확인해주세요.")
-    exit()
+# (수정) 경고만 출력하고 플래그로 관리
+USE_OPENAI = bool(OPENAI_API_KEY)
+USE_TAVILY = bool(TAVILY_API_KEY)
+
+if not USE_OPENAI:
+    print("⚠️ OPENAI_API_KEY 미설정: LLM 호출 시 실패할 수 있습니다.")
+if not USE_TAVILY:
+    print("⚠️ TAVILY_API_KEY 미설정: 웹검색을 비활성화합니다.")
+
+class _NoopTavily:
+    def search(self, query: str, max_results: int = 5):
+        print("⚠️ Tavily 비활성화: 키가 없거나 패키지가 없습니다.")
+        return {"results": []}  # 기존 파싱 로직과 호환
+
+tavily_tool = None
+if USE_TAVILY:
+    try:
+        from tavily import TavilyClient
+        tavily_tool = TavilyClient(api_key=TAVILY_API_KEY)
+    except Exception as e:
+        print(f"⚠️ Tavily 초기화 실패: {e}  → No-Op로 대체")
+        tavily_tool = _NoopTavily()
+else:
+    tavily_tool = _NoopTavily()
 
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME_INFO = "crop_info"
 COLLECTION_NAME_GROW = "crop_grow"
 
+# Milvus 연결 재사용 설정 (False로 설정하면 매번 새로 생성)
+REUSE_MILVUS_CONNECTION = os.getenv("REUSE_MILVUS_CONNECTION", "true").lower() == "true"
+
 # --- 2. LLM 및 프롬프트 설정 ---
 llm = ChatOpenAI(
     model_name="gpt-4o-mini",
-    temperature=0.7
+    temperature=0.7,
+    api_key=OPENAI_API_KEY
 )
 
 MULTI_CLASSIFY_PROMPT_TEMPLATE = """
@@ -91,7 +122,6 @@ VALIDATION_PROMPT = """
 답변:
 """
 
-tavily_tool = TavilySearch(max_results=5, api_key=TAVILY_API_KEY)
 
 # 전역 retriever 변수 (직렬화 문제 해결을 위해)
 _global_retriever = None
@@ -107,14 +137,40 @@ class GraphState(TypedDict):
     db_sources: Optional[List[Dict[str, Any]]]
     attempts: int
     is_good_answer: Optional[str]
+    web_search_count: Optional[int]  # 웹검색 카운터 추가
+    is_answer_sufficient: Optional[bool]  # 답변 충분성 플래그 추가
 
 # --- 4. 핵심 기능 함수 정의 ---
 def get_retriever() -> EnsembleRetriever:
-    """전역 retriever를 가져오거나 새로 생성합니다."""
+    """전역 retriever를 가져오거나 새로 생성합니다. 연결 상태를 확인하고 필요시 재생성합니다."""
     global _global_retriever
+    
+    # 연결 재사용 비활성화 시 매번 새로 생성
+    if not REUSE_MILVUS_CONNECTION:
+        print("🔄 Milvus 연결 재사용 비활성화 - 새로 생성 중...")
+        return create_retriever()
+    
+    # 첫 번째 실행이거나 retriever가 없는 경우
     if _global_retriever is None:
+        print("🔄 새로운 Milvus EnsembleRetriever 생성 중...")
         _global_retriever = create_retriever()
-    return _global_retriever
+        return _global_retriever
+    
+    # 기존 retriever의 연결 상태 확인
+    try:
+        # 간단한 연결 테스트 (첫 번째 retriever의 vectorstore 사용)
+        test_docs = _global_retriever.retrievers[0].vectorstore.similarity_search("test", k=1)
+        print("✅ 기존 Milvus 연결 상태 양호")
+        return _global_retriever
+    except Exception as e:
+        print(f"⚠️ 기존 Milvus 연결 실패: {e}")
+        print("🔄 Milvus EnsembleRetriever 재생성 중...")
+        try:
+            _global_retriever = create_retriever()
+            return _global_retriever
+        except Exception as reconnect_error:
+            print(f"❌ Milvus 재연결 실패: {reconnect_error}")
+            raise reconnect_error
 
 def create_retriever() -> EnsembleRetriever:
     """두 개의 Milvus 컬렉션에 연결하여 EnsembleRetriever를 생성합니다."""
@@ -182,6 +238,9 @@ def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any
     question = state["question"]
     topics = state.get("topics", [])
     
+    # 웹검색 횟수 (상태에서 가져오기)
+    web_search_count = state.get("web_search_count", 0)
+    
     db_context = ""
     db_sources = []
     web_sources = []
@@ -205,26 +264,42 @@ def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any
                 is_sufficient = False
                 print("❗ DB 내용이 불충분하다고 판단되었습니다. 웹 검색을 추가합니다.")
         
-        if not is_sufficient:
-            print("🌐 웹 검색으로 정보 보충 중...")
-            search_results = tavily_tool.invoke({"query": question})
-            web_sources = [{"url": res["url"], "content": res["content"]} for res in search_results]
-            print("✅ 웹 검색 완료.")
-
-    # 2. 'general' 주제에 대한 웹 검색 (기존 로직 유지)
-    if "general" in topics:
-        print("🌐 '일반' 주제에 대한 웹 검색 중...")
-        search_results = tavily_tool.invoke({"query": question})
-        web_sources.extend([{"url": res["url"], "content": res["content"]} for res in search_results])
-        print("✅ 웹 검색 완료.")
+    # 2. 웹검색 (항상 실행)
+    web_search_count += 1
+    print(f"🌐 웹 검색으로 정보 보충 중... (시도 횟수: {web_search_count}/3)")
+    try:
+        # TavilyClient 사용 - search 메서드 호출
+        response = tavily_tool.search(query=question, max_results=5)
+        
+        # TavilyClient 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
+        if isinstance(response, dict) and "results" in response:
+            results = response["results"]
+            web_sources = []
+            for res in results:
+                if isinstance(res, dict):
+                    web_sources.append({
+                        "url": res.get("url", "N/A"), 
+                        "content": res.get("content", res.get("snippet", ""))
+                    })
+        else:
+            # 예상치 못한 응답 형식
+            print(f"⚠️ 예상치 못한 Tavily 응답 형식: {type(response)}")
+            web_sources = [{"url": "N/A", "content": "웹 검색 응답 형식 오류"}]
+            
+    except Exception as e:
+        print(f"⚠️ Tavily 검색 오류: {e}")
+        web_sources = [{"url": "N/A", "content": f"웹 검색 실패 - {str(e)}"}]
     
-    return {**state, "db_context": db_context, "db_sources": db_sources, "web_sources": web_sources}
+    print("✅ 웹 검색 완료.")
+    
+    return {**state, "db_context": db_context, "db_sources": db_sources, "web_sources": web_sources, "web_search_count": web_search_count}
 
 def generate_final_answer_node(state: GraphState) -> Dict[str, Any]:
     print("\n---노드: 최종 답변 생성 실행---")
     question = state["question"]
     db_context = state.get("db_context", "내부 DB에서 검색된 정보가 없습니다.")
     web_search_results = "\n".join([str(res) for res in state.get("web_sources", [])])
+    web_search_count = state.get("web_search_count", 0)  # 카운터 보존
     
     if not web_search_results:
         web_search_results = "웹 검색 결과가 없습니다."
@@ -237,7 +312,7 @@ def generate_final_answer_node(state: GraphState) -> Dict[str, Any]:
     
     final_chain = db_and_web_search_prompt | llm | StrOutputParser()
     answer = final_chain.invoke(inputs)
-    return {**state, "answer": answer}
+    return {**state, "answer": answer, "web_search_count": web_search_count}  # 카운터 보존
 
 def validate_and_regenerate_node(state: GraphState) -> Dict[str, Any]:
     print("\n---노드: 답변 품질 검증 실행---")
@@ -245,6 +320,7 @@ def validate_and_regenerate_node(state: GraphState) -> Dict[str, Any]:
     answer = state["answer"]
     db_sources = state.get('db_sources', [])
     web_sources = state.get('web_sources', [])
+    web_search_count = state.get("web_search_count", 0)  # 현재 카운터 보존
     
     contexts = [src.get('content') for src in db_sources] + [src.get('content') for src in web_sources]
     
@@ -256,16 +332,20 @@ def validate_and_regenerate_node(state: GraphState) -> Dict[str, Any]:
     answer_relevancy_score = ragas_scores['answer_relevancy'].iloc[0]
     faithfulness_score = ragas_scores['faithfulness'].iloc[0]
     
-    attempts = state.get('attempts', 0)
-    
     is_good_answer = (answer_relevancy_score >= RELEVANCY_THRESHOLD and faithfulness_score >= FAITHFULNESS_THRESHOLD)
 
     if is_good_answer:
         print("✅ 답변 품질이 양호합니다. 최종 답변을 제공합니다.")
-        return {"is_good_answer": "yes", "attempts": attempts}
+        return {**state, "is_answer_sufficient": True, "web_search_count": web_search_count}
     else:
-        print(f"❗ 답변 품질이 낮습니다. 재시도합니다. (현재 시도 횟수: {attempts + 1})")
-        return {"is_good_answer": "no", "attempts": attempts + 1}
+        print("❗ 답변 품질이 낮습니다. 웹검색을 재시도합니다.")
+        return {**state, "is_answer_sufficient": False, "web_search_count": web_search_count}
+
+def fallback_answer_node(state: GraphState) -> Dict[str, Any]:
+    """RAGAS 검증 실패 시 대체 답변 생성"""
+    print("\n---노드: 대체 답변 생성---")
+    fallback_message = "죄송합니다. 해당 작물의 재배 방법을 찾지 못했습니다. 다른 작물을 찾아드릴까요?"
+    return {**state, "answer": fallback_message}
 
 # --- 6. LangGraph 워크플로우 빌드 및 컴파일 ---
 def build_initial_setup_graph():
@@ -281,22 +361,49 @@ def build_query_graph():
     query_builder.add_node("process_topics_and_retrieve_content", process_topics_and_retrieve_content_node)
     query_builder.add_node("generate_final_answer", generate_final_answer_node)
     query_builder.add_node("validate_and_regenerate", validate_and_regenerate_node)
+    query_builder.add_node("fallback_answer", fallback_answer_node)
 
     query_builder.set_entry_point("multi_classify_question")
     query_builder.add_edge("multi_classify_question", "process_topics_and_retrieve_content")
     query_builder.add_edge("process_topics_and_retrieve_content", "generate_final_answer")
     query_builder.add_edge("generate_final_answer", "validate_and_regenerate")
     
+    # 웹검색 횟수 기반 fallback 처리
+    def decide_after_validation(state: GraphState) -> str:
+        is_sufficient = state.get("is_answer_sufficient")
+        web_count = state.get("web_search_count", 0)
+        print(f"🔍 decide_after_validation: is_sufficient={is_sufficient}, web_count={web_count}")
+        
+        if is_sufficient:
+            print("✅ 답변 품질 양호 → END")
+            return "end"
+        elif web_count >= 3:  # 웹검색 3회 시 fallback
+            print(f"⚠️ 웹검색 {web_count}회 초과 → FALLBACK")
+            return "fallback"
+        else:
+            print(f"🔄 재시도 필요 → RETRY (현재 웹검색: {web_count}회)")
+            return "retry"
+    
     query_builder.add_conditional_edges(
         "validate_and_regenerate",
-        lambda state: state.get("is_good_answer") == "yes",  # 조건문 수정
+        decide_after_validation,
         {
-            True: END,
-            False: "process_topics_and_retrieve_content"
+            "end": END,
+            "fallback": "fallback_answer",
+            "retry": "process_topics_and_retrieve_content"
         }
     )
-
-    return query_builder.compile()
+    query_builder.add_edge("fallback_answer", END)
+    app = query_builder.compile()
+    # try:
+    #     graph_image_path = "agent_workflow_openai.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
+    return app
+    # return query_builder.compile()
 
 # --- RAGAS 평가를 위한 LLM 및 임베딩 모델을 전역으로 정의 ---
 ragas_llm = ChatOpenAI(model_name="gpt-4o-mini")
@@ -304,49 +411,153 @@ ragas_embeddings = HuggingFaceEmbeddings(
     model_name="jhgan/ko-sroberta-multitask"
 )
 
-# --- RAGAS 평가 함수 추가 ---
+# --- RAGAS 평가 함수 추가 (asyncio.gather 병렬 처리) ---
 def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
     """
-    주어진 질문, 답변, 맥락으로 RAGAS 평가를 실행합니다.
+    주어진 질문, 답변, 맥락으로 RAGAS 평가를 실행합니다. (asyncio.gather 병렬 처리)
     """
     print("\n--- RAGAS 자동 평가 시작 ---")
-    data = {
-        'question': [question],
-        'answer': [answer],
-        'contexts': [contexts]
-    }
-    dataset = Dataset.from_dict(data)
-
-    metrics_to_evaluate = [
-        faithfulness,
-        answer_relevancy,
-        ContextUtilization(),
-        LLMContextPrecisionWithoutReference()
-    ]
+    
+    # RAGAS 메트릭 가져오기
+    Faithfulness, ResponseRelevancy, ContextUtilization, LLMContextPrecisionWithoutReference = get_ragas_metrics()
 
     try:
-        result = evaluate(
-            dataset=dataset,
-            metrics=metrics_to_evaluate,
-            llm=ragas_llm,
-            embeddings=ragas_embeddings
-        )
+        # 🚀 asyncio.gather를 사용한 직접 병렬 처리
+        async def evaluate_faithfulness():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                
+                faithfulness_scorer = Faithfulness(llm=LangchainLLMWrapper(ragas_llm))
+                faithfulness_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
+                return ("faithfulness", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
+                return ("faithfulness", 0.0)
+        
+        async def evaluate_answer_relevancy():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                from ragas.embeddings import LangchainEmbeddingsWrapper
+                
+                answer_relevancy_scorer = ResponseRelevancy(
+                    llm=LangchainLLMWrapper(ragas_llm), 
+                    embeddings=LangchainEmbeddingsWrapper(ragas_embeddings)
+                )
+                relevancy_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
+                return ("answer_relevancy", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
+                return ("answer_relevancy", 0.0)
+        
+        async def evaluate_context_utilization():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                
+                context_utilization_scorer = ContextUtilization(llm=LangchainLLMWrapper(ragas_llm))
+                context_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await context_utilization_scorer.single_turn_ascore(context_sample)
+                return ("context_utilization", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Context Utilization 평가 실패: {e}")
+                return ("context_utilization", 0.0)
+        
+        async def evaluate_context_precision():
+            try:
+                from ragas import SingleTurnSample
+                from ragas.llms import LangchainLLMWrapper
+                
+                context_precision_scorer = LLMContextPrecisionWithoutReference(llm=LangchainLLMWrapper(ragas_llm))
+                context_sample = SingleTurnSample(
+                    user_input=question,
+                    response=answer,
+                    retrieved_contexts=contexts
+                )
+                score = await context_precision_scorer.single_turn_ascore(context_sample)
+                return ("context_precision", float(score) if score is not None else 0.0)
+            except Exception as e:
+                print(f"   - ⚠️ Context Precision 평가 실패: {e}")
+                return ("context_precision", 0.0)
+        
+        # 스레드 격리로 4개 모두 병렬 실행
+        def run_parallel_ragas_in_thread():
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    # 4개 평가를 동시에 실행 (진짜 병렬 처리)
+                    results = new_loop.run_until_complete(
+                        asyncio.gather(
+                            evaluate_faithfulness(),
+                            evaluate_answer_relevancy(),
+                            evaluate_context_utilization(),
+                            evaluate_context_precision(),
+                            return_exceptions=True
+                        )
+                    )
+                    
+                    # 결과 수집
+                    scores = {}
+                    for result in results:
+                        if isinstance(result, Exception):
+                            print(f"   - ⚠️ RAGAS 평가 중 예외 발생: {result}")
+                            continue
+                        metric_name, score = result
+                        scores[metric_name] = score
+                    
+                    return scores
+                finally:
+                    new_loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception as e:
+                print(f"   - ⚠️ 스레드 내 병렬 RAGAS 평가 실패: {e}")
+                return {"faithfulness": 0.0, "answer_relevancy": 0.0, "context_utilization": 0.0, "context_precision": 0.0}
+        
+        result_container = [None]
+        def thread_target():
+            result_container[0] = run_parallel_ragas_in_thread()
+        
+        print("   - 🔥 Faithfulness, Answer Relevancy, Context Utilization & Context Precision 4개 병렬 평가 시작!")
+        thread = threading.Thread(target=thread_target)
+        thread.start()
+        thread.join()
+        print("   - ✅ 4개 병렬 평가 완료!")
+        
+        scores = result_container[0]
+        if scores is None:
+            raise Exception("RAGAS 평가 실패")
+        
         print("✅ RAGAS 평가 완료.")
         
-        pd.set_option('display.max_columns', None)
-        pd.set_option('display.width', None)
-
-        result_df = result.to_pandas()
-        
         print("\n--- RAGAS 평가 점수 ---")
-        if 'faithfulness' in result_df.columns:
-            print(f"faithfulness: {result_df['faithfulness'].iloc[0]:.4f}")
-        if 'answer_relevancy' in result_df.columns:
-            print(f"answer_relevancy: {result_df['answer_relevancy'].iloc[0]:.4f}")
-        if 'context_utilization' in result_df.columns:
-            print(f"context_utilization: {result_df['context_utilization'].iloc[0]:.4f}")
-        if 'llm_context_precision_without_reference' in result_df.columns:
-            print(f"context_precision: {result_df['llm_context_precision_without_reference'].iloc[0]:.4f}")
+        print(f"faithfulness: {scores.get('faithfulness', 0.0):.4f}")
+        print(f"answer_relevancy: {scores.get('answer_relevancy', 0.0):.4f}")
+        print(f"context_utilization: {scores.get('context_utilization', 0.0):.4f}")
+        print(f"context_precision: {scores.get('context_precision', 0.0):.4f}")
+        
+        # DataFrame 형태로 반환 (기존 호환성 유지)
+        result_df = pd.DataFrame({
+            'faithfulness': [scores.get('faithfulness', 0.0)],
+            'answer_relevancy': [scores.get('answer_relevancy', 0.0)],
+            'context_utilization': [scores.get('context_utilization', 0.0)],
+            'context_precision': [scores.get('context_precision', 0.0)]
+        })
         
         print("\n--- 전체 평가 데이터프레임 ---")
         print(result_df)
@@ -359,9 +570,9 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
         return pd.DataFrame({'faithfulness': [0.0], 'answer_relevancy': [0.0], 'context_utilization': [0.0], 'context_precision': [0.0]})
 
 # --- 7. OchestratorTest.py와 호환되는 run 함수 ---
-def run(state: Dict[str, Any]) -> Dict[str, Any]:
+async def run(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    OchestratorTest.py에서 호출되는 메인 실행 함수
+    OchestratorTest.py에서 호출되는 메인 실행 함수 (비동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
@@ -402,48 +613,31 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
         # RAG 애플리케이션 빌드
         rag_app = build_query_graph()
         
-        # 답변 생성 (최대 3회 시도)
-        MAX_ATTEMPTS = 3
-        attempts = 0
-        final_response = None
-        
-        while attempts < MAX_ATTEMPTS:
-            print(f"답변 생성 중... (시도 {attempts + 1}/{MAX_ATTEMPTS})")
-            try:
-                current_state = {
-                    "question": query, 
-                    "attempts": attempts
-                }
-                final_state = rag_app.invoke(current_state)
-                
-                # 최종 답변이 존재하면 루프 종료
-                if final_state.get('answer'):
-                    final_response = final_state['answer']
-                    print("✅ 답변 생성 완료")
-                    break
-                else:
-                    attempts += 1
-                    print(f"❗ 답변 품질이 낮습니다. 재시도합니다.")
-                    
-            except Exception as e:
-                print(f"❌ 답변 생성 중 오류: {e}")
-                attempts += 1
-                if attempts >= MAX_ATTEMPTS:
-                    final_response = f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {e}"
-        
-        # 최종 응답 반환
-        if final_response:
-            print(f"=== 🎯 작물재배_agent 실행 완료 ===")
+        # LangGraph가 자동으로 재시도 및 fallback 처리
+        print("답변 생성 중...")
+        try:
+            current_state = {
+                "question": query, 
+                "web_search_count": 0
+            }
+            final_state = rag_app.invoke(current_state)
+            
+            # 최종 답변 추출
+            final_response = final_state.get('answer', '답변을 생성할 수 없습니다.')
+            print("✅ 답변 생성 완료")
+            
             return {
                 "agent_answer": final_response,
                 "status": "success",
                 "error": None
             }
-        else:
+                        
+        except Exception as e:
+            print(f"❌ 답변 생성 중 오류: {e}")
             return {
-                "agent_answer": "죄송합니다. 답변을 생성하기 어렵습니다. 다시 시도해주세요.",
+                "agent_answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {e}",
                 "status": "error",
-                "error": "최대 시도 횟수 초과"
+                "error": str(e)
             }
             
     except Exception as e:

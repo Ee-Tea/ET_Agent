@@ -92,6 +92,21 @@ services:
           retries: 5
           interval: 5s
 
+  auth-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.auth
+    ports:
+      - "8124:8000"
+    depends_on:
+      langgraph-postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
+      PYTHONPATH: /deps/LLM-T
+
   langgraph-api:
     build:
       context: .

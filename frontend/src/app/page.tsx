@@ -95,10 +95,207 @@ function YourMainContent({
     id: number;
     question: string;
     options: string[];
-    correctAnswer?: string;
-    explanation?: string;
+    correctAnswer: string;
+    explanation: string;
+    subject: string;
+    created_at: number;
   }>>([]);
   const [isLoadingQuestions, setIsLoadingQuestions] = useState(false);
+  const [selectedAnswers, setSelectedAnswers] = useState<{[key: string]: string}>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [gradingResults, setGradingResults] = useState<{[key: string]: any}>({});
+  const [pdfGenerationStatus, setPdfGenerationStatus] = useState({
+    is_generating: false,
+    last_generated_time: null,
+    generated_files: []
+  });
+  const [availablePdfs, setAvailablePdfs] = useState<any[]>([]);
+
+  // gradingResults 상태 변경 감지
+  useEffect(() => {
+    console.log("🔍 gradingResults 상태 변경:", gradingResults);
+  }, [gradingResults]);
+
+  // PDF 관련 함수들
+  const checkPdfGenerationStatus = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/pdf-status", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setPdfGenerationStatus(data);
+        
+        // 새로 생성된 PDF가 있으면 목록 새로고침
+        if (data.generated_files && data.generated_files.length > 0) {
+          fetchPdfs();
+        }
+        
+        console.log("✅ PDF 생성 상태 확인:", data);
+      } else {
+        console.error("❌ PDF 생성 상태 확인 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ PDF 생성 상태 확인 오류:", error);
+    }
+  };
+
+  const fetchPdfs = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/pdfs", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setAvailablePdfs(data.pdfs || []);
+        console.log("✅ PDF 목록 조회 성공:", data);
+      } else {
+        console.error("❌ PDF 목록 조회 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ PDF 목록 조회 오류:", error);
+    }
+  };
+
+  const downloadPdf = async (filename: string) => {
+    try {
+      const response = await fetch(`http://localhost:8000/pdf/${filename}`, {
+        method: "GET",
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        console.log("✅ PDF 다운로드 성공:", filename);
+      } else {
+        console.error("❌ PDF 다운로드 실패:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ PDF 다운로드 오류:", error);
+    }
+  };
+
+  // 컴포넌트 마운트 시 PDF 상태 확인
+  useEffect(() => {
+    checkPdfGenerationStatus();
+  }, []);
+
+  // 문제 선택 핸들러
+  const handleAnswerSelect = (questionId: string, answer: string) => {
+    setSelectedAnswers(prev => ({
+      ...prev,
+      [questionId]: answer
+    }));
+  };
+
+  // 모든 문제가 답변되었는지 확인
+  const isAllQuestionsAnswered = () => {
+    return parsedQuestions.length > 0 && parsedQuestions.every(q => selectedAnswers[`question-${q.id}`]);
+  };
+
+  // 답안 제출 함수
+  const submitAnswers = async () => {
+    if (!isAllQuestionsAnswered()) return;
+    
+    setIsSubmitting(true);
+    try {
+      // 답안을 숫자로 변환하여 쿼리 생성
+      const answers = parsedQuestions.map(q => {
+        const questionId = `question-${q.id}`;
+        const selectedAnswer = selectedAnswers[questionId];
+        
+        // 선택된 답안에서 숫자만 추출 (예: "  1. 코드 재사용성 향상" -> "1")
+        const extractedAnswer = selectedAnswer ? selectedAnswer.match(/^\s*(\d+)\./)?.[1] : null;
+        
+        console.log(`🔍 문제 ${q.id} 답안 변환:`, {
+          selectedAnswer,
+          extractedAnswer,
+          questionId
+        });
+        
+        return extractedAnswer || "1"; // 추출 실패 시 기본값 1
+      });
+      
+      const query = `${answers.join(',')} + 문제의 답이야 채점해줘`;
+      
+      const response = await fetch("http://localhost:8000/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: query,
+          user_id: "frontend_user",
+          chat_id: "frontend_chat",
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log("🔍 채점 결과 전체 응답:", data);
+        console.log("🔍 grading_results 존재 여부:", !!data.grading_results);
+        console.log("🔍 grading_results 내용:", data.grading_results);
+        
+        // 백엔드에서 받은 채점 결과 사용
+        if (data.grading_results) {
+          console.log("✅ 백엔드 채점 결과 사용:", data.grading_results);
+          setGradingResults(data.grading_results);
+        } else {
+          console.log("⚠️ 백엔드 채점 결과 없음, 프론트엔드에서 계산");
+          
+          // 백엔드에서 채점 결과가 없는 경우 프론트엔드에서 간단히 비교
+          const newGradingResults: {[key: string]: any} = {};
+          console.log("🔍 문제 수:", parsedQuestions.length);
+          console.log("🔍 선택된 답안들:", selectedAnswers);
+          
+          parsedQuestions.forEach((q, index) => {
+            const questionId = `question-${q.id}`;
+            const selectedAnswer = selectedAnswers[questionId];
+            const correctAnswer = q.correctAnswer;
+            
+            // 사용자 답안에서 숫자만 추출 (예: "  1. 코드 재사용성 향상" -> "1")
+            const extractedUserAnswer = selectedAnswer ? selectedAnswer.match(/^\s*(\d+)\./)?.[1] : null;
+            
+            console.log(`🔍 문제 ${q.id}:`, {
+              questionId,
+              selectedAnswer,
+              extractedUserAnswer,
+              correctAnswer,
+              isCorrect: extractedUserAnswer === correctAnswer
+            });
+            
+            newGradingResults[questionId] = {
+              isCorrect: extractedUserAnswer === correctAnswer,
+              userAnswer: selectedAnswer,
+              correctAnswer: correctAnswer
+            };
+          });
+          
+          setGradingResults(newGradingResults);
+          console.log("🔍 최종 프론트엔드 채점 결과:", newGradingResults);
+        }
+      }
+    } catch (error) {
+      console.error("답안 제출 실패:", error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   // 테스트 세션 생성 함수 (AI 동적 생성)
   const createTestSession = async (type: string, questionCount: number, difficulty: string, userLevel: string) => {
@@ -172,7 +369,6 @@ function YourMainContent({
         const data = await response.json();
         setParsedQuestions(data.questions || []);
         console.log("✅ 최근 문제 조회 성공:", data);
-        console.log("🔍 디버깅 정보:", data.debug);
       } else {
         console.error("❌ 최근 문제 조회 실패:", response.status);
       }
@@ -246,8 +442,53 @@ function YourMainContent({
       <div className="w-3/5 flex flex-col p-4">
         <div className="bg-white rounded-lg shadow-lg h-full flex flex-col">
           <div className="p-4 border-b border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-800">📝 최근 생성된 문제</h3>
-            <p className="text-sm text-gray-600">AI가 생성한 최신 문제들을 확인하세요</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">📝 최근 생성된 문제</h3>
+                <p className="text-sm text-gray-600">AI가 생성한 최신 문제들을 확인하세요</p>
+              </div>
+              
+              {/* PDF 다운로드 섹션 */}
+              <div className="flex flex-col items-end space-y-2">
+                {/* PDF 생성 상태 표시 */}
+                {pdfGenerationStatus.is_generating && (
+                  <div className="flex items-center space-x-2 px-3 py-1 bg-yellow-50 rounded-lg">
+                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-yellow-600"></div>
+                    <span className="text-xs text-yellow-700">PDF 생성 중...</span>
+                  </div>
+                )}
+                
+                {/* PDF 다운로드 섹션 */}
+                {availablePdfs.length > 0 && (
+                  <div className="bg-blue-50 rounded-lg p-3 min-w-64">
+                    <div className="flex items-center justify-between mb-2">
+                      <h5 className="text-sm font-medium text-blue-700">📄 새로 생성된 PDF</h5>
+                      <span className="text-xs text-blue-500">{availablePdfs.length}개</span>
+                    </div>
+                    <div className="space-y-1 max-h-24 overflow-y-auto">
+                      {availablePdfs.slice(0, 2).map((pdf, index) => (
+                        <div key={index} className="flex items-center justify-between bg-white rounded px-2 py-1 text-xs">
+                          <span className="text-gray-600 truncate flex-1 mr-2" title={pdf.filename}>
+                            {pdf.filename}
+                          </span>
+                          <button
+                            onClick={() => downloadPdf(pdf.filename)}
+                            className="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs"
+                          >
+                            다운로드
+                          </button>
+                        </div>
+                      ))}
+                      {availablePdfs.length > 2 && (
+                        <div className="text-xs text-gray-500 text-center">
+                          +{availablePdfs.length - 2}개 더...
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
           
           {isLoadingQuestions ? (
@@ -259,34 +500,101 @@ function YourMainContent({
             </div>
           ) : parsedQuestions.length > 0 ? (
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {parsedQuestions.map((question) => (
-                <div key={question.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                  <div className="mb-3">
-                    <span className="inline-block bg-blue-100 text-blue-800 text-xs font-medium px-2 py-1 rounded-full mr-2">
-                      문제 {question.id}
-                    </span>
-                    <p className="text-gray-800 font-medium mt-2">{question.question}</p>
+              {parsedQuestions.map((question, questionIndex) => {
+                const questionId = `question-${question.id}`;
+                return (
+                  <div key={question.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                    <div className="mb-3">
+                      <span className="inline-block bg-blue-100 text-blue-800 text-xs font-medium px-2 py-1 rounded-full mr-2">
+                        문제 {question.id}
+                      </span>
+                      <p className="text-gray-800 font-medium mt-2">{question.question}</p>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      {Array.isArray(question.options) && question.options.map((option, index) => (
+                        <label key={index} className="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-2 rounded">
+                          <input
+                            type="radio"
+                            name={questionId}
+                            value={option}
+                            checked={selectedAnswers[questionId] === option}
+                            onChange={() => handleAnswerSelect(questionId, option)}
+                            className="text-blue-600 focus:ring-blue-500"
+                          />
+                          <span className="text-sm text-gray-700">{option}</span>
+                        </label>
+                      ))}
+                      {!Array.isArray(question.options) && (
+                        <p className="text-sm text-gray-500">보기 정보가 없습니다.</p>
+                      )}
+                    </div>
+                    
+                    {/* 채점 결과 표시 */}
+                    {(() => {
+                      const gradingResult = gradingResults[questionId];
+                      console.log(`🔍 문제 ${question.id} 채점 결과:`, {
+                        questionId,
+                        gradingResult,
+                        hasGradingResult: !!gradingResult,
+                        isCorrect: gradingResult?.isCorrect,
+                        userAnswer: gradingResult?.userAnswer,
+                        correctAnswer: question.correctAnswer
+                      });
+                      
+                      return gradingResult && (
+                        <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded">
+                          <div className="flex items-center space-x-2 mb-2">
+                            <span className={`text-sm font-medium ${
+                              gradingResult.isCorrect ? 'text-green-600' : 'text-red-600'
+                            }`}>
+                              {gradingResult.isCorrect ? '✅ 정답' : '❌ 오답'}
+                            </span>
+                            <span className="text-sm text-gray-600">
+                              정답: {question.correctAnswer}
+                            </span>
+                          </div>
+                          {question.explanation && (
+                            <p className="text-sm text-gray-700">
+                              <span className="font-medium">해설:</span> {question.explanation}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    
                   </div>
-                  
-                  <div className="space-y-2">
-                    {Array.isArray(question.options) && question.options.map((option, index) => (
-                      <label key={index} className="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-2 rounded">
-                        <input
-                          type="radio"
-                          name={`question-${question.id}`}
-                          value={option}
-                          className="text-blue-600 focus:ring-blue-500"
-                        />
-                        <span className="text-sm text-gray-700">{option}</span>
-                      </label>
-                    ))}
-                    {!Array.isArray(question.options) && (
-                      <p className="text-sm text-gray-500">보기 정보가 없습니다.</p>
+                );
+              })}
+              
+              {/* 제출 버튼 */}
+              {parsedQuestions.length > 0 && (
+                <div className="mt-4 p-4 border-t border-gray-200">
+                  <button
+                    onClick={submitAnswers}
+                    disabled={!isAllQuestionsAnswered() || isSubmitting}
+                    className={`w-full py-3 px-4 rounded-lg font-medium transition-colors ${
+                      isAllQuestionsAnswered() && !isSubmitting
+                        ? 'bg-blue-500 hover:bg-blue-600 text-white'
+                        : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    }`}
+                  >
+                    {isSubmitting ? (
+                      <div className="flex items-center justify-center space-x-2">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        <span>채점 중...</span>
+                      </div>
+                    ) : (
+                      `답안 제출하기 (${Object.keys(selectedAnswers).length}/${parsedQuestions.length})`
                     )}
-                  </div>
-                  
+                  </button>
+                  {!isAllQuestionsAnswered() && (
+                    <p className="text-sm text-gray-500 mt-2 text-center">
+                      모든 문제에 답변해주세요
+                    </p>
+                  )}
                 </div>
-              ))}
+              )}
             </div>
           ) : (
             <div className="flex-1 flex items-center justify-center">
@@ -329,7 +637,7 @@ function YourMainContent({
         
                  {/* 실제 채팅 영역 */}
          <div className="absolute bottom-0 left-0 right-0 p-6">
-           <ChatInterface />
+           <ChatInterface onMessageSent={fetchRecentQuestions} />
          </div>
       </div>
     </div>
@@ -337,44 +645,14 @@ function YourMainContent({
 }
 
 // 채팅 인터페이스 컴포넌트
-function ChatInterface() {
+function ChatInterface({ onMessageSent }: { onMessageSent: () => void }) {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isBackendConnected, setIsBackendConnected] = useState<boolean | null>(null);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
-  const [availablePdfs, setAvailablePdfs] = useState<Array<{filename: string, size: number, created: number}>>([]);
-  const [isLoadingPdfs, setIsLoadingPdfs] = useState(false);
-  const [pdfGenerationStatus, setPdfGenerationStatus] = useState<{
-    is_generating: boolean;
-    last_generated_time: number | null;
-    generated_files: string[];
-  }>({
-    is_generating: false,
-    last_generated_time: null,
-    generated_files: []
-  });
 
   // 최근 생성된 문제들을 불러오는 함수
-  const fetchRecentQuestions = async () => {
-    try {
-      const response = await fetch(`http://localhost:8000/recent-questions`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log("✅ 최근 문제 조회 성공:", data);
-      } else {
-        console.error("❌ 최근 문제 조회 실패:", response.status);
-      }
-    } catch (error) {
-      console.error("❌ 최근 문제 조회 오류:", error);
-    }
-  };
 
   // 백엔드 연결 테스트 함수
   const testBackendConnection = async () => {
@@ -403,93 +681,19 @@ function ChatInterface() {
     }
   };
 
-  // PDF 생성 상태 확인 함수
-  const checkPdfGenerationStatus = async () => {
-    try {
-      const response = await fetch("http://localhost:8000/pdf-status", {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setPdfGenerationStatus(data);
-        
-        // 새로 생성된 PDF가 있으면 목록 새로고침
-        if (data.generated_files && data.generated_files.length > 0) {
-          fetchPdfs();
-        }
-        
-        console.log("✅ PDF 생성 상태 확인:", data);
-      } else {
-        console.error("❌ PDF 생성 상태 확인 실패:", response.status);
-      }
-    } catch (error) {
-      console.error("❌ PDF 생성 상태 확인 오류:", error);
-    }
-  };
-
-  // PDF 목록 조회 함수
-  const fetchPdfs = async () => {
-    setIsLoadingPdfs(true);
-    try {
-      const response = await fetch("http://localhost:8000/pdfs", {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setAvailablePdfs(data.pdfs || []);
-        console.log("✅ PDF 목록 조회 성공:", data);
-      } else {
-        console.error("❌ PDF 목록 조회 실패:", response.status);
-      }
-    } catch (error) {
-      console.error("❌ PDF 목록 조회 오류:", error);
-    } finally {
-      setIsLoadingPdfs(false);
-    }
-  };
-
-  // PDF 다운로드 함수
-  const downloadPdf = async (filename: string) => {
-    try {
-      const response = await fetch(`http://localhost:8000/pdf/${filename}`, {
-        method: "GET",
-      });
-
-      if (response.ok) {
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-        console.log("✅ PDF 다운로드 성공:", filename);
-      } else {
-        console.error("❌ PDF 다운로드 실패:", response.status);
-      }
-    } catch (error) {
-      console.error("❌ PDF 다운로드 오류:", error);
-    }
-  };
-
-  // 컴포넌트 마운트 시 자동으로 연결 테스트 및 PDF 생성 상태 확인
+  // 컴포넌트 마운트 시 자동으로 연결 테스트
   useEffect(() => {
     testBackendConnection();
-    checkPdfGenerationStatus();
   }, []);
 
   const sendMessage = async () => {
     if (!message.trim()) return;
+    
+    // clear 명령어 감지
+    if (message.trim().toLowerCase() === "clear") {
+      await handleClearCommand();
+      return;
+    }
     
     const userMessage = { role: "user", content: message };
     setMessages(prev => [...prev, userMessage]);
@@ -518,18 +722,52 @@ function ChatInterface() {
       setMessages(prev => [...prev, assistantMessage]);
       
       // LLM 응답 완료 후 문제 목록 새로고침
-      setTimeout(() => fetchRecentQuestions(), 1000);  // 1초 후 문제 목록 새로고침
+      setTimeout(() => onMessageSent(), 1000);  // 1초 후 문제 목록 새로고침
     } catch (error) {
       console.error("백엔드 API 호출 실패:", error);
       const errorMessage = { role: "assistant", content: "죄송합니다. 백엔드 서버에 연결할 수 없습니다." };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
-      // 메시지 전송 후 PDF 생성 상태 체크
-      setTimeout(() => checkPdfGenerationStatus(), 1000);  // 1초 후 첫 번째 체크
-      setTimeout(() => checkPdfGenerationStatus(), 3000);  // 3초 후 두 번째 체크
-      setTimeout(() => checkPdfGenerationStatus(), 5000);  // 5초 후 세 번째 체크
-      setTimeout(() => checkPdfGenerationStatus(), 10000); // 10초 후 마지막 체크
+    }
+  };
+
+  const handleClearCommand = async () => {
+    const userMessage = { role: "user", content: "clear" };
+    setMessages(prev => [...prev, userMessage]);
+    setMessage("");
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("http://localhost:8000/clear", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const assistantMessage = { 
+        role: "assistant", 
+        content: data.message || "✅ 세션과 서비스 락이 초기화되었습니다." 
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+      
+      // 문제 목록도 새로고침
+      setTimeout(() => onMessageSent(), 1000);
+    } catch (error) {
+      console.error("Clear 명령 실행 실패:", error);
+      const errorMessage = { 
+        role: "assistant", 
+        content: "❌ 초기화에 실패했습니다. 서버 연결을 확인해주세요." 
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -564,13 +802,6 @@ function ChatInterface() {
                 <span className="text-xs text-red-600">연결 안됨</span>
               </div>
             )}
-            <button
-              onClick={checkPdfGenerationStatus}
-              disabled={isLoadingPdfs}
-              className="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded text-blue-600 disabled:opacity-50"
-            >
-              {isLoadingPdfs ? "확인 중..." : "PDF 상태 확인"}
-            </button>
             <button
               onClick={testBackendConnection}
               disabled={isTestingConnection}
@@ -608,46 +839,6 @@ function ChatInterface() {
       ) : (
         // 연결 성공 시 채팅 화면
         <>
-          {/* PDF 생성 상태 표시 */}
-          {pdfGenerationStatus.is_generating && (
-            <div className="border-b border-gray-200 p-3 bg-yellow-50">
-              <div className="flex items-center space-x-2">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-600"></div>
-                <span className="text-sm text-yellow-700">PDF 생성 중...</span>
-              </div>
-            </div>
-          )}
-          
-          {/* PDF 다운로드 섹션 */}
-          {availablePdfs.length > 0 && (
-            <div className="border-b border-gray-200 p-3 bg-blue-50">
-              <div className="flex items-center justify-between mb-2">
-                <h5 className="text-sm font-medium text-blue-700">📄 새로 생성된 PDF 파일</h5>
-                <span className="text-xs text-blue-500">{availablePdfs.length}개</span>
-              </div>
-              <p className="text-xs text-blue-600 mb-2">백엔드에서 PDF 생성 완료 시 자동으로 표시됩니다</p>
-              <div className="space-y-1 max-h-20 overflow-y-auto">
-                {availablePdfs.slice(0, 3).map((pdf, index) => (
-                  <div key={index} className="flex items-center justify-between bg-white rounded px-2 py-1 text-xs">
-                    <span className="text-gray-600 truncate flex-1 mr-2" title={pdf.filename}>
-                      {pdf.filename}
-                    </span>
-                    <button
-                      onClick={() => downloadPdf(pdf.filename)}
-                      className="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs"
-                    >
-                      다운로드
-                    </button>
-                  </div>
-                ))}
-                {availablePdfs.length > 3 && (
-                  <div className="text-xs text-gray-500 text-center">
-                    +{availablePdfs.length - 3}개 더...
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
           
           {/* 메시지 영역 */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -655,6 +846,7 @@ function ChatInterface() {
               <div className="text-center text-gray-500">
                 <p>안녕하세요! 질문을 입력해주세요.</p>
                 <p className="text-sm mt-2">예: "소프트웨어 설계 3문제 만들어줘"</p>
+                <p className="text-xs mt-1 text-gray-400">💡 팁: "clear"를 입력하면 세션과 서비스 락이 초기화됩니다</p>
               </div>
             ) : (
               messages.map((msg, index) => (

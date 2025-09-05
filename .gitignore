@@ -307,3 +307,16 @@ data/redis/
 data/
 docker-compose.yml
 volumes/
+
+# LangGraph API
+.langgraph_api
+volumes/
+
+# Redis runtime data
+/data/redis/
+*.rdb
+*.aof
+appendonlydir/
+
+pdf_outputs/
+pdf_outputs/**

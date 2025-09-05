@@ -7,22 +7,20 @@ FROM langchain/langgraph-api:3.12-wolfi
 
 
 # -- Adding local package . --
-ADD . /deps/ET_Agent
+ADD . /deps/LLM-T
 # -- End of local package . --
+ENV PYTHONPATH="/deps/LLM-T"
+
+ENV LANGSERVE_GRAPHS='{"agent":"teacher.graph:graph"}'
 
 
 
 # -- Installing all local dependencies --
+RUN (uv pip uninstall --system -y uvloop || pip uninstall -y uvloop || true)
 
 RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e /deps/*
 
 # -- End of local dependencies install --
-
-ENV LANGSERVE_GRAPHS='{"agent": "/deps/ET_Agent/teacher/graph.py:graph"}'
-
-
-
-
 
 
 
@@ -38,4 +36,4 @@ RUN uv pip uninstall --system pip setuptools wheel && rm /usr/bin/uv /usr/bin/uv
 
 
 
-WORKDIR /deps/ET_Agent
+WORKDIR /deps/LLM-T

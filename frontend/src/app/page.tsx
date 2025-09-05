@@ -329,7 +329,7 @@ function YourMainContent({
         
                  {/* 실제 채팅 영역 */}
          <div className="absolute bottom-0 left-0 right-0 p-6">
-           <ChatInterface />
+           <ChatInterface onMessageSent={fetchRecentQuestions} />
          </div>
       </div>
     </div>
@@ -337,7 +337,7 @@ function YourMainContent({
 }
 
 // 채팅 인터페이스 컴포넌트
-function ChatInterface() {
+function ChatInterface({ onMessageSent }: { onMessageSent: () => void }) {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -356,25 +356,6 @@ function ChatInterface() {
   });
 
   // 최근 생성된 문제들을 불러오는 함수
-  const fetchRecentQuestions = async () => {
-    try {
-      const response = await fetch(`http://localhost:8000/recent-questions`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log("✅ 최근 문제 조회 성공:", data);
-      } else {
-        console.error("❌ 최근 문제 조회 실패:", response.status);
-      }
-    } catch (error) {
-      console.error("❌ 최근 문제 조회 오류:", error);
-    }
-  };
 
   // 백엔드 연결 테스트 함수
   const testBackendConnection = async () => {
@@ -518,7 +499,7 @@ function ChatInterface() {
       setMessages(prev => [...prev, assistantMessage]);
       
       // LLM 응답 완료 후 문제 목록 새로고침
-      setTimeout(() => fetchRecentQuestions(), 1000);  // 1초 후 문제 목록 새로고침
+      setTimeout(() => onMessageSent(), 1000);  // 1초 후 문제 목록 새로고침
     } catch (error) {
       console.error("백엔드 API 호출 실패:", error);
       const errorMessage = { role: "assistant", content: "죄송합니다. 백엔드 서버에 연결할 수 없습니다." };

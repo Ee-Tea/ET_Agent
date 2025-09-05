@@ -72,13 +72,26 @@ class MainOrchestrator:
         print(f"✅ MainOrchestrator 초기화 완료 (session: {self.session_key})")
     
     def load_recent_questions(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """최근 생성된 문제들을 불러오기"""
+        """최근 생성된 문제들을 불러오기 (added_count 사용)"""
         try:
             if not self.memory:
                 print("⚠️ 메모리가 초기화되지 않았습니다.")
                 return []
             
-            print(f"🔍 Redis에서 최근 {limit}개 문제 조회 중...")
+            # 숏텀 메모리에서 added_count 가져오기
+            short_term_data = self.load_short_term_memory()
+            teacher_data = short_term_data.get("teacher", {})
+            added_count = teacher_data.get("added_count", 0)
+            
+            print(f"🔍 Teacher added_count: {added_count}")
+            
+            if added_count == 0:
+                print("📝 추가된 문제가 없습니다.")
+                return []
+            
+            # 실제로는 added_count만큼만 가져오기
+            actual_limit = min(limit, added_count)
+            print(f"🔍 Redis에서 최근 {actual_limit}개 문제 조회 중...")
             
             # Redis에서 questions:{session_key}:* 패턴으로 키 검색
             pattern = f"questions:{self.session_key}:*"
@@ -92,9 +105,9 @@ class MainOrchestrator:
             # 최근 생성된 순서로 정렬 (키에 타임스탬프가 포함되어 있다면)
             keys.sort(reverse=True)
             
-            # 각 문제의 상세 정보 가져오기
+            # 각 문제의 상세 정보 가져오기 (added_count만큼만)
             questions = []
-            for i, key in enumerate(keys[:limit]):
+            for i, key in enumerate(keys[:actual_limit]):
                 try:
                     print(f"🔍 문제 {i+1} 상세 정보 조회 중... (키: {key})")
                     question_data = self.memory.redis.hgetall(key)
@@ -127,7 +140,7 @@ class MainOrchestrator:
                     print(f"⚠️ 문제 {key} 로드 중 오류: {e}")
                     continue
             
-            print(f"📖 최근 {len(questions)}개 문제를 불러왔습니다.")
+            print(f"📖 최근 {len(questions)}개 문제를 불러왔습니다. (added_count: {added_count})")
             return questions
             
         except Exception as e:

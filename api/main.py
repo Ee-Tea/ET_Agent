@@ -45,6 +45,13 @@ except ImportError as e:
 orchestrator: Optional[MainOrchestrator] = None
 teacher: Optional[Teacher] = None
 
+def get_redis_memory():
+    """Redis 메모리 인스턴스 반환"""
+    global orchestrator
+    if orchestrator and hasattr(orchestrator, 'memory'):
+        return orchestrator.memory
+    return None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행되는 함수"""
@@ -97,6 +104,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 라우터 등록
+from .routers import chat, health, sessions
+app.include_router(chat.router)
+app.include_router(health.router)
+app.include_router(sessions.router)
 
 # ========== Pydantic 모델 정의 ==========
 

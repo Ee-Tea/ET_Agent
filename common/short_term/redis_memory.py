@@ -882,6 +882,45 @@ class RedisLangGraphMemory:
         except Exception as e:
             print(f"❌ 숏텀 메모리 삭제 실패: {e}")
     
+    def clear_all_session_data(self) -> None:
+        """현재 세션의 모든 데이터 완전 초기화"""
+        try:
+            # 1. 기본 메모리 데이터 삭제
+            self.clear(include_questions=True)
+            
+            # 2. 숏텀 메모리 삭제
+            self.clear_short_term_memory()
+            
+            # 3. 채팅 히스토리 삭제
+            chat_history_key = f"chat_history:{self.user_id}:{self.chat_id}"
+            self.redis.delete(chat_history_key)
+            
+            # 4. 서비스 락 삭제 (패턴 매칭으로 모든 락 키 찾기)
+            lock_patterns = [
+                f"lock:{self.user_id}:{self.chat_id}:*",
+                f"service_lock:{self.user_id}:{self.chat_id}:*",
+                f"*:lock:{self.user_id}:{self.chat_id}",
+            ]
+            
+            for pattern in lock_patterns:
+                keys = self.redis.keys(pattern)
+                if keys:
+                    self.redis.delete(*keys)
+                    print(f"🔓 서비스 락 해제: {len(keys)}개 키")
+            
+            # 5. 세션 관련 모든 키 삭제
+            session_pattern = f"{self.user_id}:{self.chat_id}:*"
+            session_keys = self.redis.keys(session_pattern)
+            if session_keys:
+                self.redis.delete(*session_keys)
+                print(f"🗑️ 세션 데이터 삭제: {len(session_keys)}개 키")
+            
+            print(f"✅ 세션 {self.user_id}:{self.chat_id} 완전 초기화 완료")
+            
+        except Exception as e:
+            print(f"❌ 세션 초기화 실패: {e}")
+            raise
+    
     def get_short_term_memory_stats(self) -> Dict[str, Any]:
         """숏텀 메모리 통계 조회"""
         try:

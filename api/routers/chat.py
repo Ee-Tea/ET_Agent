@@ -190,4 +190,47 @@ async def chat_stream(request: ChatRequest):
         }
     )
 
+@router.post("/clear")
+async def clear_session(request: ChatRequest):
+    """세션과 서비스 락 초기화"""
+    try:
+        from ..main import get_redis_memory
+        from common.short_term.redis_memory import RedisLangGraphMemory
+        
+        # Redis 메모리 인스턴스 가져오기
+        redis_memory = get_redis_memory()
+        
+        if not redis_memory:
+            # 직접 Redis 메모리 인스턴스 생성
+            redis_memory = RedisLangGraphMemory(
+                user_id=request.user_id,
+                service="teacher",
+                chat_id=request.chat_id,
+                redis_host="localhost",
+                redis_port=6380
+            )
+        
+        # 완전한 세션 초기화 실행
+        redis_memory.clear_all_session_data()
+        
+        return {
+            "success": True,
+            "message": "✅ 세션과 서비스 락이 성공적으로 초기화되었습니다.",
+            "cleared_items": [
+                "세션 메모리 (shared, history)",
+                "문제 데이터",
+                "숏텀 메모리",
+                "채팅 히스토리",
+                "서비스 락",
+                "세션 관련 모든 키"
+            ],
+            "session_id": f"{request.user_id}:{request.chat_id}"
+        }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"❌ 초기화 중 오류가 발생했습니다: {str(e)}"
+        }
+
 

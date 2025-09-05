@@ -30,7 +30,7 @@ load_dotenv(find_dotenv())
 
 MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "root:milvus")
-MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "crop_info")
+MILVUS_COLLECTION = "crop_info"  # 작물 정보 컬렉션으로 강제 설정
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -600,13 +600,13 @@ def answer_validation_node(state: GraphState) -> Dict[str, Any]:
     r_val = scores.get('answer_relevancy', 0.0)
 
     # 개별 임계값 평가
-    faithfulness_sufficient = f_val >= 0.4
-    relevancy_sufficient = r_val >= 0.5
+    faithfulness_sufficient = f_val >= 0.7
+    relevancy_sufficient = r_val >= 0.35
     is_sufficient = faithfulness_sufficient and relevancy_sufficient
 
     print(f"   - 📈 답변 품질 지표:")
-    print(f"     • Faithfulness: {f_val:.3f} (임계값: 0.4) {'✅' if faithfulness_sufficient else '❌'}")
-    print(f"     • Answer Relevancy: {r_val:.3f} (임계값: 0.5) {'✅' if relevancy_sufficient else '❌'}")
+    print(f"     • Faithfulness: {f_val:.3f} (임계값: 0.7) {'✅' if faithfulness_sufficient else '❌'}")
+    print(f"     • Answer Relevancy: {r_val:.3f} (임계값: 0.35) {'✅' if relevancy_sufficient else '❌'}")
     print(f"     • 최종 결과: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
 
     # 충분한 경우 최종 출력 처리

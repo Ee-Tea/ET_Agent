@@ -689,6 +689,12 @@ function ChatInterface({ onMessageSent }: { onMessageSent: () => void }) {
   const sendMessage = async () => {
     if (!message.trim()) return;
     
+    // clear 명령어 감지
+    if (message.trim().toLowerCase() === "clear") {
+      await handleClearCommand();
+      return;
+    }
+    
     const userMessage = { role: "user", content: message };
     setMessages(prev => [...prev, userMessage]);
     setMessage("");
@@ -720,6 +726,45 @@ function ChatInterface({ onMessageSent }: { onMessageSent: () => void }) {
     } catch (error) {
       console.error("백엔드 API 호출 실패:", error);
       const errorMessage = { role: "assistant", content: "죄송합니다. 백엔드 서버에 연결할 수 없습니다." };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleClearCommand = async () => {
+    const userMessage = { role: "user", content: "clear" };
+    setMessages(prev => [...prev, userMessage]);
+    setMessage("");
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("http://localhost:8000/clear", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const assistantMessage = { 
+        role: "assistant", 
+        content: data.message || "✅ 세션과 서비스 락이 초기화되었습니다." 
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+      
+      // 문제 목록도 새로고침
+      setTimeout(() => onMessageSent(), 1000);
+    } catch (error) {
+      console.error("Clear 명령 실행 실패:", error);
+      const errorMessage = { 
+        role: "assistant", 
+        content: "❌ 초기화에 실패했습니다. 서버 연결을 확인해주세요." 
+      };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
@@ -801,6 +846,7 @@ function ChatInterface({ onMessageSent }: { onMessageSent: () => void }) {
               <div className="text-center text-gray-500">
                 <p>안녕하세요! 질문을 입력해주세요.</p>
                 <p className="text-sm mt-2">예: "소프트웨어 설계 3문제 만들어줘"</p>
+                <p className="text-xs mt-1 text-gray-400">💡 팁: "clear"를 입력하면 세션과 서비스 락이 초기화됩니다</p>
               </div>
             ) : (
               messages.map((msg, index) => (

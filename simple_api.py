@@ -432,6 +432,109 @@ async def get_recent_questions(limit: int = 10):
         print(f"❌ [API] 스택 트레이스: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"최근 문제 조회 실패: {str(e)}")
 
+@app.post("/chat/clear")
+async def clear_session(request: ChatRequest):
+    """세션과 서비스 락 초기화"""
+    try:
+        if not orchestrator:
+            return {
+                "success": False,
+                "message": "❌ ET-Agent 오케스트레이터가 초기화되지 않았습니다."
+            }
+        
+        # Redis 메모리 초기화
+        if hasattr(orchestrator, 'memory') and orchestrator.memory:
+            try:
+                # 완전한 세션 초기화 실행
+                orchestrator.memory.clear_all_session_data()
+                
+                return {
+                    "success": True,
+                    "message": "✅ 세션과 서비스 락이 성공적으로 초기화되었습니다.",
+                    "cleared_items": [
+                        "세션 메모리 (shared, history)",
+                        "문제 데이터",
+                        "숏텀 메모리",
+                        "채팅 히스토리",
+                        "서비스 락",
+                        "세션 관련 모든 키"
+                    ],
+                    "session_id": f"{request.user_id}:{request.chat_id}"
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "message": f"❌ 메모리 초기화 중 오류가 발생했습니다: {str(e)}"
+                }
+        else:
+            return {
+                "success": False,
+                "message": "❌ Redis 메모리 인스턴스를 찾을 수 없습니다."
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"❌ 초기화 중 오류가 발생했습니다: {str(e)}"
+        }
+
+# 간단한 clear 엔드포인트 (422 오류 방지)
+@app.post("/clear")
+async def simple_clear():
+    """완전한 Redis 초기화 및 서비스 설정 리셋"""
+    try:
+        import redis
+        
+        # Redis 연결
+        redis_client = redis.Redis(host="localhost", port=6380, decode_responses=True)
+        
+        # Redis 모든 데이터 삭제
+        redis_client.flushall()
+        print("🗑️ Redis 모든 데이터 삭제 완료")
+        
+        # ET-Agent 오케스트레이터 재초기화
+        global orchestrator
+        if orchestrator:
+            try:
+                # 기존 오케스트레이터 정리
+                orchestrator = None
+                print("🔄 기존 오케스트레이터 정리 완료")
+            except Exception as e:
+                print(f"⚠️ 기존 오케스트레이터 정리 중 오류: {e}")
+        
+        # 새로운 오케스트레이터 초기화
+        try:
+            print("🚀 새로운 ET-Agent 오케스트레이터 초기화 중...")
+            orchestrator = MainOrchestrator(
+                user_id="api_user",
+                chat_id="api_chat"
+            )
+            print("✅ 새로운 ET-Agent 오케스트레이터 초기화 완료")
+        except Exception as e:
+            print(f"❌ 새로운 오케스트레이터 초기화 실패: {e}")
+            orchestrator = None
+        
+        return {
+            "success": True,
+            "message": "✅ Redis 모든 데이터가 삭제되고 서비스가 완전히 초기화되었습니다.",
+            "cleared_items": [
+                "Redis 모든 데이터 (FLUSHALL)",
+                "ET-Agent 오케스트레이터 재초기화",
+                "세션 메모리 완전 삭제",
+                "문제 데이터 완전 삭제",
+                "숏텀 메모리 완전 삭제",
+                "채팅 히스토리 완전 삭제",
+                "서비스 락 완전 삭제",
+                "모든 캐시 데이터 삭제"
+            ]
+        }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"❌ 완전 초기화 중 오류가 발생했습니다: {str(e)}"
+        }
+
 @app.get("/pdf/{filename}")
 async def download_pdf(filename: str):
     """PDF 파일 다운로드"""

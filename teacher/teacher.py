@@ -1731,6 +1731,19 @@ class Teacher:
         solution_answers = shared.get("answer", [])
         solution = shared.get("explanation", [])
         score_result = shared.get("score_result", {})
+        added_count = shared.get("added_count", 0)
+        
+        # added_count만큼만 분석 (최근 추가된 문제들만)
+        if added_count > 0 and len(questions) >= added_count:
+            # 최근 added_count개 문제만 분석
+            questions = questions[-added_count:]
+            problem_types = problem_types[-added_count:] if len(problem_types) >= added_count else problem_types
+            solution_answers = solution_answers[-added_count:] if len(solution_answers) >= added_count else solution_answers
+            solution = solution[-added_count:] if len(solution) >= added_count else solution
+            # user_answer는 이미 added_count만큼만 있음
+            print(f"🎯 [Analysis] added_count({added_count})만큼만 분석: 최근 {added_count}개 문제")
+        else:
+            print(f"⚠️ [Analysis] added_count({added_count})가 0이거나 문제 수({len(questions)})보다 큼. 전체 분석 진행")
         
         # ===== 분석 시작 전 데이터 확인 =====
         print("\n�� [Analysis] 분석 시작 전 데이터 확인:")
@@ -1814,33 +1827,38 @@ class Teacher:
             if solution:
                 print(f"  - 첫 번째 해설: {solution[0][:100] if len(solution[0]) > 100 else solution[0]}...")
             
-            # ===== score_result 타입 확인 =====
-            print(f"\n🔍 [Analysis] score_result 상세 확인:")
+            # ===== score_result 우선 사용 =====
+            print(f"\n🔍 [Analysis] score_result 우선 사용:")
             print(f"  - score_result 타입: {type(score_result)}")
             print(f"  - score_result 값: {score_result}")
             
-            # score state에서 results 추출
-            score_state = new_state.get('score', {})
-            print(f"  - score state: {score_state}")
-            
-            # 올바른 results 데이터 추출
-            if score_state and 'results' in score_state:
-                results_data = score_state['results']
-                print(f"  - results_data 타입: {type(results_data)}")
-                print(f"  - results_data 값: {results_data}")
+            # score_result를 우선적으로 사용
+            results_data = []
+            if score_result and isinstance(score_result, dict) and 'results' in score_result:
+                results_data = score_result['results']
+                print(f"  - score_result에서 results 추출: {results_data}")
             else:
-                results_data = []
-                print(f"  - results_data를 빈 리스트로 설정")
+                # score_result가 없으면 score state에서 추출
+                score_state = new_state.get('score', {})
+                print(f"  - score state: {score_state}")
+                
+                if score_state and 'results' in score_state:
+                    results_data = score_state['results']
+                    print(f"  - score state에서 results 추출: {results_data}")
+                else:
+                    print(f"  - results_data를 빈 리스트로 설정")
             
-            # analysis_agent를 subgraph로 실행
+            print(f"  - 최종 results_data: {results_data}")
+            
+            # analysis_agent를 subgraph로 실행 (added_count만큼만)
             agent_input = {
-                "problem": sh.get("question", []) or [],
+                "problem": questions,  # added_count만큼만 필터링된 문제들
                 "user_answer": user_answer,
-                "problem_types": problem_types,  # ✅ 과목 정보 전달
-                "solution_answer": solution_answers,
+                "problem_types": problem_types,  # added_count만큼만 필터링된 과목들
+                "solution_answer": solution_answers,  # added_count만큼만 필터링된 정답들
                 "user_query": user_query,
-                "solution": solution,  # explanation 데이터를 solution으로 전달
-                "results": results_data  # 수정: score_result 대신 results_data 사용
+                "solution": solution,  # added_count만큼만 필터링된 해설들
+                "results": results_data  # score_result에서 추출한 결과
             }
             
             print(f"\n🔍 [Analysis] analysis_agent 입력 데이터:")

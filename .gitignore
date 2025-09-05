@@ -320,3 +320,18 @@ appendonlydir/
 
 pdf_outputs/
 pdf_outputs/**
+
+# Node / pnpm leftovers (backend only)
+pnpm-lock.yaml
+pnpm-workspace.yaml
+pnpm-debug.log
+node_modules/
+.pnpm-store/
+.next/
+.turbo/
+.vite/
+dist/
+build/
+coverage/
+.cache/
+.parcel-cache/

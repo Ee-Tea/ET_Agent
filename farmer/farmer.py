@@ -940,6 +940,14 @@ class Farmer:
         
         workflow.set_entry_point("load_state")
         
+        # try:
+        #     app = workflow.compile()
+        #     graph_image_path = "ochestrator_workflow.png"
+        #     with open(graph_image_path, "wb") as f:
+        #         f.write(app.get_graph().draw_mermaid_png())
+        #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+        # except Exception as e:
+        #     print(f"그래프 시각화 중 오류 발생: {e}")
         return workflow.compile()
 
 
@@ -959,21 +967,6 @@ class Farmer:
                 print(f"\n오류가 발생했습니다: {e}")
                 traceback.print_exc()
                 continue
-
-
-# 기존 실행 방식과의 호환성을 위한 전역 함수들
-def run_orchestrator_langgraph():
-    """기존 실행 방식과의 호환성을 위한 함수"""
-    farmer = Farmer(user_id="default_user", service="farmer", chat_id="default_chat")
-    # graph = farmer.create_workflow()
-    # try:
-    #     graph_image_path = "ochestrator_workflow.png"
-    #     with open(graph_image_path, "wb") as f:
-    #         f.write(graph.get_graph().draw_mermaid_png())
-    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    # except Exception as e:
-    #     print(f"그래프 시각화 중 오류 발생: {e}")
-    farmer.run_standalone()
 
 if __name__ == "__main__":
     run_orchestrator_langgraph()

@@ -106,6 +106,13 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
       PYTHONPATH: /deps/LLM-T
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/auth/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
   langgraph-api:
     build:

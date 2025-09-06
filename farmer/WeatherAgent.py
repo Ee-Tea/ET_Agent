@@ -484,16 +484,16 @@ def safe_api_call(func, *args, **kwargs):
         return None
 
 def embed_texts_parallel(texts: List[str], batch_size: int = BATCH_SIZE) -> np.ndarray:
-    """병렬로 임베딩 계산 (비동기 동적 배치 처리 버전)"""
-    # 비동기 임베딩 사용 (GPU 메모리 기반 동적 배치)
+    """병렬로 임베딩 계산 (메모리 확인 없이 60 고정, SalesRAGAS.py 패턴 적용)"""
+    # 🚀 SalesRAGAS.py 방식: 비동기 임베딩 사용 (고정 배치 크기)
     return embed_texts_async_wrapper(texts)
 
 def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
-    """병렬로 날씨 데이터 가져오기"""
+    """병렬로 날씨 데이터 가져오기 (SalesRAGAS.py 패턴 적용)"""
     if not ENABLE_PARALLEL_PROCESSING:
         return fetch_weather_data_sequential(sub_questions)
     
-    print("   - �� 병렬 처리로 데이터 수집 중...")
+    print("   - 🔄 병렬 처리로 데이터 수집 중...")
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
@@ -546,13 +546,14 @@ def parallel_fetch_weather_data(sub_questions: List[Dict[str, Any]]) -> Dict[str
                     elif name.startswith('region_forecasts_'):
                         results["region_forecasts"].extend(result)
             except Exception as e:
-                print(f"❌ 병렬 처리 실패 ({name}): {e}")
+                print(f"   - ⚠️ 병렬 처리 실패 ({name}): {e}")
         
+        print("   - ✅ 병렬 데이터 수집 완료!")
         return results
 
 def fetch_weather_data_sequential(sub_questions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
     """순차적으로 날씨 데이터 가져오기"""
-    print("   - �� 순차 처리로 데이터 수집 중...")
+    print("   - 🔄 순차 처리로 데이터 수집 중...")
     
     results = {"advisories": [], "forecasts": [], "mid_forecasts": []}
     
@@ -877,43 +878,12 @@ def get_gpu_memory_usage() -> float:
         return 0.0
 
 def get_optimal_batch_size(text_lengths: List[int], base_batch_size: int = BATCH_EMBEDDING_SIZE) -> int:
-    """텍스트 길이와 GPU 메모리 상태를 고려하여 최적의 배치 크기를 계산합니다"""
-    if not ENABLE_DYNAMIC_BATCH:
-        return base_batch_size
+    """고정된 배치 크기를 반환합니다 (메모리 확인 없이 60 고정)"""
+    # 메모리 확인 없이 고정된 배치 크기 사용 (60 고정)
+    fixed_batch_size = 60
     
-    # GPU 메모리 사용률 확인
-    gpu_usage = get_gpu_memory_usage()
-    
-    # 평균 텍스트 길이 계산
-    avg_length = sum(text_lengths) / len(text_lengths) if text_lengths else 100
-    
-    # 메모리 사용률에 따른 배치 크기 조정
-    if gpu_usage > GPU_CRITICAL_THRESHOLD:
-        # 메모리 심각 부족 시 CPU 모드로 전환
-        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → CPU 모드로 전환 시도")
-        switch_to_cpu_mode()
-        # CPU 모드에서는 더 작은 배치 크기 사용
-        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.2))
-        print(f"   - 🔧 CPU 모드 배치 크기: {base_batch_size} → {adjusted_size}")
-    elif gpu_usage > GPU_MEMORY_THRESHOLD:
-        # 메모리 부족 시 배치 크기 대폭 감소
-        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.3))
-        print(f"   - 🔧 GPU 메모리 부족 ({gpu_usage:.1%}) → 배치 크기 감소: {base_batch_size} → {adjusted_size}")
-    elif gpu_usage > 0.6:
-        # 메모리 사용률 높음 → 배치 크기 감소
-        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.6))
-        print(f"   - 🔧 GPU 메모리 사용률 높음 ({gpu_usage:.1%}) → 배치 크기 조정: {base_batch_size} → {adjusted_size}")
-    elif avg_length > 500:
-        # 긴 텍스트 → 배치 크기 감소
-        adjusted_size = max(MIN_BATCH_SIZE, int(base_batch_size * 0.7))
-        print(f"   - 🔧 긴 텍스트 감지 (평균 {avg_length:.0f}자) → 배치 크기 조정: {base_batch_size} → {adjusted_size}")
-    else:
-        # 메모리 여유 있음 → 배치 크기 유지 또는 증가
-        adjusted_size = min(MAX_BATCH_SIZE, int(base_batch_size * 1.2))
-        if adjusted_size != base_batch_size:
-            print(f"   - 🔧 메모리 여유 있음 ({gpu_usage:.1%}) → 배치 크기 증가: {base_batch_size} → {adjusted_size}")
-    
-    return max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, adjusted_size))
+    print(f"   - 🔧 고정 배치 크기 사용: {fixed_batch_size}")
+    return fixed_batch_size
 
 def cleanup_gpu_memory():
     """GPU 메모리를 정리합니다"""
@@ -951,32 +921,18 @@ def switch_to_cpu_mode():
         _force_cpu_mode = False
 
 def check_and_switch_to_cpu_if_needed():
-    """GPU 메모리 상태를 확인하고 필요시 CPU 모드로 전환"""
-    global _force_cpu_mode
-    
-    if not ENABLE_AUTO_CPU_FALLBACK or _force_cpu_mode:
-        return
-    
-    gpu_usage = get_gpu_memory_usage()
-    
-    if gpu_usage > GPU_CRITICAL_THRESHOLD:
-        switch_to_cpu_mode()
+    """메모리 확인 없이 고정된 배치 크기 사용"""
+    # 메모리 확인을 하지 않고 고정된 배치 크기 사용
+    pass
 
 def embed_texts_batch(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) -> np.ndarray:
     """
-    GPU 메모리 기반 동적 배치 크기로 텍스트 임베딩을 처리합니다.
+    고정된 배치 크기로 텍스트 임베딩을 처리합니다 (메모리 확인 없이 60 고정).
     """
     if not texts:
         return np.array([], dtype="float32").reshape(0, 768)
     
-    # GPU 메모리 사용률 즉시 확인 및 CPU 모드 전환
-    gpu_usage = get_gpu_memory_usage()
-    if gpu_usage > GPU_CRITICAL_THRESHOLD and not _force_cpu_mode:
-        print(f"   - 🚨 GPU 메모리 심각 부족 ({gpu_usage:.1%}) → 즉시 CPU 모드로 전환")
-        switch_to_cpu_mode()
-    
-    # CPU 모드 전환 확인 (기존 로직)
-    check_and_switch_to_cpu_if_needed()
+    # 메모리 확인 없이 고정된 배치 크기 사용
     
     # 텍스트 길이 분석
     text_lengths = [len(text) for text in texts]
@@ -1063,7 +1019,7 @@ def embed_texts_batch(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) 
 
 async def embed_texts_batch_async(texts: List[str], batch_size: int = BATCH_EMBEDDING_SIZE) -> np.ndarray:
     """
-    비동기 배치 단위로 텍스트 임베딩을 처리합니다.
+    비동기 배치 단위로 텍스트 임베딩을 처리합니다 (메모리 확인 없이 60 고정, SalesRAGAS.py 패턴 적용).
     """
     if not texts:
         return np.array([], dtype="float32").reshape(0, 768)
@@ -1076,45 +1032,49 @@ async def embed_texts_batch_async(texts: List[str], batch_size: int = BATCH_EMBE
     
     print("   - 🔄 비동기 배치 처리 중...")
     
-    # 비동기 배치 처리
-    semaphore = asyncio.Semaphore(2)  # 최대 2개 배치 동시 처리
-    
+    # 🚀 SalesRAGAS.py 방식: 배치들을 병렬 처리
     async def process_batch_async(batch: List[str], batch_num: int) -> np.ndarray:
-        async with semaphore:
-            try:
-                # asyncio.to_thread를 사용하여 동기 임베딩을 비동기로 실행
-                batch_embs = await asyncio.to_thread(
-                    _text_embedder.encode, 
-                    batch, 
-                    show_progress_bar=False
-                )
-                
-                # L2 정규화 적용
-                batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
-                
-                return batch_embs
-                
-            except Exception as e:
-                print(f"   - ❌ 비동기 배치 {batch_num} 실패: {e}")
-                # 실패한 배치에 대해 빈 임베딩 반환
-                return np.zeros((len(batch), 768), dtype="float32")
+        try:
+            # asyncio.to_thread를 사용하여 동기 임베딩을 비동기로 실행
+            batch_embs = await asyncio.to_thread(
+                _text_embedder.encode, 
+                batch, 
+                show_progress_bar=False
+            )
+            
+            # L2 정규화 적용
+            batch_embs = np.array([l2_normalize(e) for e in batch_embs], dtype="float32")
+            
+            return batch_embs
+            
+        except Exception as e:
+            print(f"   - ⚠️ 비동기 배치 {batch_num} 실패: {e}")
+            # 실패한 배치에 대해 빈 임베딩 반환
+            return np.zeros((len(batch), 768), dtype="float32")
     
-    # 모든 배치를 비동기로 처리
+    # 모든 배치를 비동기로 처리 (SalesRAGAS.py 방식)
     tasks = []
     for i in range(0, len(texts), optimal_batch_size):
         batch = texts[i:i + optimal_batch_size]
         batch_num = i//optimal_batch_size + 1
         tasks.append(process_batch_async(batch, batch_num))
     
-    # 모든 배치 완료 대기
+    total_batches = len(tasks)
+    print(f"   - 📊 총 {total_batches}개 배치를 병렬 처리합니다 (배치 크기: {optimal_batch_size})")
+    
+    # 🚀 SalesRAGAS.py 방식: asyncio.gather로 모든 배치를 동시에 실행
     try:
-        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        print("   - 🔥 모든 배치 병렬 처리 시작!")
+        batch_results = await asyncio.gather(
+            *tasks,
+            return_exceptions=True
+        )
         
-        # 예외 처리 및 결과 수집
+        # 결과 수집 (SalesRAGAS.py 방식)
         all_embs = []
         for i, result in enumerate(batch_results):
             if isinstance(result, Exception):
-                print(f"   - ❌ 비동기 배치 {i+1} 예외: {result}")
+                print(f"   - ⚠️ 비동기 배치 {i+1} 예외: {result}")
                 # 예외 발생 시 빈 임베딩 추가
                 batch_size_actual = min(optimal_batch_size, len(texts) - i * optimal_batch_size)
                 empty_emb = np.zeros((batch_size_actual, 768), dtype="float32")
@@ -1125,7 +1085,7 @@ async def embed_texts_batch_async(texts: List[str], batch_size: int = BATCH_EMBE
         # 모든 배치 결과 합치기
         if all_embs:
             final_embs = np.vstack(all_embs)
-            print(f"   - ✅ 비동기 동적 배치 임베딩 완료: {final_embs.shape}")
+            print("   - ✅ 모든 배치 병렬 처리 완료!")
             
             # GPU 메모리 정리
             cleanup_gpu_memory()
@@ -1675,6 +1635,7 @@ async def run_ragas_context_precision_only(question, answer, context):
             retrieved_contexts=[context] if context else [""]
         )
         score = await context_precision_scorer.single_turn_ascore(context_sample)
+        time.sleep(1)  # API 요청 간격 늘리기
         
         scores = {"context_precision": float(score)}
         print(f"   - ✅ RAGAS Context Precision 평가 완료: {scores}")
@@ -1685,7 +1646,7 @@ async def run_ragas_context_precision_only(question, answer, context):
         return {"context_precision": 0.0}
 
 async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
-    """2차 검증용: Faithfulness와 Answer Relevancy만 병렬 평가"""
+    """2차 검증용: Faithfulness와 Answer Relevancy만 병렬 평가 (SalesRAGAS.py 패턴 적용)"""
     print("   - 🔄 RAGAS Faithfulness & Relevancy 병렬 평가 실행 중...")
 
     LangchainLLMWrapper = _get_ragas_metrics.LangchainLLMWrapper
@@ -1709,7 +1670,7 @@ async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
             )
         )
         
-        # Faithfulness와 Answer Relevancy만 병렬 처리
+        # 🚀 SalesRAGAS.py 방식: 2개 RAGAS 평가 모두 병렬 처리
         async def evaluate_faithfulness():
             try:
                 faithfulness_scorer = Faithfulness(llm=evaluator_llm)
@@ -1719,7 +1680,8 @@ async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
                     retrieved_contexts=[context] if context else [""]
                 )
                 score = await faithfulness_scorer.single_turn_ascore(faithfulness_sample)
-                return ("faithfulness", float(score))
+                time.sleep(1)  # API 요청 간격 늘리기
+                return ("faithfulness", float(score) if score is not None else 0.0)
             except Exception as e:
                 print(f"   - ⚠️ Faithfulness 평가 실패: {e}")
                 return ("faithfulness", 0.0)
@@ -1736,19 +1698,21 @@ async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
                     retrieved_contexts=[context] if context else [""]
                 )
                 score = await answer_relevancy_scorer.single_turn_ascore(relevancy_sample)
-                return ("answer_relevancy", float(score))
+                time.sleep(1)  # API 요청 간격 늘리기
+                return ("answer_relevancy", float(score) if score is not None else 0.0)
             except Exception as e:
                 print(f"   - ⚠️ Answer Relevancy 평가 실패: {e}")
                 return ("answer_relevancy", 0.0)
         
-        # 2개 평가를 동시에 실행 (진짜 병렬 처리)
+        # 🚀 SalesRAGAS.py 방식: 2개 평가를 동시에 실행 (진짜 병렬 처리)
+        print("   - 🔥 Faithfulness & Answer Relevancy 2개 병렬 평가 시작!")
         results = await asyncio.gather(
             evaluate_faithfulness(),
             evaluate_answer_relevancy(),
             return_exceptions=True
         )
         
-        # 결과 수집
+        # 결과 수집 (SalesRAGAS.py 방식)
         scores = {}
         for result in results:
             if isinstance(result, Exception):
@@ -1757,7 +1721,7 @@ async def run_ragas_faithfulness_relevancy_parallel(question, answer, context):
             metric_name, score = result
             scores[metric_name] = score
         
-        print(f"   - ✅ RAGAS Faithfulness & Relevancy 병렬 평가 완료: {scores}")
+        print("   - ✅ 2개 병렬 평가 완료!")
         return scores
         
     except Exception as e:
@@ -1854,7 +1818,7 @@ async def retrieve_node(state: GraphState) -> Dict[str, Any]:
      # 복합 질문 처리 추가
     sub_questions = decompose_complex_question(q)
     if len(sub_questions) > 1:
-        print(f"   - �� 복합 질문 감지: {len(sub_questions)}개 하위 질문으로 분해")
+        print(f"   - 🔄 복합 질문 감지: {len(sub_questions)}개 하위 질문으로 분해")
         # 병렬 처리로 데이터 수집
         weather_data = parallel_fetch_weather_data(sub_questions)
         # 기존 로직과 통합...
@@ -2196,6 +2160,7 @@ def generate_draft_node(state: GraphState) -> Dict[str, Any]:
         | StrOutputParser()
     )
     ans = chain.invoke({"context": state["context"], "question": state["question"]})
+    time.sleep(1)  # API 요청 간격 늘리기
     txt = re.sub(r'\n{3,}', '\n\n', ans or "").strip()
     return {**state, "answer_draft": txt}
 
@@ -2211,6 +2176,7 @@ def refine_answer_node(state: GraphState) -> Dict[str, Any]:
         | StrOutputParser()
     )
     ans = chain.invoke({"context": state["context"], "question": state["question"], "answer_draft": state["answer_draft"]})
+    time.sleep(1)  # API 요청 간격 늘리기
     txt = re.sub(r'\n{3,}', '\n\n', ans or "").strip()
     return {**state, "answer": txt}
 

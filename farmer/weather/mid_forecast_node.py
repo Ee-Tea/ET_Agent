@@ -21,11 +21,138 @@ KMA_TIMEOUT = int(os.getenv("KMA_TIMEOUT", "30"))
 WHEATHER_API_KEY_HUB=REDACTED("WHEATHER_API_KEY_HUB")
 KST = ZoneInfo("Asia/Seoul")
 
-# 권역 매핑 (utils.py에서 import)
+# 권역 매핑 (WeatherAgent.py와 동일한 방식)
 from .utils import load_region_map, REGION_MAP
 
 # 모듈 로드 시 지역 매핑 초기화
 load_region_map()
+
+# =========[ 권역예보 전용: CSV 권역/질의 해석 (WeatherAgent.py와 동일) ]=========
+REGION_REGIONS_CSV = os.getenv("REGION_CSV_PATH", "farmer/all_regions_combined.csv")
+
+def REGION_load_all_from_csv(path: str) -> Dict[str, str]:
+    """CSV에서 모든 지역 정보 로드"""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"권역 CSV를 찾을 수 없습니다: {path}")
+    mapping: Dict[str, str] = {}
+    import csv
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # 대소문자 구분 없이 컬럼명 찾기
+            rid = (row.get("reg_id") or row.get("REG_ID") or "").strip()
+            rname = (row.get("reg_name") or row.get("REG_NAME") or "").strip()
+            if rid and rname and rid not in mapping:
+                mapping[rid] = rname
+    if not mapping:
+        raise ValueError("CSV에서 유효한 권역 정보를 읽지 못했습니다.")
+    return mapping
+
+def REGION_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
+    """권역 코드만 추출 (WeatherAgent.py와 동일한 정규식)"""
+    REGION_CODE_RE = re.compile(r"^(11[A-Z](\d)?0{4,5}|L\d{7}|S\d{7})$")
+    region_map = {rid: nm for rid, nm in all_map.items() if REGION_CODE_RE.match(rid)}
+    if not region_map:
+        # 비정형 CSV 대비: 알려진 상위코드만 추림
+        known = ["11B00000","11D10000","11D20000","11C20000","11C10000",
+                 "11F20000","11F10000","11H20000","11H10000","11G00000"]
+        region_map = {rid: all_map[rid] for rid in known if rid in all_map}
+    return region_map
+
+def REGION_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
+    """권역명 별칭 매핑 생성"""
+    alias: Dict[str, str] = {}
+    norm = lambda x: re.sub(r"\s+", "", x or "")
+
+    def add(a: str, full: str):
+        a = norm(a)
+        if a and a not in alias:
+            alias[a] = full
+
+    for _code, full in region_map.items():
+        add(full, full)               # 풀네임
+        for p in full.split("·"):     # 구성요소
+            add(p, full)
+        subs = {
+            "충청북도":"충북","충청남도":"충남",
+            "전라북도":"전북","전라남도":"전남",
+            "경상북도":"경북","경상남도":"경남",
+            "제주도":"제주","경기도":"경기",
+        }
+        for long, short in subs.items():
+            if long in full:
+                add(short, full); add(long, full)
+        if ("서울" in full) and ("인천" in full) and ("경기" in full or "경기도" in full):
+            add("수도권", full)
+        if "강원" in full and ("영서" in full or "영동" in full):
+            add("강원", full)
+            if "영서" in full: add("영서", full); add("강원영서", full)
+            if "영동" in full: add("영동", full); add("강원영동", full)
+    return alias
+
+# CSV 로드
+REGION_ALL_MAP: Dict[str, str] = {}
+REGION_LAND_MAP: Dict[str, str] = {}
+REGION_ALIASES: Dict[str, str] = {}
+if os.path.exists(REGION_REGIONS_CSV):
+    REGION_ALL_MAP = REGION_load_all_from_csv(REGION_REGIONS_CSV)
+    REGION_LAND_MAP = REGION_split_region_only(REGION_ALL_MAP)
+    REGION_ALIASES = REGION_build_alias_map(REGION_LAND_MAP)
+    print(f"✅ 권역 CSV 로드: 전체 {len(REGION_ALL_MAP)}개 / 권역 {len(REGION_LAND_MAP)}개 (파일: {REGION_REGIONS_CSV})")
+else:
+    print("⚠️ 권역 CSV 파일이 없어 권역 매핑을 건너뜁니다. (REGION_REGIONS_CSV)")
+
+REGION_FAMILY_RULES = [
+    # 기존 11X 형식
+    (r"^11B",  "11B00000"), (r"^11D1", "11D10000"), (r"^11D2", "11D20000"),
+    (r"^11C1", "11C10000"), (r"^11C2", "11C20000"), (r"^11F1", "11F10000"),
+    (r"^11F2", "11F20000"), (r"^11H1", "11H10000"), (r"^11H2", "11H20000"),
+    (r"^11G",  "11G00000"),
+    # 통합 CSV의 L, S 형식 추가
+    (r"^L100", "L1000000"), (r"^L101", "L1010000"), (r"^L102", "L1020000"),
+    (r"^L103", "L1030000"), (r"^L104", "L1040000"), (r"^L105", "L1050000"),
+    (r"^L106", "L1060000"), (r"^L107", "L1070000"), (r"^L108", "L1080000"),
+    (r"^S100", "S1000000"), (r"^S110", "S1100000"), (r"^S120", "S1200000"),
+    (r"^S130", "S1300000"), (r"^S140", "S1400000"), (r"^S150", "S1500000"),
+    (r"^S160", "S1600000"), (r"^S170", "S1700000"), (r"^S180", "S1800000"),
+]
+
+def REGION_normalize_region_reg_code(code_like: str) -> Optional[str]:
+    """세부 코드를 권역 코드로 정규화 (중기예보 API용 11X00000 형식)"""
+    c = (code_like or "").strip()
+    if not c: return None
+    
+    # 직접 매칭 (11X00000 형식만)
+    if c in REGION_LAND_MAP and c.startswith('11'): return c
+    
+    # 패턴 매칭 (11X 형식만)
+    for pat, target in REGION_FAMILY_RULES:
+        if re.match(pat, c) and target.startswith('11'): 
+            return target if target in REGION_LAND_MAP else target
+    
+    # L 형식을 11X 형식으로 매핑 (중기예보 API 지원)
+    if c.startswith('L'):
+        # L1010000 (경기도) -> 11B00000 (서울·인천·경기)
+        if c.startswith('L101'): return '11B00000'
+        # L1020000 (강원도) -> 11D10000 (강원영서)
+        if c.startswith('L102'): return '11D10000'
+        # L1030000 (충청북도) -> 11C10000 (충북)
+        if c.startswith('L103'): return '11C10000'
+        # L1040000 (충청남도) -> 11C20000 (충남)
+        if c.startswith('L104'): return '11C20000'
+        # L1050000 (전라북도) -> 11F10000 (전북)
+        if c.startswith('L105'): return '11F10000'
+        # L1060000 (전라남도) -> 11F20000 (전남)
+        if c.startswith('L106'): return '11F20000'
+        # L1070000 (경상북도) -> 11H10000 (경북)
+        if c.startswith('L107'): return '11H10000'
+        # L1080000 (경상남도) -> 11H20000 (경남)
+        if c.startswith('L108'): return '11H20000'
+    
+    # S 형식은 중기예보에서 지원하지 않음
+    if c.startswith('S'): return None
+    
+    return None
 
 def now_kst() -> datetime:
     """현재 KST 시간 반환"""
@@ -51,7 +178,7 @@ def normalize_spaces(s: str) -> str:
     """공백 정규화"""
     return re.sub(r"\s+", "", s or "")
 
-def REGION_parse_wl_line(line: str) -> Optional[Dict[str, str]]:
+def _parse_wl_line(line: str) -> Optional[Dict[str, str]]:
     """권역예보 라인 파싱"""
     s = (line or "").strip()
     if not s or s.startswith("#") or s.startswith("7777END"):
@@ -166,6 +293,15 @@ def request_with_retries(url: str, timeout: int, retries: int, backoff: float) -
                 time.sleep(backoff * i)
     raise last or RuntimeError("request failed")
 
+def to_tmfc(dt: datetime) -> str:
+    """API는 KST 기준 문자열을 기대"""
+    k = dt.astimezone(KST)
+    return k.strftime("%Y%m%d%H")
+
+def to_tmef(dt: datetime) -> str:
+    k = dt.astimezone(KST)
+    return k.strftime("%Y%m%d")
+
 def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int = 3, widen_days: int = 0,
                         disp: str = "1", help_flag: str = "0", merge_day: bool = True) -> List[Dict[str, str]]:
     """KMA 권역 육상예보 주간 데이터 가져오기"""
@@ -174,21 +310,19 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
         return []
     
     now = now_kst()
-    tmfc1 = now.astimezone(KST) - timedelta(days=tmfc_range_days)
-    tmfc2 = now
-    tmef1 = target_date - timedelta(days=widen_days)
-    tmef2 = target_date + timedelta(days=widen_days)
+    # 중기예보는 더 넓은 범위에서 조회 (발표 시간 범위 확장)
+    tmfc1 = to_tmfc(now - timedelta(days=tmfc_range_days))  # 파라미터로 받은 범위 사용
+    tmfc2 = to_tmfc(now)
+    tmef1 = to_tmef(target_date - timedelta(days=widen_days))
+    tmef2 = to_tmef(target_date + timedelta(days=widen_days))
     
     BASE = "https://apihub.kma.go.kr/api/typ01/url/fct_afs_wl.php"
     params = {
         "reg": reg_id,
-        "tmfc1": tmfc1.strftime("%Y%m%d%H"),
-        "tmfc2": tmfc2.strftime("%Y%m%d%H"),
-        "tmef1": tmef1.strftime("%Y%m%d"),
-        "tmef2": tmef2.strftime("%Y%m%d"),
-        "disp": disp,
-        "help": help_flag,
-        "authKey": WHEATHER_API_KEY_HUB
+        "tmfc1": tmfc1, "tmfc2": tmfc2,
+        "tmef1": tmef1, "tmef2": tmef2,
+        "disp": disp, "help": help_flag,
+        "authKey": WHEATHER_API_KEY_HUB,
     }
     
     url = f"{BASE}?{urlencode(params)}"
@@ -198,14 +332,23 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
         text = r.content.decode("euc-kr", errors="replace")
         
         latest = {}
-        want_d8 = target_date.strftime("%Y%m%d")
+        want_d8 = to_tmef(target_date)
+        
+        parsed_lines = 0
+        filtered_lines = 0
         
         for ln in text.splitlines():
-            item = REGION_parse_wl_line(ln)
+            if not ln.strip():
+                continue
+            
+            item = _parse_wl_line(ln)
             if not item:
                 continue
+            parsed_lines += 1
+            
             if item.get("reg_id") != reg_id:
                 continue
+            filtered_lines += 1
             
             tmef = item.get("tmef", "")
             if (tmef or "")[:8] != want_d8:
@@ -216,6 +359,7 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
                 latest[tmef] = item
         
         if not latest:
+            print(f"   - ❌ 데이터 없음: 대상 날짜({want_d8})에 대한 데이터가 없습니다.")
             return []
         
         rows = [latest[k] for k in sorted(latest.keys())]
@@ -286,44 +430,44 @@ class MidForecastNode:
             # 질문에서 지역과 날짜 추출
             question = state.get("question", "")
             
-            # 지역 추출 (간단한 버전)
+            # 지역 추출 (WeatherAgent.py와 동일한 방식)
             region_code = "11B00000"  # 기본값: 서울
             region_name = "서울·인천·경기도"
             
             # CSV에서 지역 매핑이 있으면 사용
-            if REGION_MAP:
-                for code, name in REGION_MAP.items():
+            if REGION_ALL_MAP:
+                for code, name in REGION_ALL_MAP.items():
                     if name in question or code in question:
                         region_code = code
                         region_name = name
-                        print(f"   - 권역코드 로드: {region_code} ({region_name})")
+                        print(f"   - CSV에서 지역코드 로드: {region_code} ({region_name})")
                         break
             
-            # 날짜 추출 (간단한 버전)
-            target_date = now_kst() + timedelta(days=5)  # 기본값: 5일 후
+            # 중기예보는 권역 코드를 사용해야 함 (세부 코드 -> 권역 코드 정규화)
+            region_code = REGION_normalize_region_reg_code(region_code)
+            print(f"   - 권역 코드 정규화: {region_code}")
             
-            # 질문에서 날짜 관련 키워드 확인
-            if "내일" in question or "1일" in question:
-                target_date = now_kst() + timedelta(days=1)
-            elif "모레" in question or "2일" in question:
-                target_date = now_kst() + timedelta(days=2)
-            elif "3일" in question:
-                target_date = now_kst() + timedelta(days=3)
-            elif "4일" in question:
-                target_date = now_kst() + timedelta(days=4)
-            elif "5일" in question:
-                target_date = now_kst() + timedelta(days=5)
-            elif "6일" in question:
-                target_date = now_kst() + timedelta(days=6)
-            elif "7일" in question or "일주일" in question:
-                target_date = now_kst() + timedelta(days=7)
+            # 날짜 추출 (utils.py의 함수 사용)
+            from .utils import extract_date_from_question
+            target_date = extract_date_from_question(question)
             
-            # 중기예보 데이터 가져오기
+            # 중기예보는 4일 이후 데이터만 제공하므로 조정
+            now = now_kst()
+            days_diff = (target_date.date() - now.date()).days
+            print(f"   - 원본 날짜: {target_date.strftime('%Y-%m-%d')} (오늘로부터 {days_diff}일 후)")
+            
+            if days_diff < 4:
+                target_date = now + timedelta(days=4)  # 최소 4일 후로 설정
+                print(f"   - 날짜 조정: {target_date.strftime('%Y-%m-%d')} (최소 4일 후로 설정)")
+            else:
+                print(f"   - 날짜 유지: {target_date.strftime('%Y-%m-%d')}")
+            
+            # 중기예보 데이터 가져오기 (longapi.py와 동일한 파라미터)
             mid_forecasts = fetch_mid_week_land(
                 reg_id=region_code,
                 target_date=target_date,
-                tmfc_range_days=3,
-                widen_days=0
+                tmfc_range_days=3,  # longapi.py와 동일
+                widen_days=0        # longapi.py와 동일
             )
             
             # 상태에 결과 저장

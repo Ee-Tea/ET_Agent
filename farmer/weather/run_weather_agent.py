@@ -106,13 +106,24 @@ ANALYSIS_PROMPT = ChatPromptTemplate.from_template(
 주의: true/false는 반드시 boolean 값이어야 합니다 (문자열 "true"/"false"가 아님)
 
 판단 기준:
-- need_advisory: 특보, 경보, 주의보 관련 질문이거나 "오늘" 날씨 질문
-- need_short_forecast: "오늘", "내일", "모레", "3일" 이내 날씨 질문
-- need_mid_forecast: "4일", "5일", "6일", "7일", "일주일", "주간" 날씨 질문
-- has_region_info: 질문에 지역명이 포함되어 있는지 (서울, 부산, 대구, 인천, 광주, 대전, 울산, 세종, 경기, 강원, 충북, 충남, 전북, 전남, 경북, 경남, 제주)
-- has_date_info: 질문에 구체적인 날짜/시간 정보가 있는지 (오늘, 내일, 모레, 3일, 4일, 5일, 6일, 7일, 일주일, 주간 등)
-- default_region: 지역 정보가 없을 때 기본 지역 (서울, 부산, 대구 중 하나)
+- need_advisory: 기상특보, 경보, 주의보 관련 질문이거나 오늘 날씨 질문
+- need_short_forecast: 오늘부터 3일 이내 날씨 질문 (오늘, 내일, 모레, 3일 후 등)
+- need_mid_forecast: 4일 이후 날씨 질문 (4일 후, 5일 후, 6일 후, 7일 후, 일주일 후, 주간 등)
+- has_region_info: 질문에 구체적인 지역명이 포함되어 있는지 (서울, 부산, 대구, 인천, 광주, 대전, 울산, 세종, 경기, 강원, 충북, 충남, 전북, 전남, 경북, 경남, 제주, 제주도 등). "폭염", "비", "날씨" 같은 일반적인 날씨 용어는 지역 정보가 아님
+- has_date_info: 질문에 구체적인 날짜/시간 정보가 있는지 (오늘, 내일, 모레, 3일, 4일, 5일, 6일, 7일, 일주일, 주간, 다음주 등)
+- default_region: 질문에서 인식된 지역명 (서울, 부산, 대구, 인천, 광주, 대전, 울산, 세종, 경기, 강원, 충북, 충남, 전북, 전남, 경북, 경남, 제주 중 하나). 지역 정보가 없으면 "서울"
 - processing_mode: "auto_seoul" (기본 서울 처리) 또는 "ask_user" (사용자에게 질문)
+
+판단 예시:
+- "오늘 날씨" → has_region_info: false, default_region: "서울", has_date_info: true
+- "오늘 제주도 날씨" → has_region_info: true, default_region: "제주", has_date_info: true
+- "내일 부산 비 올까?" → has_region_info: true, default_region: "부산", has_date_info: true  
+- "모레 경기도 기온은?" → has_region_info: true, default_region: "경기", has_date_info: true
+- "일주일 후 강원도 날씨" → has_region_info: true, default_region: "강원", has_date_info: true
+- "다음주 주간예보" → has_region_info: false, default_region: "서울", has_date_info: true
+- "날씨 어때?" → has_region_info: false, default_region: "서울", has_date_info: false
+- "내일 폭염인지 알아봐줘" → has_region_info: false, default_region: "서울", has_date_info: true
+- "비 올까?" → has_region_info: false, default_region: "서울", has_date_info: false
 
 JSON만 답변하세요:"""
 )
@@ -121,23 +132,32 @@ JSON만 답변하세요:"""
 ANSWER_PROMPT = ChatPromptTemplate.from_template(
     """기상청 예보관으로서 다음 데이터를 바탕으로 종합적인 답변을 작성하세요.
 
+현재 날짜: {current_date}
+
 질문: {question}
 
 [기상 데이터]
 {context}
 
 답변 구조:
-1) 개요: 핵심 요약
-2) 기상특보 현황: (특보 데이터가 있을 때만)
-3) 단기예보: (단기 데이터가 있을 때만) 
-4) 중기예보: (중기 데이터가 있을 때만)
-5) 종합 요약
+순번) 개요: 핵심 요약
+순번) 기상특보 현황: (해당 지역에 현재 발효 중이거나 발표 예정인 특보가 있을 때만)
+순번) 단기예보: (단기 데이터가 있을 때만) 
+순번) 중기예보: (중기 데이터가 있을 때만)
+순번) 종합 요약
 
 주의사항:
 - 지역 정보가 명확하지 않은 경우, 서울/수도권 기준으로 답변하세요
 - 답변 시작 부분에 "서울/수도권 기준"이라고 명시하세요
-- 답변 끝에 다른 지역 정보도 제공 가능하다고 안내하세요
-- 예시: "다른 지역(부산, 대구, 인천 등)의 날씨 정보도 필요하시면 말씀해주세요!"
+- **중요**: 데이터가 없는 섹션은 아예 생략하세요. "없습니다"라고 표시하지 마세요.
+- **중요**: 섹션을 생략할 때는 번호를 연속으로 맞추세요 (예: 중기예보가 없으면 1,2,3,5가 아닌 1,2,3,4로)
+- **중요**: 기상특보 데이터가 없으면 "기상특보 현황" 섹션을 아예 제외하세요
+- **중요**: 중기예보 데이터가 없으면 "중기예보" 섹션을 아예 제외하세요
+- **중요**: 단기예보 데이터가 없으면 "단기예보" 섹션을 아예 제외하세요
+- 발표 예정인 특보는 "발표 예정" 또는 "예정"이라고 명시하세요
+- 마크다운 문법(**, *, # 등)을 사용하지 말고 일반 텍스트로 작성하세요
+- 답변 끝에 "다른 지역 정보도 필요하시면 말씀해주세요!" 같은 안내는 추가하지 마세요
+- 날짜 계산 시 현재 날짜를 기준으로 정확히 계산하세요 (예: 현재가 9월 8일이면 모레는 9월 10일)
 
 답변:"""
 )
@@ -198,28 +218,12 @@ def analyze_question_node(state: GraphState) -> Dict[str, Any]:
         print(f"   - JSON 파싱 실패: {e}")
         print(f"   - 원본 응답: {analysis}")
         
-        # 질문 내용으로 간단한 판단
-        question_lower = question.lower()
-        if "오늘" in question:
-            need_advisory = True
-            need_short_forecast = True
-            need_mid_forecast = False
-            has_date_info = True
-        elif "내일" in question or "모레" in question:
-            need_advisory = False
-            need_short_forecast = True
-            need_mid_forecast = False
-            has_date_info = True
-        elif "일주일" in question or "주간" in question:
-            need_advisory = False
-            need_short_forecast = False
-            need_mid_forecast = True
-            has_date_info = True
-        else:
-            need_advisory = True
-            need_short_forecast = True
-            need_mid_forecast = False
-            has_date_info = False
+        # LLM 파싱 실패 시 기본값 (안전한 기본값)
+        print("   - LLM 파싱 실패로 기본값 사용")
+        need_advisory = True
+        need_short_forecast = True
+        need_mid_forecast = False
+        has_date_info = False  # 날짜 정보 불명확
         
         # 지역 정보 판단
         region_keywords = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종", "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주"]
@@ -337,14 +341,25 @@ def generate_answer_node(state: GraphState) -> Dict[str, Any]:
     if not state.get("context"):
         raise ValueError("context 누락")
     
+    # 데이터가 없는 경우 처리
+    if state["context"] == "NO_DATA_AVAILABLE":
+        print("   - 데이터 없음: 적절한 메시지 반환")
+        return {
+            **state, 
+            "answer": "죄송합니다. 요청하신 날짜와 지역에 대한 기상 데이터를 찾을 수 없습니다. 다른 날짜나 지역으로 다시 문의해주세요."
+        }
+    
+    # 현재 날짜 정보 추가
+    current_date = datetime.now(tz=KST).strftime("%Y년 %m월 %d일")
+    
     chain = (
-        {"context": lambda x: x["context"], "question": lambda x: x["question"]}
+        {"context": lambda x: x["context"], "question": lambda x: x["question"], "current_date": lambda x: current_date}
         | ANSWER_PROMPT
         | make_llm()
         | StrOutputParser()
     )
     
-    answer = chain.invoke({"context": state["context"], "question": state["question"]})
+    answer = chain.invoke({"context": state["context"], "question": state["question"], "current_date": current_date})
     time.sleep(1)  # API 요청 간격
     
     txt = re.sub(r'\n{3,}', '\n\n', answer or "").strip()
@@ -356,18 +371,20 @@ def generate_answer_node(state: GraphState) -> Dict[str, Any]:
     if processing_mode == "auto_seoul_with_options" and original_question:
         additional_options = f"""
 
-💡 다른 지역의 날씨 정보도 필요하시다면 말씀해주세요!
+다른 지역의 날씨 정보도 필요하시다면 말씀해주세요!
 예시: "부산 오늘 날씨 어때?", "대구 내일 날씨는?", "인천 이번주 날씨는?"
 
-🏙️ 제공 가능한 지역:
+제공 가능한 지역:
 - 서울/수도권, 부산, 대구, 인천, 광주, 대전, 울산, 세종
 - 경기도, 강원도, 충청북도, 충청남도, 전라북도, 전라남도, 경상북도, 경상남도, 제주도
 
-📅 날짜 옵션:
+날짜 옵션:
 - 오늘, 내일, 모레, 3일 후, 4일 후, 5일 후, 6일 후, 7일 후/일주일 후"""
         
         txt += additional_options
         print("   - 추가 지역 옵션 제공")
+    else:
+        print("   - 추가 옵션 제공 안함 (지역 정보 이미 포함됨)")
     
     return {**state, "answer": txt}
 
@@ -403,26 +420,21 @@ def ask_missing_info_node(state: GraphState) -> Dict[str, Any]:
             "경북": "경북", "경남": "경남", "제주": "제주"
         }
         
-        # 날짜 정보 추출
-        date_keywords = {
-            "오늘": "오늘", "내일": "내일", "모레": "모레",
-            "3일": "3일 후", "4일": "4일 후", "5일": "5일 후",
-            "6일": "6일 후", "7일": "7일 후", "일주일": "7일 후", "주간": "7일 후"
-        }
+        # 날짜 정보 추출 (간단한 키워드 기반)
+        detected_date = None
+        date_keywords = ["오늘", "내일", "모레", "3일", "4일", "5일", "6일", "7일", "일주일", "주간"]
+        
+        for keyword in date_keywords:
+            if keyword in current_question:
+                detected_date = keyword
+                break
         
         detected_region = None
-        detected_date = None
         
         # 지역 정보 추출
         for keyword, region in region_keywords.items():
             if keyword in current_question:
                 detected_region = region
-                break
-        
-        # 날짜 정보 추출
-        for keyword, date in date_keywords.items():
-            if keyword in current_question:
-                detected_date = date
                 break
         
         # 새로운 질문 구성

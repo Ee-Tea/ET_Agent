@@ -9,7 +9,7 @@ import re
 import json
 import requests
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -135,6 +135,27 @@ def fetch_kma_advisories(start_time: str, end_time: str, disp: str = "1") -> Lis
                 if len(raw) < 9:
                     continue
                 
+                # 해제된 특보는 제외 (cmd가 "3"이면 해제)
+                cmd = raw[7].strip() if len(raw) > 7 else ""
+                if cmd == "3":  # 해제된 특보
+                    continue
+                
+                # 현재 발효 중이거나 발표 예정인 특보만
+                tm_st = raw[0] if len(raw) > 0 else ""  # 발표 시작 시간
+                tm_ed = raw[1] if len(raw) > 1 else ""  # 발표 종료 시간
+                
+                if tm_st and tm_ed and len(tm_st) >= 12 and len(tm_ed) >= 12:  # YYYYMMDDHHMM 형식
+                    try:
+                        start_time = datetime.strptime(tm_st, "%Y%m%d%H%M").replace(tzinfo=KST)
+                        end_time = datetime.strptime(tm_ed, "%Y%m%d%H%M").replace(tzinfo=KST)
+                        now = datetime.now(tz=KST)
+                        
+                        # 현재 발효 중이거나 발표 예정인 특보 (발표 시작 시간이 현재 시간보다 이후이거나, 현재 시간이 발효 기간 내에 있는 경우)
+                        if not (start_time >= now or (start_time <= now <= end_time)):
+                            continue  # 현재 발효 중이 아니고 발표 예정도 아닌 특보는 제외
+                    except:
+                        pass  # 시간 파싱 실패 시 그대로 진행
+                
                 rec = _format_kma_record(raw)
                 key = re.sub(r"\s+", " ", rec["json"]).strip()
                 if key in seen:
@@ -164,13 +185,66 @@ class AdvisoryNode:
         print("🧩 노드: 기상특보 데이터 수집")
         
         try:
-            # 현재 시간 기준으로 특보 데이터 가져오기
-            now = datetime.now(tz=KST)
-            start_time = now.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M")
-            end_time = now.strftime("%Y%m%d%H%M")
+            # 질문에서 지역 추출
+            question = state.get("question", "")
+            target_region = None
             
+            # 지역 키워드 매핑
+            region_keywords = {
+                "서울": ["서울", "수도권", "경기"],
+                "부산": ["부산"],
+                "대구": ["대구"],
+                "인천": ["인천"],
+                "광주": ["광주"],
+                "대전": ["대전"],
+                "울산": ["울산"],
+                "세종": ["세종"],
+                "강원": ["강원"],
+                "충북": ["충북", "충청북도"],
+                "충남": ["충남", "충청남도"],
+                "전북": ["전북", "전라북도"],
+                "전남": ["전남", "전라남도"],
+                "경북": ["경북", "경상북도"],
+                "경남": ["경남", "경상남도"],
+                "제주": ["제주", "제주도"]
+            }
+            
+            # 질문에서 지역 찾기
+            for region, keywords in region_keywords.items():
+                if any(keyword in question for keyword in keywords):
+                    target_region = region
+                    break
+            
+            # 현재 시간 기준으로 특보 데이터 가져오기 (현재 발효 중인 특보만)
+            now = datetime.now(tz=KST)
+            # 현재 시간 기준으로 발효 중인 특보 조회 (넓은 범위에서 가져온 후 필터링)
+            start_time = (now - timedelta(days=1)).strftime("%Y%m%d%H%M")  # 어제부터
+            end_time = (now + timedelta(days=1)).strftime("%Y%m%d%H%M")   # 내일까지
             # 특보 데이터 가져오기
-            advisories = fetch_kma_advisories(start_time, end_time)
+            all_advisories = fetch_kma_advisories(start_time, end_time)
+            
+            # 지역 필터링
+            if target_region and all_advisories:
+                filtered_advisories = []
+                for advisory in all_advisories:
+                    try:
+                        advisory_json = json.loads(advisory.get("json", "{}"))
+                        region_name = advisory_json.get("region_name", "")
+                        
+                        # 해당 지역의 특보만 포함
+                        if target_region in region_name or any(keyword in region_name for keyword in region_keywords.get(target_region, [])):
+                            filtered_advisories.append(advisory)
+                    except:
+                        continue
+                
+                advisories = filtered_advisories
+                print(f"   - 지역 필터링: {target_region} ({len(filtered_advisories)}개 특보)")
+            else:
+                advisories = all_advisories
+                if target_region:
+                    print(f"   - 지역 필터링: {target_region} (특보 없음)")
+                else:
+                    print(f"   - 지역 정보 없음: 전체 특보 조회")
             
             # 상태에 결과 저장
             if "advisory_data" not in state:

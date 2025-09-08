@@ -9,7 +9,7 @@ import re
 import json
 import numpy as np
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
@@ -196,7 +196,10 @@ def combine_weather_data(state: Dict[str, Any], max_docs_per_type: int = 3) -> s
             formatted = _format_for_llm("region_forecast", doc["json"], doc["human"])
             context_parts.append(formatted)
     
-    return "\n\n".join(context_parts) if context_parts else "관련 문서를 찾을 수 없습니다."
+    if context_parts:
+        return "\n\n".join(context_parts)
+    else:
+        return "NO_DATA_AVAILABLE"
 
 # 지역 매핑 (CSV 파일에서 로드)
 REGION_MAP = {}

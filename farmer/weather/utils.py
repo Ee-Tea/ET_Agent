@@ -36,8 +36,14 @@ def get_text_embedder():
 # 지역 매핑 (CSV 파일에서 로드)
 REGION_MAP = {}
 
+def _norm_name(s: str) -> str:
+    """지역명 정규화"""
+    s = str(s or "").strip()
+    s = re.sub(r"[()\s·ㆍ]", "", s)  # 공백/특수문자 제거
+    return s
+
 def load_region_map():
-    """CSV 파일에서 지역 매핑 로드"""
+    """CSV 파일에서 지역 매핑 로드 (정교한 방식)"""
     global REGION_MAP
     csv_path = os.getenv("REGION_CSV_PATH", "farmer/all_regions_combined.csv")
     
@@ -48,32 +54,61 @@ def load_region_map():
     
     try:
         import pandas as pd
+        from collections import defaultdict
+        
         df = pd.read_csv(csv_path, encoding='utf-8-sig')
         
-        # 컬럼 자동 감지
-        code_col = None
-        name_col = None
-        
-        for col in df.columns:
-            if col.upper() in ['REG_ID', 'CODE', 'ID']:
-                code_col = col
-            elif col.upper() in ['REG_NAME', 'NAME', 'REGION_NAME']:
-                name_col = col
+        # 컬럼 자동 감지(대소문자 무시)
+        cols_upper = {c.upper(): c for c in df.columns}
+        code_col = next((cols_upper[k] for k in ("REG_ID", "CODE", "ID") if k in cols_upper), None)
+        name_col = next((cols_upper[k] for k in ("REG_NAME", "NAME", "REGION_NAME") if k in cols_upper), None)
         
         if not code_col or not name_col:
             print("❌ CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
             REGION_MAP = {}
             return
         
-        # 데이터 로드
-        REGION_MAP = {}
+        code_to_name: Dict[str, str] = {}
+        name_to_codes: Dict[str, List[str]] = defaultdict(list)
+        norm_name_to_codes: Dict[str, List[str]] = defaultdict(list)
+        
+        seen_pairs = set()  # (code, name) 중복 제거용
+        
         for _, row in df.iterrows():
             code = str(row[code_col]).strip()
             name = str(row[name_col]).strip()
-            if code and name and code != 'nan' and name != 'nan':
-                REGION_MAP[name] = code
+            if not code or not name or code.lower() == "nan" or name.lower() == "nan":
+                continue
+            
+            # (code, name) 페어 중복 방지
+            if (code, name) in seen_pairs:
+                continue
+            seen_pairs.add((code, name))
+            
+            # 1) code -> name (1:1) : 첫 값 유지
+            if code not in code_to_name:
+                code_to_name[code] = name
+            elif code_to_name[code] != name:
+                # 동일 코드가 다른 이름으로 등장하는 경우 -> 데이터 정제 필요
+                # print(f"⚠️ 코드 충돌: {code} -> '{code_to_name[code]}' vs '{name}' (첫 값 유지)")
+                pass
+            
+            # 2) name -> [codes] (1:多)
+            if code not in name_to_codes[name]:
+                name_to_codes[name].append(code)
+            
+            # 3) 정규화 이름 -> [codes]
+            nname = _norm_name(name)
+            if code not in norm_name_to_codes[nname]:
+                norm_name_to_codes[nname].append(code)
         
-        print(f"✅ 지역 매핑 로드 완료: {len(REGION_MAP)}개 지역")
+        # REGION_MAP에 양방향 매핑 저장 (기존 호환성 유지)
+        REGION_MAP = {}
+        for code, name in code_to_name.items():
+            REGION_MAP[name] = code  # 지역명 → 코드
+            REGION_MAP[code] = name  # 코드 → 지역명
+        
+        print(f"✅ 지역 매핑 로드 완료: {len(code_to_name)}개")
         
     except Exception as e:
         print(f"❌ 지역 매핑 로드 실패: {e}")
@@ -204,51 +239,7 @@ def combine_weather_data(state: Dict[str, Any], max_docs_per_type: int = 3) -> s
 # 지역 매핑 (CSV 파일에서 로드)
 REGION_MAP = {}
 
-def load_region_map():
-    """CSV 파일에서 지역 매핑 로드"""
-    global REGION_MAP
-    csv_path = os.getenv("REGION_CSV_PATH", "farmer/all_regions_combined.csv")
-    
-    if not os.path.exists(csv_path):
-        print(f"❌ CSV 파일이 없습니다: {csv_path}")
-        REGION_MAP = {}
-        return
-    
-    try:
-        import pandas as pd
-        df = pd.read_csv(csv_path, encoding='utf-8-sig')
-        
-        # 컬럼 자동 감지
-        code_col = None
-        name_col = None
-        
-        for col in df.columns:
-            if col.upper() in ['REG_ID', 'CODE', 'ID']:
-                code_col = col
-            elif col.upper() in ['REG_NAME', 'NAME', 'REGION_NAME']:
-                name_col = col
-        
-        if not code_col or not name_col:
-            print("❌ CSV에서 코드/이름 컬럼을 찾을 수 없습니다.")
-            REGION_MAP = {}
-            return
-        
-        # 데이터 로드
-        for _, row in df.iterrows():
-            code = str(row[code_col]).strip()
-            name = str(row[name_col]).strip()
-            
-            if code and name and code.lower() != "nan" and name.lower() != "nan":
-                REGION_MAP[code] = name
-        
-        print(f"✅ 지역 매핑 로드 완료: {len(REGION_MAP)}개 지역")
-        
-    except Exception as e:
-        print(f"❌ CSV 로드 실패: {e}")
-        REGION_MAP = {}
-
-# 모듈 로드 시 지역 매핑 초기화
-load_region_map()
+# 중복된 load_region_map 함수 제거됨
 
 def extract_region_from_question(question: str) -> str:
     """질문에서 지역 추출 (CSV 기반)"""
@@ -265,32 +256,32 @@ def extract_region_from_question(question: str) -> str:
     # CSV가 없으면 기본값 반환
     return "서울"
 
-def extract_date_from_question(question: str) -> datetime:
-    """질문에서 날짜 추출 (간단한 버전)"""
-    if not question:
-        return datetime.now(tz=KST)
-    
-    now = datetime.now(tz=KST)
-    
-    if "오늘" in question or "현재" in question or "지금" in question:
-        return now
-    elif "내일" in question:
-        return now + timedelta(days=1)
-    elif "모레" in question:
-        return now + timedelta(days=2)
-    elif "3일" in question:
-        return now + timedelta(days=3)
-    elif "4일" in question:
-        return now + timedelta(days=4)
-    elif "5일" in question:
-        return now + timedelta(days=5)
-    elif "6일" in question:
-        return now + timedelta(days=6)
-    elif "7일" in question:
-        return now + timedelta(days=7)
-    elif "1주" in question or "일주일" in question:
-        return now + timedelta(days=7)
-    elif "2주" in question:
-        return now + timedelta(days=14)
-    
-    return now  # 기본값
+# def extract_date_from_question(question: str) -> datetime:
+#     """질문에서 날짜 추출 (간단한 버전) - LLM이 처리하도록 주석처리"""
+#     if not question:
+#         return datetime.now(tz=KST)
+#     
+#     now = datetime.now(tz=KST)
+#     
+#     if "오늘" in question or "현재" in question or "지금" in question:
+#         return now
+#     elif "내일" in question:
+#         return now + timedelta(days=1)
+#     elif "모레" in question:
+#         return now + timedelta(days=2)
+#     elif "3일" in question:
+#         return now + timedelta(days=3)
+#     elif "4일" in question:
+#         return now + timedelta(days=4)
+#     elif "5일" in question:
+#         return now + timedelta(days=5)
+#     elif "6일" in question:
+#         return now + timedelta(days=6)
+#     elif "7일" in question:
+#         return now + timedelta(days=7)
+#     elif "1주" in question or "일주일" in question:
+#         return now + timedelta(days=7)
+#     elif "2주" in question:
+#         return now + timedelta(days=14)
+#     
+#     return now  # 기본값

@@ -447,9 +447,10 @@ class MidForecastNode:
             region_code = REGION_normalize_region_reg_code(region_code)
             print(f"   - 권역 코드 정규화: {region_code}")
             
-            # 날짜 추출 (utils.py의 함수 사용)
-            from .utils import extract_date_from_question
-            target_date = extract_date_from_question(question)
+            # 날짜 추출 (LLM이 처리하도록 변경)
+            # 기본값으로 4일 후 설정 (중기예보 최소 요구사항)
+            now = now_kst()
+            target_date = now + timedelta(days=4)
             
             # 중기예보는 4일 이후 데이터만 제공하므로 조정
             now = now_kst()

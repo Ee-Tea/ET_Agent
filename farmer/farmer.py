@@ -374,9 +374,6 @@ class Farmer:
                 "execution_order": ["작물추천_agent"]
             }
 
-
-    
-
     def select_single_crop_from_recommendations(self, crop_recommendations):
         """
         작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
@@ -442,8 +439,10 @@ class Farmer:
         
         if extracted_crop and extracted_crop.strip():
             print(f"🌾 추출된 작물명: '{extracted_crop}'")
-            # 기존 selected_crop을 대체
-            state["selected_crop"] = [extracted_crop.strip()]
+            print(f"🔄 기존 작물 상태 '{state.get('selected_crop', [])}' → '{[extracted_crop.strip()]}' 대체")
+            # 기존 selected_crop을 완전히 클리어하고 새 값으로 대체
+            state["selected_crop"].clear()  # 기존 리스트 완전 클리어
+            state["selected_crop"].append(extracted_crop.strip())  # 새 값만 추가
         else:
             print("🔍 질문에서 구체적인 작물명을 찾을 수 없습니다.")
             # 기존 selected_crop 유지 (있는 경우) 또는 빈 리스트

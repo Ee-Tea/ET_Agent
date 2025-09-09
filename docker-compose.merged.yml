@@ -158,6 +158,7 @@ services:
     - LANGCHAIN_API_KEY=REDACTED}
     - GIT_PYTHON_REFRESH=quiet
     - LANGGRAPH_API_BASE=http://langgraph-api:8000
+    - LANGGRAPH_API_URL=http://langgraph-api:8000
     depends_on:
     - redis
     - langgraph-postgres

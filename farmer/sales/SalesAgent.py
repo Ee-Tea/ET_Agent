@@ -915,7 +915,7 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
         for s_query in search_queries:
             try:
                 # TavilyClient 사용 - search 메서드 호출
-                response = tavily_tool.search(query=s_query, max_results=3)
+                response = tavily_tool.search(query=s_query, max_results=5)
                 
                 # TavilyClient 응답 형식: {"results": [{"url": "", "content": "", "title": ""}]}
                 if isinstance(response, dict) and "results" in response:

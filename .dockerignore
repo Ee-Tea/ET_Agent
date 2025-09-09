@@ -111,3 +111,32 @@ frontend/build/
 # OS
 .DS_Store
 Thumbs.db
+
+# General
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.venv/
+env/
+venv/
+*.log
+
+# Frontend / node
+node_modules/
+*.map
+
+# Data / models / caches
+data/
+models/
+outputs/
+.cache/
+dist/
+build/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db

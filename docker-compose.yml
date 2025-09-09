@@ -139,7 +139,7 @@ services:
       PYTHONPATH: /deps/LLM-T
 
       LANGGRAPH_GRAPHS: >-
-        [{"id":"agent","import_path":"teacher.graph:graph"}]
+        [{"id":"agent","import_path":"graph:graph"}]
       
 
 

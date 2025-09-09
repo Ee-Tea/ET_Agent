@@ -15,7 +15,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from common.short_term.redis_memory import RedisLangGraphMemory
 from teacher.teacher import Teacher, TeacherState
 from farmer.farmer import Farmer, RouterState
-
+from langgraph.checkpoint.postgres import PostgresSaver
 
 class MainState(TypedDict):
     """라우터 상태 정의 - LangGraph StateGraph 호환"""
@@ -198,8 +198,11 @@ class MainOrchestrator:
         workflow.add_edge("handle_irrelevant", "save_memory")
         workflow.add_edge("handle_inconsistency", "save_memory")
         workflow.add_edge("finalize_response", END)
-        
-        return workflow.compile(checkpointer=MemorySaver())
+
+        db_url = os.getenv("DATABASE_URL")
+        checkpointer = PostgresSaver.from_conn_string(db_url) if db_url else MemorySaver()
+
+        return workflow.compile(checkpointer=checkpointer)
     
     def visualize_graph(self, output_path: str = "supervisor_graph.png"):
         """그래프 시각화"""

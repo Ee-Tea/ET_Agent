@@ -12,6 +12,14 @@ RUN apt-get update && apt-get install -y \
 
 # Python 의존성 설치
 COPY pyproject.toml uv.lock ./
+
+# ---- Injected: copy sources before dependency install ----
+COPY common/ ./common/
+COPY teacher/ ./teacher/
+COPY farmer/ ./farmer/
+COPY api/ ./api/
+# ---- End Injected ----
+
 RUN pip install uv && uv sync --frozen
 
 # 애플리케이션 코드 복사
@@ -26,5 +34,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
 
 # FastAPI 서버 실행
 CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
-
 

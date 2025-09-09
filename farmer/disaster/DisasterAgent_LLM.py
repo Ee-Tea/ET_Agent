@@ -109,9 +109,7 @@ class GraphState(TypedDict):
     answer_draft: Optional[str]
     store_obj: Optional[Any]
     retrieved_docs: Optional[List[Document]]
-    retry_count: int
     is_retrieval_sufficient: bool
-    is_answer_sufficient: bool
     temporal: Optional[Dict[str, Any]]
 
 def make_llm() -> ChatOpenAI:
@@ -228,16 +226,9 @@ LLM_RETRIEVAL_VALIDATION_PROMPT = ChatPromptTemplate.from_template(
 **답변 형식:**
 다음 JSON 형식으로만 답변하세요:
 {{
-    "score": 0.0-1.0 사이의 점수,
     "judgment": "SUFFICIENT" 또는 "INSUFFICIENT",
     "reason": "판단 이유를 간단히 설명"
 }}
-
-**점수 기준:**
-- 0.8-1.0: 매우 충분함 (SUFFICIENT)
-- 0.6-0.7: 충분함 (SUFFICIENT)
-- 0.4-0.5: 보통 (INSUFFICIENT)
-- 0.0-0.3: 부족함 (INSUFFICIENT)
 
 [질문]
 {question}
@@ -248,42 +239,8 @@ LLM_RETRIEVAL_VALIDATION_PROMPT = ChatPromptTemplate.from_template(
 [판단]:"""
 )
 
-LLM_ANSWER_VALIDATION_PROMPT = ChatPromptTemplate.from_template(
-    """당신은 농업재해 정보 답변 품질을 평가하는 AI 전문가입니다.
-주어진 질문, 문맥, 답변을 검토하여 답변의 품질을 판단해주세요.
-
-**평가 기준:**
-1. **정확성**: 답변이 문맥의 정보를 정확하게 반영하고 있는가?
-2. **완전성**: 질문에 대한 답변이 완전하고 포괄적인가?
-3. **관련성**: 답변이 질문과 직접적으로 관련이 있는가?
-4. **일관성**: 답변 내에서 정보가 일관성 있게 연결되어 있는가?
-5. **가독성**: 답변이 이해하기 쉽고 구조화되어 있는가?
-
-**답변 형식:**
-다음 JSON 형식으로만 답변하세요:
-{{
-    "score": 0.0-1.0 사이의 점수,
-    "judgment": "SUFFICIENT" 또는 "INSUFFICIENT",
-    "reason": "판단 이유를 간단히 설명"
-}}
-
-**점수 기준:**
-- 0.8-1.0: 매우 우수함 (SUFFICIENT)
-- 0.6-0.7: 우수함 (SUFFICIENT)
-- 0.4-0.5: 보통 (INSUFFICIENT)
-- 0.0-0.3: 부족함 (INSUFFICIENT)
-
-[질문]
-{question}
-
-[문맥]
-{context}
-
-[답변]
-{answer}
-
-[판단]:"""
-)
+# (삭제됨) LLM_ANSWER_VALIDATION_PROMPT
+# 답변 품질에 대한 2차 검증 프롬프트는 요구사항에 따라 제거되었습니다.
 
 def _has_web_results(context_text: str) -> bool:
     c = (context_text or "")
@@ -307,7 +264,7 @@ def load_store_node(state: GraphState) -> Dict[str, Any]:
     # Milvus 객체를 상태에 저장하지 않고 전역 변수로 관리
     global _vectorstore
     _vectorstore = vectorstore
-    return {**state, "retry_count": 0}
+    return {**state}
 
 def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 시간/상대시점 해석(KST 기준)")
@@ -443,7 +400,8 @@ def refine_answer_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "answer": ans.strip()}
 
 # ===== LLM 기반 검증 노드들 =====
-MAX_RETRIES = 3
+# (삭제됨) MAX_RETRIES
+# 2차 검증/재시도 로직 제거로 인해 MAX_RETRIES 상수 또한 제거합니다.
 
 def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 1차 검증 (LLM 기반 검색 품질 평가)")
@@ -477,21 +435,17 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         try:
             import json
             result_json = json.loads(result.strip())
-            score = result_json.get("score", 0.0)
             judgment = result_json.get("judgment", "INSUFFICIENT")
             reason = result_json.get("reason", "파싱 실패")
-            
-            # 점수 기준으로 SUFFICIENT/INSUFFICIENT 판단 (0.6 이상이면 SUFFICIENT)
-            SUFFICIENT_THRESHOLD = 0.6
-            is_sufficient = score >= SUFFICIENT_THRESHOLD
-            
+
+            is_sufficient = str(judgment).upper() == "SUFFICIENT"
+
             print(f"   - 📊 LLM 검증 결과:")
-            print(f"     • 점수: {score:.3f} (임계값: {SUFFICIENT_THRESHOLD})")
             print(f"     • LLM 판단: {judgment}")
             print(f"     • 최종 판단: {'SUFFICIENT' if is_sufficient else 'INSUFFICIENT'}")
             print(f"     • 이유: {reason}")
             print(f"   - 🎯 최종 결과: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
-            
+
         except json.JSONDecodeError:
             # JSON 파싱 실패 시 기존 방식으로 폴백
             result_clean = result.strip().upper()
@@ -506,52 +460,11 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         # 오류 시 기본적으로 불충분으로 판단
         return {**state, "is_retrieval_sufficient": False}
 
-def llm_answer_validation_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 2차 검증 (LLM 기반 답변 품질 평가)")
-    retry_count = state.get("retry_count", 0) + 1
+# (삭제됨) llm_answer_validation_node
+# 2차 답변 품질 평가 노드는 제거되었습니다.
 
-    question = state.get("question_resolved", state.get("question", ""))
-    context = state.get("context", "")
-    answer = state.get("answer", "")
-
-    if not all([question, context, answer]):
-        print("   - ❌ 평가 정보가 부족하여 검증을 건너뜁니다.")
-        return {**state, "is_answer_sufficient": True, "retry_count": retry_count}
-
-    try:
-        print("   - 🤖 LLM이 답변 품질을 평가 중...")
-        
-        # LLM 기반 검증 체인
-        validation_chain = (
-            {
-                "question": itemgetter("question"),
-                "context": itemgetter("context"),
-                "answer": itemgetter("answer")
-            }
-            | LLM_ANSWER_VALIDATION_PROMPT
-            | make_llm()
-            | StrOutputParser()
-        )
-        
-        result = validation_chain.invoke({
-            "question": question,
-            "context": context,
-            "answer": answer
-        })
-        
-        # 결과 파싱
-        result_clean = result.strip().upper()
-        is_sufficient = "SUFFICIENT" in result_clean
-        
-        print(f"   - 📊 LLM 검증 결과: {result.strip()}")
-        print(f"   - 🎯 최종 판단: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
-        
-        return {**state, "is_answer_sufficient": is_sufficient, "retry_count": retry_count}
-        
-    except Exception as e:
-        print(f"   - ❌ LLM 검증 중 오류 발생: {e}")
-        # 오류 시 기본적으로 충분으로 판단하여 무한 루프 방지
-        return {**state, "is_answer_sufficient": True, "retry_count": retry_count}
+# (삭제됨) fallback_answer_node
+# 2차 검증 실패 시 사용되던 폴백 노드는 제거되었습니다.
 
 # ===== 대체 답변 노드 =====
 def fallback_answer_node(state: GraphState) -> Dict[str, Any]:
@@ -570,8 +483,7 @@ def build_graph():
     g.add_node("combine_context", combine_context_node)
     g.add_node("generate_draft", generate_draft_node)
     g.add_node("refine_answer", refine_answer_node)
-    g.add_node("llm_answer_validation", llm_answer_validation_node)
-    g.add_node("fallback_answer", fallback_answer_node)
+    # 2차 검증/폴백 노드 제거
 
     g.set_entry_point("load_store")
     g.add_edge("load_store", "temporal_enrich")
@@ -587,25 +499,20 @@ def build_graph():
     g.add_edge("web_search", "combine_context")
     g.add_edge("combine_context", "generate_draft")
     g.add_edge("generate_draft", "refine_answer")
-    g.add_edge("refine_answer", "llm_answer_validation")
+    # 2차 검증 제거: 최종 답변 생성 후 바로 종료
+    g.add_edge("refine_answer", END)
 
-    # 2차 검증 결과에 따라 종료/재시도/대체 답변 결정
-    def decide_after_answer_validation(state: GraphState) -> str:
-        if state["is_answer_sufficient"]:
-            return "end"
-        elif state["retry_count"] >= MAX_RETRIES:
-            return "fallback"
-        else:
-            return "retry"
-
-    g.add_conditional_edges(
-        "llm_answer_validation",
-        decide_after_answer_validation,
-        {"end": END, "fallback": "fallback_answer", "retry": "web_search"}
-    )
-    g.add_edge("fallback_answer", END)
+    # 2차 검증 흐름 제거에 따라 관련 분기 제거 (복구 가능)
+    # 필요 시 추후 복구 가능
 
     app = g.compile()
+    try:
+        graph_image_path = "agent_workflow_openai.png"
+        with open(graph_image_path, "wb") as f:
+            f.write(app.get_graph().draw_mermaid_png())
+        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        print(f"그래프 시각화 중 오류: {e}")
     return app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========

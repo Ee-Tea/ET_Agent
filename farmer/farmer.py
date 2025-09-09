@@ -64,6 +64,7 @@ class RouterState(dict):
     routing: Annotated[Dict[str, any], merge_dicts] = {}
     error_info: Annotated[Dict[str, str], merge_dicts] = {}
     crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = []
+    milvus_data: Annotated[Dict[str, any], merge_dicts] = {}  # MilvusDB에서 주입된 데이터
 
 def signal_handler(signum, frame):
     """키보드 인터럽트 시그널 핸들러"""
@@ -203,6 +204,12 @@ class Farmer:
                 router_state["selected_crop"] = [state.get("selected_crop", "")]
             if state.get("crop_info"):
                 router_state["crop_info"] = [state.get("crop_info", "")]
+            
+            # MilvusDB 연결 정보 주입
+            if state.get("milvus_data"):
+                router_state["milvus_data"] = state.get("milvus_data", {})
+                available_collections = state.get("milvus_data", {}).get("available_collections", {})
+                print(f"🌾 MilvusDB 연결 정보 주입: {len(available_collections)}개 컬렉션")
             
             print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
             

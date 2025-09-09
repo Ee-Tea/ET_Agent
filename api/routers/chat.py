@@ -234,3 +234,14 @@ async def clear_session(request: ChatRequest):
         }
 
 
+@router.get("/sessions/{user_id}")
+async def get_user_sessions(user_id: str):
+    """사용자의 모든 채팅 세션 조회"""
+    sessions = await chat_session_service.get_user_sessions(user_id)
+    return {"sessions": sessions}
+
+@router.post("/sessions/{user_id}/{chat_id}/save")
+async def save_session(user_id: str, chat_id: str, session_data: dict):
+    """채팅 세션 저장"""
+    await chat_session_service.save_chat_session(user_id, chat_id, session_data)
+    return {"status": "saved"}

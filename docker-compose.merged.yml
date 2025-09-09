@@ -28,6 +28,40 @@ services:
     volumes:
     - ./data/redis:/data
 
+  postgres-init:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    command: |
+      sh -c "
+        # PostgresSaver 테이블 생성
+        psql -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS checkpoints (
+            thread_id TEXT PRIMARY KEY,
+            checkpoint_id TEXT NOT NULL,
+            parent_checkpoint_id TEXT,
+            checkpoint_ns TEXT,
+            checkpoint JSONB,
+            metadata JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+          CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+            thread_id TEXT,
+            checkpoint_id TEXT,
+            channel TEXT,
+            version TEXT,
+            type TEXT,
+            blob BYTEA,
+            created_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (thread_id, checkpoint_id, channel, version)
+          );
+        \"
+      "
+    depends_on:
+      - langgraph-postgres
+
   langgraph-postgres:
     image: postgres:16
     ports:
@@ -78,6 +112,7 @@ services:
         condition: service_healthy
       langgraph-postgres:
         condition: service_healthy
+      - postgres-init
     env_file:
     - .env
     environment:
@@ -109,6 +144,7 @@ services:
     - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
     - LANGCHAIN_API_KEY=REDACTED}
     - GIT_PYTHON_REFRESH=quiet
+    - LANGGRAPH_API_BASE=http://langgraph-api:8000
     depends_on:
     - redis
     - langgraph-postgres

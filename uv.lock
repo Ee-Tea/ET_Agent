@@ -359,6 +359,15 @@ wheels = [
 ]
 
 [[package]]
+name = "chardet"
+version = "5.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/0d/f7b6ab21ec75897ed80c17d79b15951a719226b9fababf1e40ea74d69079/chardet-5.2.0.tar.gz", hash = "sha256:1b3b6ff479a8c414bc3fa2c0852995695c4a026dcd6d0633b2dd092ca39c1cf7", size = 2069618, upload-time = "2023-08-01T19:23:02.662Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/6f/f5fbc992a329ee4e0f288c1fe0e2ad9485ed064cac731ed2fe47dcc38cbf/chardet-5.2.0-py3-none-any.whl", hash = "sha256:e1cf59446890a00105fe7b7912492ea04b6e6f06d4b742b2c788469e34c82970", size = 199385, upload-time = "2023-08-01T19:23:00.661Z" },
+]
+
+[[package]]
 name = "charset-normalizer"
 version = "3.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1938,6 +1947,7 @@ dependencies = [
     { name = "alembic" },
     { name = "any" },
     { name = "authlib" },
+    { name = "chardet" },
     { name = "datasets" },
     { name = "ddgs" },
     { name = "docling" },
@@ -1965,6 +1975,7 @@ dependencies = [
     { name = "numpy" },
     { name = "openai" },
     { name = "opencv-python" },
+    { name = "pandas" },
     { name = "passlib", extra = ["bcrypt"] },
     { name = "pdfminer-six" },
     { name = "pdfplumber" },
@@ -1991,6 +2002,7 @@ dependencies = [
     { name = "tavily-python" },
     { name = "tiktoken" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "transformers" },
     { name = "uvicorn" },
     { name = "wikipedia" },
@@ -2001,6 +2013,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "any", specifier = ">=0.0.2" },
     { name = "authlib", specifier = ">=1.3.0" },
+    { name = "chardet", specifier = ">=5.2.0" },
     { name = "datasets", specifier = ">=4.0.0" },
     { name = "ddgs", specifier = ">=9.5.2" },
     { name = "docling", specifier = ">=2.43.0" },
@@ -2028,6 +2041,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.21.0" },
     { name = "openai", specifier = ">=1.98.0" },
     { name = "opencv-python", specifier = ">=4.12.0.88" },
+    { name = "pandas", specifier = ">=2.3.2" },
     { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7.4" },
     { name = "pdfminer-six", specifier = ">=20231228" },
     { name = "pdfplumber", specifier = ">=0.11.7" },
@@ -2054,6 +2068,7 @@ requires-dist = [
     { name = "tavily-python", specifier = ">=0.3.0" },
     { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "torch", specifier = ">=2.0.0" },
+    { name = "tqdm", specifier = ">=4.67.1" },
     { name = "transformers", specifier = ">=4.35.0" },
     { name = "uvicorn", specifier = ">=0.29.0" },
     { name = "wikipedia", specifier = ">=1.4.0" },

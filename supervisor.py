@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from api.services.chat_session_services import ChatSessionService
 from common.short_term.redis_memory import RedisLangGraphMemory
 from teacher.teacher import Teacher, TeacherState
 from farmer.farmer import Farmer, RouterState
@@ -47,6 +48,7 @@ class MainOrchestrator:
         self.user_id = user_id
         self.chat_id = chat_id
         self.session_key = f"{user_id}_{chat_id}"
+        self.chat_session_service = ChatSessionService(os.getenv("DATABASE_URL"))
         
         # LLM 초기화
         self.llm = ChatOpenAI(
@@ -70,6 +72,20 @@ class MainOrchestrator:
         self.graph = self._create_graph()
         
         print(f"✅ MainOrchestrator 초기화 완료 (session: {self.session_key})")
+
+    async def initialize(self):
+        """초기화 - 테이블 생성 및 연결 풀 설정"""
+        await self.chat_session_service.init_pool()
+        await self.chat_session_service.create_tables_if_not_exists()
+    
+    
+    async def save_session(self, state: MainState):
+        """세션 데이터 저장"""
+        await self.chat_session_service.save_chat_session(
+            self.user_id, 
+            self.chat_id, 
+            dict(state)
+        )
     
     def load_recent_questions(self, limit: int = 10) -> List[Dict[str, Any]]:
         """최근 생성된 문제들을 불러오기 (added_count 사용)"""
@@ -203,10 +219,8 @@ class MainOrchestrator:
         workflow.add_edge("handle_inconsistency", "save_memory")
         workflow.add_edge("finalize_response", END)
 
-        db_url = os.getenv("DATABASE_URL")
-        checkpointer = PostgresSaver.from_conn_string(db_url) if db_url else MemorySaver()
 
-        return workflow.compile(checkpointer=checkpointer)
+        return workflow.compile(checkpointer=MemorySaver())
     
     def visualize_graph(self, output_path: str = "supervisor_graph.png"):
         """그래프 시각화"""
@@ -598,6 +612,15 @@ class MainOrchestrator:
             
         except Exception as e:
             print(f"❌ 메모리 저장 실패: {e}")
+
+    
+        try:
+            # 세션 상태 저장
+            import asyncio
+            asyncio.run(self.save_session(state))
+            print("💾 세션 상태 저장 완료")
+        except Exception as e:
+            print(f"❌ 세션 상태 저장 실패: {e}")
         
         return state
     

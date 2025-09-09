@@ -5,6 +5,7 @@
 from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from datetime import datetime
+from ..services import chat_session_service
 
 from ..models import (
     ChatRequest, ChatResponse, 
@@ -38,7 +39,7 @@ async def chat(request: ChatRequest):
             user_query=request.message,
             config={
                 "configurable": {
-                    "thread_id": f"teacher:{request.user_id}:{request.chat_id}",
+                    "thread_id": f"supervisor:{request.user_id}:{request.chat_id}"
                 }
             }
         )
@@ -156,7 +157,7 @@ async def chat_stream(request: ChatRequest):
                 user_query=request.message,
                 config={
                     "configurable": {
-                        "thread_id": f"teacher:{request.user_id}:{request.chat_id}",
+                        "thread_id": f"supervisor:{request.user_id}_{request.chat_id}",
                     }
                 }
             )

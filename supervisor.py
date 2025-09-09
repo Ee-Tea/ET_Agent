@@ -508,7 +508,14 @@ class MainOrchestrator:
             }
             
             # Farmer 그래프 실행
-            result = self.farmer.invoke(farmer_state)
+            config = {
+                "configurable": {
+                    "thread_id": f"farmer:{self.user_id}:{self.chat_id}",
+                    "checkpoint_ns": "farmer",
+                    "checkpoint_id": f"farmer_{self.session_key}"
+                }
+            }
+            result = self.farmer.invoke(farmer_state, config)
             
             state["farmer_result"] = result
             print("🌾 Farmer 실행 완료")
@@ -548,7 +555,7 @@ class MainOrchestrator:
             # Teacher 그래프 실행 (config 추가)
             config = {
                 "configurable": {
-                    "thread_id": f"{self.user_id}_{self.chat_id}",
+                    "thread_id": f"teacher:{self.user_id}:{self.chat_id}",  # 수정
                     "checkpoint_ns": "teacher",
                     "checkpoint_id": f"teacher_{self.session_key}"
                 }
@@ -683,7 +690,7 @@ class MainOrchestrator:
         try:
             config = {
                 "configurable": {
-                    "thread_id": self.session_key,
+                    "thread_id": f"supervisor:{self.user_id}:{self.chat_id}",
                     "checkpoint_ns": "supervisor",
                     "checkpoint_id": f"supervisor_{self.session_key}"
                 }

@@ -164,6 +164,7 @@ services:
     depends_on:
     - redis
     - langgraph-postgres
+    - langgraph-api
     volumes:
     - ./api:/app/api
     - ./main.py:/app/main.py

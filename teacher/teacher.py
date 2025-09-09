@@ -450,7 +450,8 @@ class Teacher:
                 "session": state.get("session", {}),
                 "artifacts": state.get("artifacts", {}),
                 "routing": state.get("routing", {}),
-                "llm_response": state.get("llm_response", "")
+                "llm_response": state.get("llm_response", ""),
+                "milvus_data": state.get("milvus_data", {})
             }
             
             # 워크플로우 실행
@@ -907,7 +908,14 @@ class Teacher:
                 print(problem_payload["question"], problem_payload["options"])
                 
                 try:
-                    agent_result = agent.invoke(user_problem=q, user_problem_options=opts, user_input_txt=state.get("user_query", ""))
+                    # MilvusDB 데이터 전달
+                    milvus_data = state.get("milvus_data", {})
+                    agent_result = agent.invoke(
+                        user_problem=q, 
+                        user_problem_options=opts, 
+                        user_input_txt=state.get("user_query", ""),
+                        milvus_data=milvus_data
+                    )
                 except Exception as e:
                     # HITL interrupt 전파 처리
                     try:
@@ -985,11 +993,14 @@ class Teacher:
                     pending_feedback = getattr(self, "_pending_user_feedback", None)
                     if pending_feedback:
                         print("🧩 상위 피드백 주입 → 서브그래프 최초 상태 전달")
+                    # MilvusDB 데이터 전달
+                    milvus_data = state.get("milvus_data", {})
                     agent_result = agent.invoke(
                         user_problem=q, 
                         user_problem_options=opts, 
                         user_input_txt=state.get("user_query", ""),
-                        user_feedback=pending_feedback if pending_feedback else None
+                        user_feedback=pending_feedback if pending_feedback else None,
+                        milvus_data=milvus_data
                     )
                     print(f"✅ 추출된 문제 풀이 완료")
                     
@@ -1088,10 +1099,13 @@ class Teacher:
                     generated_explanations.append("")
                     continue
                 try:
+                    # MilvusDB 데이터 전달
+                    milvus_data = state.get("milvus_data", {})
                     agent_result = agent.invoke(
                         user_problem=q,
                         user_problem_options=opts,
-                        user_input_txt=state.get("user_query", "")
+                        user_input_txt=state.get("user_query", ""),
+                        milvus_data=milvus_data
                     )
                 except Exception as e:
                     print(f"❌ SolutionAgent invoke 실행 실패(선택 {i}/{len(sel_questions)}): {e}")
@@ -1156,7 +1170,8 @@ class Teacher:
                         agent_result = agent.invoke(
                             user_problem=q,
                             user_problem_options=opts,
-                            user_input_txt=state.get("user_query", "")
+                            user_input_txt=state.get("user_query", ""),
+                            milvus_data=state.get("milvus_data", {})
                         )
                     except Exception as e:
                         print(f"❌ SolutionAgent invoke 실행 실패(최근 추가 {i}/{len(recent_questions)}): {e}")

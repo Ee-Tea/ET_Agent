@@ -57,8 +57,6 @@ class GraphState(TypedDict):
     missing_info_types: List[str]
     used_web_search: bool
     validation_details: Optional[dict]
-    ragas_scores: Optional[Dict[str, float]]
-    ragas_passed: bool
 
 # 키워드 추출
 def extract_keywords(query):
@@ -647,62 +645,99 @@ def validate_prices(original_context, pred_answer):
     
     simple_answer_matches = re.findall(r'(\d{4,})원', pred_answer)
     answer_prices.extend(simple_answer_matches)
+
+    # 가격 중복 제거 함수 (1개만 제거)
+    def remove_one_duplicate_price(prices):
+        # 가격을 길이순으로 정렬 (긴 것부터)
+        sorted_prices = sorted(prices, key=len, reverse=True)
+        
+        result = []
+        removed_count = {}  # 각 가격이 몇 개 제거되었는지 추적
+        
+        for price in sorted_prices:
+            # 더 긴 가격에 포함되어 있는지 확인
+            is_contained = any(price in longer_price and price != longer_price for longer_price in result)
+            
+            if is_contained:
+                # 이미 1개를 제거했다면 더 이상 제거하지 않음
+                if removed_count.get(price, 0) == 0:
+                    removed_count[price] = 1  # 1개만 제거
+                    continue
+            
+            result.append(price)
+        
+        return result
     
-    # 원본 가격의 출현 횟수 계산
+    # 가격 정규화 함수 (콤마 제거 후 숫자로 변환)
+    def normalize_price(price_str):
+        try:
+            return int(price_str.replace(',', ''))
+        except (ValueError, AttributeError):
+            return None
+
+    # 중복 제거 적용
+    context_prices_cleaned = remove_one_duplicate_price(context_prices)
+    answer_prices_cleaned = remove_one_duplicate_price(answer_prices)
+    
+    # 정규화된 가격으로 변환
+    context_prices_normalized = [normalize_price(p) for p in context_prices_cleaned if normalize_price(p) is not None]
+    answer_prices_normalized = [normalize_price(p) for p in answer_prices_cleaned if normalize_price(p) is not None]
+    
+    # 원본 가격의 출현 횟수 계산 (정규화된 가격 기준)
     context_price_count = {}
-    for price in context_prices:
+    for price in context_prices_normalized:
         context_price_count[price] = context_price_count.get(price, 0) + 1
     
-    # 1:1 매칭 검증 (순서대로, 정확한 매칭만, 중복 제한)
+    # 1:1 매칭 검증 (정규화된 가격으로 비교)
     matched_prices = []
     missing_prices = []
     hallucination_prices = []
     used_answer_indices = set()  # 이미 사용된 답변 인덱스
     matched_price_count = {}  # 매칭된 가격의 횟수 추적
     
-    # 원본 가격을 순서대로 확인
-    for i, context_price in enumerate(context_prices):
+    # 원본 가격을 순서대로 확인 (정규화된 가격 기준)
+    for i, context_price_norm in enumerate(context_prices_normalized):
         matched = False
         
-        # 답변에서 정확히 일치하는 가격 찾기
-        for j, answer_price in enumerate(answer_prices):
+        # 답변에서 정확히 일치하는 가격 찾기 (정규화된 가격 기준)
+        for j, answer_price_norm in enumerate(answer_prices_normalized):
             if j in used_answer_indices:
                 continue
             
             # 이미 해당 가격을 최대 허용 횟수만큼 매칭했다면 건너뛰기
-            if context_price in matched_price_count:
-                current_count = matched_price_count[context_price]
-                max_allowed = context_price_count[context_price]
+            if context_price_norm in matched_price_count:
+                current_count = matched_price_count[context_price_norm]
+                max_allowed = context_price_count[context_price_norm]
                 if current_count >= max_allowed:
                     continue
             
-            # 정확한 매칭만 허용
-            if context_price == answer_price:
-                matched_prices.append(context_price)
+            # 정규화된 가격으로 정확한 매칭
+            if context_price_norm == answer_price_norm:
+                matched_prices.append(context_prices_cleaned[i])  # 원본 문자열 저장
                 used_answer_indices.add(j)
-                matched_price_count[context_price] = matched_price_count.get(context_price, 0) + 1
+                matched_price_count[context_price_norm] = matched_price_count.get(context_price_norm, 0) + 1
                 matched = True
                 break
         
         if not matched:
-            missing_prices.append(context_price)
+            missing_prices.append(context_prices_cleaned[i])  # 원본 문자열 저장
     
-    # 할루시네이션 가격이 있는지 확인 (LLM 답변에 원본에 없는 가격이 있는지)
-    for j, answer_price in enumerate(answer_prices):
+    # 할루시네이션 가격이 있는지 확인 (정규화된 가격 기준)
+    for j, answer_price_norm in enumerate(answer_prices_normalized):
         if j not in used_answer_indices:
-            # 원본에 없는 가격인지 확인 (정확한 매칭만)
+            # 원본에 없는 가격인지 확인 (정규화된 가격 기준)
             is_original = False
-            for context_price in context_prices:
-                if answer_price == context_price:
+            for context_price_norm in context_prices_normalized:
+                if answer_price_norm == context_price_norm:
                     is_original = True
                     break
             
             if not is_original:
-                hallucination_prices.append(f"원본에 없는 가격: {answer_price}")
+                hallucination_prices.append(f"원본에 없는 가격: {answer_prices_cleaned[j]}")
     
-    # 중복 매칭 문제 확인 (LLM 답변에서 원본보다 많이 나오는 가격)
+    # 중복 매칭 문제 확인 (정규화된 가격 기준)
     answer_price_count = {}
-    for price in answer_prices:
+    for price in answer_prices_normalized:
         answer_price_count[price] = answer_price_count.get(price, 0) + 1
     
     for price, answer_count in answer_price_count.items():
@@ -710,8 +745,8 @@ def validate_prices(original_context, pred_answer):
         if answer_count > context_count:
             hallucination_prices.append(f"가격 중복 할루시네이션: {price} (원본 {context_count}회, 답변 {answer_count}회)")
     
-    # 가격 매칭 점수 계산 (100% 매칭되어야만 점수 부여)
-    price_match_score = len(matched_prices) / len(context_prices)
+    # 가격 매칭 점수 계산 (정규화된 가격 기준)
+    price_match_score = len(matched_prices) / len(context_prices_normalized) if context_prices_normalized else 0
     is_perfect_match = price_match_score == 1.0
     
     # 검증 로직
@@ -933,115 +968,13 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
     
     return supplemented_context
 
-# ===============================
-# RAGAS 검증
-# ===============================
-def node_ragas_validation(state: GraphState) -> GraphState:
-    """RAGAS를 사용하여 답변 품질을 평가합니다."""
-    print("📊 RAGAS 검증 중...")
-    
-    # RAGAS 임계값 설정
-    CONTEXT_PRECISION_THRESHOLD = 0.7
-    FAITHFULNESS_THRESHOLD = 0.65
-    ANSWER_RELEVANCY_THRESHOLD = 0.45
-    
-    try:
-        # SalesRAGAS 모듈에서 필요한 함수들 import
-        from .SalesRAGAS import SalesRAGASEvaluator
-        
-        # 평가기 초기화
-        evaluator = SalesRAGASEvaluator()
-        
-        # 현재 상태에서 평가 데이터 준비
-        question = state["query"]
-        answer = state["pred_answer"]
-        context = state["context"]
-        
-        # 컨텍스트를 문자열로 변환 (SalesRAGAS의 _format_context 메서드 활용)
-        context_str = evaluator._format_context(context)
-        
-        # asyncio.gather() 사용
-        async def run_ragas_evaluation():
-            return await evaluator._evaluate_single_ragas_simple(
-                question, answer, context_str
-            )
-        
-        # 스레드 격리로 비동기 실행
-        def run_ragas_in_thread():
-            try:
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    return new_loop.run_until_complete(run_ragas_evaluation())
-                finally:
-                    new_loop.close()
-                    asyncio.set_event_loop(None)
-            except Exception as e:
-                print(f"   - ⚠️ 스레드 내 RAGAS 평가 실패: {e}")
-                return None
-        
-        result_container = [None]
-        def thread_target():
-            result_container[0] = run_ragas_in_thread()
-        
-        print("   - 🔄 RAGAS 평가 실행 중...")
-        thread = threading.Thread(target=thread_target)
-        thread.start()
-        thread.join()
-        print("   - ✅ RAGAS 평가 완료!")
-        
-        ragas_scores = result_container[0]
-        
-        if ragas_scores:
-            state["ragas_scores"] = ragas_scores
-            print(f"✅ RAGAS 검증 완료:")
-            
-            # 임계값 확인
-            context_precision_score = ragas_scores.get('context_precision', 0.0)
-            faithfulness_score = ragas_scores.get('faithfulness', 0.0)
-            answer_relevancy_score = ragas_scores.get('answer_relevancy', 0.0)
-            
-            # 임계값 미달 시 실패 처리 (모든 메트릭이 임계값을 넘어야 통과)
-            if (context_precision_score < CONTEXT_PRECISION_THRESHOLD or 
-                faithfulness_score < FAITHFULNESS_THRESHOLD or 
-                answer_relevancy_score < ANSWER_RELEVANCY_THRESHOLD):
-                state["ragas_passed"] = False
-                print("❌ RAGAS 임계값 미달로 실패")
-            else:
-                state["ragas_passed"] = True
-                print("✅ RAGAS 임계값 통과")
-        else:
-            state["ragas_scores"] = {}
-            state["ragas_passed"] = False
-            print("⚠️ RAGAS 검증 실패")
-        
-    except Exception as e:
-        print(f"❌ RAGAS 검증 중 오류 발생: {e}")
-        state["ragas_scores"] = {}
-        state["ragas_passed"] = False
-    
-    return state
 
 # ===============================
 # 최종 답변
 # ===============================
 def node_output_graph(state: GraphState) -> GraphState:
-    # RAGAS 검증 결과 확인
-    ragas_passed = state.get("ragas_passed", False)
-    
-    # RAGAS 임계값 미달 시 실패 메시지 출력
-    if not ragas_passed:
-        state["final_answer"] = "죄송합니다. 해당 작물과 지역에 대한 시세 또는 판매처 정보를 찾을 수 없습니다. 혹시 다른 작물이나 지역을 찾아드릴까요?"
-    else:
-        # RAGAS 통과 시 정상 답변 출력
-        state["final_answer"] = f"{state['pred_answer']}"
-    
-    # RAGAS 점수가 있으면 출력
-    if state.get("ragas_scores"):
-        print(f"\n📊 RAGAS 평가 결과:")
-        for metric, score in state["ragas_scores"].items():
-            print(f"  - {metric}: {score:.3f}")
-    
+    # 최종 답변 출력
+    state["final_answer"] = state['pred_answer']
     return state
 
 # ===============================
@@ -1056,7 +989,6 @@ graph.add_node("llm_summarize", node_llm_summarize_graph)
 graph.add_node("judge_recommendation", node_judge_recommendation_graph)
 graph.add_node("web_search_supplement", node_web_search_supplement)  # 웹 검색 노드 추가
 graph.add_node("reanalyze", node_reanalyze_graph)
-graph.add_node("ragas_validation", node_ragas_validation)  # RAGAS 검증 노드 추가
 graph.add_node("output", node_output_graph)
 
 graph.add_edge("input", "classify_question")
@@ -1066,7 +998,7 @@ graph.add_edge("collect_info", "llm_summarize")
 # 회귀자 여부
 def summarize_branch(state: GraphState) -> str:
     if state.get("used_web_search"):
-        return "ragas_validation"  # 웹 검색 후에도 RAGAS 검증으로
+        return "output"  # 웹 검색 후 바로 출력
     else:
         return "judge_recommendation"
 
@@ -1076,7 +1008,7 @@ def judge_branch(state: GraphState) -> str:
         return END
     
     if state.get("is_recommend_ok"):
-        return "ragas_validation"  # 자가 검증 통과 시 RAGAS 검증으로 이동
+        return "output"  # 자가 검증 통과 시 바로 출력
     
     # 자가 검증 실패 시: 1회 재시도 후 웹 검색
     if state["retry_count"] < 1:
@@ -1089,7 +1021,7 @@ graph.add_conditional_edges(
     "llm_summarize",
     summarize_branch,
     {
-        "ragas_validation": "ragas_validation",  # RAGAS 검증으로 변경
+        "output": "output",  # 바로 출력으로 변경
         "judge_recommendation": "judge_recommendation",
     },
 )
@@ -1098,14 +1030,13 @@ graph.add_conditional_edges(
     "judge_recommendation", 
     judge_branch,
     {
-        "ragas_validation": "ragas_validation",  # RAGAS 검증으로 변경
+        "output": "output",  # 바로 출력으로 변경
         "web_search_supplement": "web_search_supplement",  # 웹 검색 분기 추가
         "reanalyze": "reanalyze"
     }
 )
 graph.add_edge("web_search_supplement", "llm_summarize")  # 웹 검색 후 LLM으로
 graph.add_edge("reanalyze", "llm_summarize")  # 재분석 후 LLM으로
-graph.add_edge("ragas_validation", "output")  # RAGAS 검증 후 output으로
 graph.add_edge("output", END)
 
 graph.set_entry_point("input")
@@ -1162,7 +1093,7 @@ if __name__ == "__main__":
     #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
     # except Exception as e:
     #     print(f"그래프 시각화 중 오류 발생: {e}")
-    result_state = app.invoke({"query": "경주에 위치한 농산물 직매장 정보를 알려주고 알배기배추 가격도 알려줘봐"})
+    result_state = app.invoke({"query": "대구에 위치한 농산물 직매장 정보를 알려주고 알배기배추 가격도 알려줘봐"})
     
     print("\n" + "=" * 50)
     if result_state.get('final_answer'):

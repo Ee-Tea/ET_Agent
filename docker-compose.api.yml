@@ -28,31 +28,31 @@ services:
       - et-agent-network
     restart: unless-stopped
 
-  # Redis (기존)
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - et-agent-network
-    restart: unless-stopped
+  # # Redis (기존)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   networks:
+  #     - et-agent-network
+  #   restart: unless-stopped
 
-  # PostgreSQL (기존)
-  postgres:
-    image: postgres:16
-    environment:
-      - POSTGRES_DB=langgraph
-      - POSTGRES_USER=langgraph
-      - POSTGRES_PASSWORD=langgraph
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - et-agent-network
-    restart: unless-stopped
+  # # PostgreSQL (기존)
+  # postgres:
+  #   image: postgres:16
+  #   environment:
+  #     - POSTGRES_DB=langgraph
+  #     - POSTGRES_USER=langgraph
+  #     - POSTGRES_PASSWORD=langgraph
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - et-agent-network
+  #   restart: unless-stopped
 
   # Nginx (로드 밸런서)
   nginx:

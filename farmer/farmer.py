@@ -64,6 +64,7 @@ class RouterState(dict):
     routing: Annotated[Dict[str, any], merge_dicts] = {}
     error_info: Annotated[Dict[str, str], merge_dicts] = {}
     crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = []
+    milvus_data: Annotated[Dict[str, any], merge_dicts] = {}  # MilvusDB에서 주입된 데이터
 
 def signal_handler(signum, frame):
     """키보드 인터럽트 시그널 핸들러"""
@@ -203,6 +204,12 @@ class Farmer:
                 router_state["selected_crop"] = [state.get("selected_crop", "")]
             if state.get("crop_info"):
                 router_state["crop_info"] = [state.get("crop_info", "")]
+            
+            # MilvusDB 연결 정보 주입
+            if state.get("milvus_data"):
+                router_state["milvus_data"] = state.get("milvus_data", {})
+                available_collections = state.get("milvus_data", {}).get("available_collections", {})
+                print(f"🌾 MilvusDB 연결 정보 주입: {len(available_collections)}개 컬렉션")
             
             print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
             
@@ -412,7 +419,7 @@ class Farmer:
         print(f"=== 🎯 병렬 에이전트 실행 완료 ===")
         return state
 
-    async def execute_agent_with_boundaries(self, agent_name, question_part):
+    async def execute_agent_with_boundaries(self, agent_name, question_part, milvus_data: dict = None):
         agent_func = self.agent_functions.get(agent_name)
         if not agent_func:
             return f"{agent_name} 실행 함수가 연결되어 있지 않습니다."
@@ -421,6 +428,8 @@ class Farmer:
 
         try:
             agent_state = {"query": agent_prompt}
+            if milvus_data:
+                agent_state["milvus_data"] = milvus_data
             
             # 모든 에이전트가 비동기 함수이므로 await 사용
             agent_result = await agent_func(agent_state)
@@ -431,7 +440,7 @@ class Farmer:
         except Exception as e:
             return f"에이전트 실행 중 오류: {e}"
     
-    def run_agent_with_interrupt_support(self, agent_name: str, question_part: str) -> str:
+    def run_agent_with_interrupt_support(self, agent_name: str, question_part: str, milvus_data: dict = None) -> str:
         """
         인터럽트 지원이 가능한 에이전트 실행 함수
         
@@ -451,7 +460,7 @@ class Farmer:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    return loop.run_until_complete(self.execute_agent_with_boundaries(agent_name, question_part))
+                    return loop.run_until_complete(self.execute_agent_with_boundaries(agent_name, question_part, milvus_data))
                 finally:
                     loop.close()
                     asyncio.set_event_loop(None)
@@ -637,9 +646,14 @@ class Farmer:
             question_part = f"{selected_crop} {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
 
+        # MilvusDB 데이터 추가
+        milvus_data = state.get("milvus_data", {})
+        if milvus_data:
+            print(f"🔍 MilvusDB 데이터 사용: {milvus_data.get('connection_status', False)}")
+        
         # 인터럽트 지원 스레드 실행
         print("🚀 작물재배_agent 실행 시작 (Ctrl+C로 중단 가능)")
-        answer = self.run_agent_with_interrupt_support("작물재배_agent", question_part)
+        answer = self.run_agent_with_interrupt_support("작물재배_agent", question_part, milvus_data)
         
         # 전용 키에 답변 저장
         state["agent_results"]["작물재배_agent"] = answer
@@ -671,9 +685,14 @@ class Farmer:
             question_part = f"{selected_crop} 재배 중, {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
         
+        # MilvusDB 데이터 추가
+        milvus_data = state.get("milvus_data", {})
+        if milvus_data:
+            print(f"🔍 MilvusDB 데이터 사용: {milvus_data.get('connection_status', False)}")
+        
         # 인터럽트 지원 스레드 실행
         print("🚀 재해_agent 실행 시작 (Ctrl+C로 중단 가능)")
-        answer = self.run_agent_with_interrupt_support("재해_agent", question_part)
+        answer = self.run_agent_with_interrupt_support("재해_agent", question_part, milvus_data)
         
         # 전용 키에 답변 저장
         state["agent_results"]["재해_agent"] = answer
@@ -705,9 +724,14 @@ class Farmer:
             question_part = f"{selected_crop} {question_part}"
             print(f"[🔄 수정된 질문 ] {question_part}")
         
+        # MilvusDB 데이터 추가
+        milvus_data = state.get("milvus_data", {})
+        if milvus_data:
+            print(f"🔍 MilvusDB 데이터 사용: {milvus_data.get('connection_status', False)}")
+        
         # 인터럽트 지원 스레드 실행
         print("🚀 판매처_agent 실행 시작 (Ctrl+C로 중단 가능)")
-        answer = self.run_agent_with_interrupt_support("판매처_agent", question_part)
+        answer = self.run_agent_with_interrupt_support("판매처_agent", question_part, milvus_data)
         
         # 전용 키에 답변 저장
         state["agent_results"]["판매처_agent"] = answer
@@ -736,9 +760,14 @@ class Farmer:
         # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
         # (날씨는 지역과 시간이 중요하므로)
         
+        # MilvusDB 데이터 추가
+        milvus_data = state.get("milvus_data", {})
+        if milvus_data:
+            print(f"🔍 MilvusDB 데이터 사용: {milvus_data.get('connection_status', False)}")
+        
         # 인터럽트 지원 스레드 실행
         print("🚀 날씨_agent 실행 시작 (Ctrl+C로 중단 가능)")
-        answer = self.run_agent_with_interrupt_support("날씨_agent", question_part)
+        answer = self.run_agent_with_interrupt_support("날씨_agent", question_part, milvus_data)
         
         # 전용 키에 답변 저장
         state["agent_results"]["날씨_agent"] = answer

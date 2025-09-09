@@ -105,27 +105,45 @@ class Farmer:
         print("📝 메모리 시스템: Main에서 중앙집중식 관리")
     
     def load_state(self, state: RouterState) -> RouterState:
-        """그래프 시작 시 상태 초기화"""
-        return self._initialize_clean_state(state)
-    
-    def _initialize_clean_state(self, state: RouterState) -> RouterState:
-        """깨끗한 상태로 초기화"""
-        # 모든 상태 초기화
-        state.clear()
+        """그래프 시작 시 상태 초기화 - supervisor에서 query와 selected_crop만 받음"""
+        print(f"📋 상태 로딩 시작...")
+        
+        # supervisor에서 전달받은 상태들 백업 (query, selected_crop만)
+        received_query = state.get("query", [])
+        received_selected_crop = state.get("selected_crop", [])
+        
+        print(f"📥 Supervisor에서 받은 상태들:")
+        print(f"  - query: {received_query}")
+        print(f"  - selected_crop: {received_selected_crop}")
+        
+        # 기본 상태 설정
         state["session"] = {"loaded": True, "new_question": True}
-        state["query"] = []
         state["selected_agents"] = []
         state["question_parts"] = {}
         state["execution_order"] = []
         state["crop_info"] = []
-        state["selected_crop"] = []
         state["agent_results"] = {}
         state["output"] = []
         state["routing"] = {}
         state["error_info"] = {}
         state["crop_recommendation_failed"] = []
         state["artifacts"] = {}
-    
+        
+        # supervisor에서 받은 상태들 복원
+        if received_query:
+            state["query"] = received_query if isinstance(received_query, list) else [received_query]
+        else:
+            state["query"] = []
+            
+        if received_selected_crop:
+            state["selected_crop"] = received_selected_crop if isinstance(received_selected_crop, list) else [received_selected_crop]
+        else:
+            state["selected_crop"] = []
+        
+        print(f"✅ 상태 로딩 완료:")
+        print(f"  - query: {state['query']}")
+        print(f"  - selected_crop: {state['selected_crop']}")
+        
         return state
     
     def persist_state(self, state: RouterState) -> RouterState:
@@ -197,16 +215,16 @@ class Farmer:
             # 인터럽트 플래그 초기화 (새로운 요청 시작)
             _interrupt_flag.clear()
             
-            # RouterState로 변환하고 초기 상태 설정
+            # RouterState로 변환하고 Supervisor에서 전달받은 상태들을 반영 (query, selected_crop만)
             router_state = RouterState()
-            router_state["query"] = [state.get("query", "")]
-            router_state["session"] = {"loaded": True, "new_question": True}
             
-            # Supervisor에서 전달받은 상태 정보를 반영
+            # Supervisor에서 받는 상태들
+            router_state["query"] = [state.get("query", "")] if state.get("query") else []
+            
             if state.get("selected_crop"):
-                router_state["selected_crop"] = [state.get("selected_crop", "")]
-            if state.get("crop_info"):
-                router_state["crop_info"] = [state.get("crop_info", "")]
+                router_state["selected_crop"] = [state.get("selected_crop")] if isinstance(state.get("selected_crop"), str) else state.get("selected_crop", [])
+            else:
+                router_state["selected_crop"] = []
             
             print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
             
@@ -402,27 +420,83 @@ class Farmer:
 
     @traceable(name="node_input")
     def node_input(self, state: RouterState) -> RouterState:
-        while True:
-            user_input = input("\n사용자 입력: ").strip()
-            
-            # 빈 입력인 경우 다시 요청
-            if not user_input:
-                print("❌ 입력이 비어 있습니다. 다시 입력해주세요.")
-                continue
-                
-            # 유효한 입력인 경우 루프 종료
-            break
-
-        # 새로운 질문 플래그 설정
-            state.setdefault("session", {})
-            state["session"]["new_question"] = True
+        """사용자 질문에서 작물명을 추출하는 노드"""
+        print(f"\n=== 🌱 질문 분석 및 작물명 추출 ===")
         
-        # 새로운 질문 저장
-        state["query"] = [user_input]
-        print(f"\n[질문] {user_input}")
+        # 현재 상태에서 query 가져오기
+        query = state.get("query", [])
+        user_input = query[0] if query and len(query) > 0 else ""
+        
+        if not user_input:
+            print("❌ 질문이 없습니다.")
+            return state
+        
+        print(f"📝 분석할 질문: {user_input}")
+        
+        # 새로운 질문 플래그 설정
+        state.setdefault("session", {})
+        state["session"]["new_question"] = True
+        
+        # 질문에서 작물명 추출
+        extracted_crop = self.extract_crop_from_question(user_input)
+        
+        if extracted_crop and extracted_crop.strip():
+            print(f"🌾 추출된 작물명: '{extracted_crop}'")
+            # 기존 selected_crop을 대체
+            state["selected_crop"] = [extracted_crop.strip()]
+        else:
+            print("🔍 질문에서 구체적인 작물명을 찾을 수 없습니다.")
+            # 기존 selected_crop 유지 (있는 경우) 또는 빈 리스트
+            if not state.get("selected_crop"):
+                state["selected_crop"] = []
+        
+        print(f"📋 최종 작물 상태: {state['selected_crop']}")
         print(f"[새로운 질문 처리 시작]")
         
         return state
+    
+    def extract_crop_from_question(self, question: str) -> str:
+        """질문에서 작물명을 추출하는 LLM 함수"""
+        print(f"🤖 LLM으로 작물명 추출 중...")
+        
+        extraction_prompt = f"""
+        사용자의 질문에서 구체적인 작물명을 추출해주세요.
+        
+        [추출 규칙]
+        1. 구체적인 작물명만 추출 (예: 토마토, 상추, 무, 배추, 고구마, 감자 등)
+        2. 일반적인 용어는 제외 (예: 작물, 채소, 농작물, 식물 등)
+        3. 작물명이 없으면 "없음"만 답변
+        4. 작물명만 한 단어로 답변 (설명이나 문장 금지)
+        
+        [예시]
+        - "토마토 키우는 방법 알려줘" → "토마토"
+        - "알배기배추 가격이 궁금해" → "알배기배추"
+        - "감자랑 고구마 중에 뭐가 좋을까?" → "감자"
+        - "어떤 작물을 심을까요?" → "없음"
+        - "농작물 재배 방법" → "없음"
+        
+        질문: "{question}"
+        
+        추출된 작물명:"""
+        
+        try:
+            result = self.llm.invoke(extraction_prompt)
+            extracted_crop = result.content.strip()
+            
+            # "없음"이거나 빈 문자열인 경우 빈 문자열 반환
+            if extracted_crop in ["없음", "", "None", "null"]:
+                print(f"❌ 추출 실패: 구체적인 작물명 없음")
+                return ""
+            
+            # 간단한 정리 (첫 번째 단어만, 줄바꿈/구두점 제거)
+            cleaned_crop = extracted_crop.split('\n')[0].split('.')[0].split(',')[0].strip()
+            
+            print(f"✅ 작물명 추출 성공: '{cleaned_crop}'")
+            return cleaned_crop
+            
+        except Exception as e:
+            print(f"❌ LLM 작물명 추출 실패: {e}")
+            return ""
 
     @traceable(name="node_agent_select")
     def node_agent_select(self, state: RouterState) -> RouterState:
@@ -867,8 +941,9 @@ class Farmer:
         
         workflow.add_node("merge_output", self.node_merge_output)
         
-        # 기본 엣지 - input 노드 건너뛰고 바로 agent_select로
-        workflow.add_edge("load_state", "agent_select")
+        # 기본 엣지 - load_state → input → agent_select
+        workflow.add_edge("load_state", "input")
+        workflow.add_edge("input", "agent_select")
         
         # agent_select에서 조건부 분기 - 작물추천 우선 처리
         def agent_select_branch_condition(state):

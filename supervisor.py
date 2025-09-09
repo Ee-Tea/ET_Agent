@@ -922,7 +922,7 @@ class MainOrchestrator:
             
             # Farmer 데이터 업데이트
             farmer_data = {
-                # "selected_crop": farmer_result.get("selected_crop", "")
+                "selected_crop": farmer_result.get("selected_crop", "")
             }
             
             short_term_data["farmer"] = farmer_data

@@ -1,8 +1,9 @@
-# MilvusDB 하위 노드 사용 가이드
+# MilvusDB 통합 가이드
 
 ## 개요
 
-이 가이드는 각 에이전트(Teacher, Farmer)의 하위 노드에서 MilvusDB를 사용하는 방법을 설명합니다.
+이 가이드는 각 에이전트(Teacher, Farmer)의 하위 노드에서 MilvusDB를 사용하는 방법을 설명합니다. 
+MilvusDB는 벡터 검색을 통해 관련 문서를 찾아 컨텍스트로 활용합니다.
 
 ## 기본 사용법
 
@@ -11,6 +12,8 @@
 ```python
 from common.milvus_helpers import search_milvus_documents, search_milvus_documents_by_subject, get_milvus_retriever, create_context_from_documents
 ```
+
+**참고**: `MilvusManager`는 `milvus_helpers` 내부에서 자동으로 사용되므로 별도 import가 필요하지 않습니다.
 
 ### 2. 기본 검색 (LangGraph 노드에서)
 
@@ -46,18 +49,20 @@ def teacher_node(state):
     subject_area = state.get("subject_area", "")
     
     # 과목명으로 직접 검색 (더 정확함)
+    # concepts 컬렉션에서 개념 검색
     concept_docs = search_milvus_documents_by_subject(
         milvus_data=milvus_data,
         collection_name="concepts",
         subject_area=subject_area,  # 과목명으로 필터링
-        k=10
+        k=20
     )
     
+    # problems 컬렉션에서 문제 검색
     problem_docs = search_milvus_documents_by_subject(
         milvus_data=milvus_data,
         collection_name="problems",
         subject_area=subject_area,  # 과목명으로 필터링
-        k=5
+        k=30
     )
     
     # 문서 합치기
@@ -67,7 +72,9 @@ def teacher_node(state):
     if all_docs:
         context = create_context_from_documents(all_docs, max_length=2000)
         state["context"] = context
-        print(f"✅ {subject_area} 과목 검색 완료: {len(all_docs)}개 문서")
+        print(f"✅ MilvusDB 과목 검색 완료: {subject_area} - {len(all_docs)}개 문서")
+    else:
+        print(f"⚠️ MilvusDB 검색 결과 없음: {subject_area}")
     
     return state
 ```
@@ -122,9 +129,44 @@ print(f"텍스트 필드: {text_field}, 벡터 필드: {vector_field}, 메트릭
 - **벡터 필드**: `embedding` → `vector` 순  
 - **메트릭 타입**: 컬렉션 인덱스에서 자동 감지 (COSINE, L2 등)
 
-### 2. 과목명 별칭 매핑
+### 2. 과목명 자동 변환
 
-내부 과목명과 MilvusDB의 실제 과목명을 자동으로 매핑합니다:
+내부 과목명과 MilvusDB의 실제 과목명이 다를 때 자동으로 변환합니다:
+
+```python
+# 자동 과목명 변환 예시
+"소프트웨어개발" → "소프트웨어 개발"
+"데이터베이스구축" → "데이터베이스 구축"
+"프로그래밍언어활용" → "프로그래밍 언어 활용"
+```
+
+### 3. 임베딩 모델 안정성 개선
+
+HuggingFace 임베딩 모델 초기화 시 발생하는 메타 텐서 문제를 해결했습니다:
+
+```python
+# MilvusManager 내부에서 자동으로 처리됨
+# - GPU 비활성화
+# - 메타 텐서 문제 해결
+# - 안정적인 임베딩 모델 초기화
+```
+
+### 4. 연결 안정성 개선
+
+MilvusDB 연결 시 재시도 메커니즘을 추가했습니다:
+
+```python
+# 연결 재시도 (최대 3회)
+for attempt in range(3):
+    try:
+        if milvus_manager.connect():
+            break
+    except Exception as e:
+        if attempt < 2:
+            time.sleep(1)  # 1초 대기 후 재시도
+        else:
+            raise e
+```
 
 ```python
 # 자동 과목명 매핑

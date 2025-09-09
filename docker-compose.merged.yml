@@ -34,10 +34,19 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      PGHOST: langgraph-postgres
+      PGPORT: 5432
     command: |
       sh -c "
+        echo 'Waiting for PostgreSQL to be ready...'
+        until pg_isready -h langgraph-postgres -p 5432 -U postgres; do
+          echo 'PostgreSQL is unavailable - sleeping'
+          sleep 2
+        done
+        echo 'PostgreSQL is up - executing command'
+        
         # PostgresSaver 테이블 생성
-        psql -U postgres -d postgres -c \"
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE TABLE IF NOT EXISTS checkpoints (
             thread_id TEXT PRIMARY KEY,
             checkpoint_id TEXT NOT NULL,
@@ -47,6 +56,9 @@ services:
             metadata JSONB,
             created_at TIMESTAMP DEFAULT NOW()
           );
+        \"
+        
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE TABLE IF NOT EXISTS checkpoint_blobs (
             thread_id TEXT,
             checkpoint_id TEXT,
@@ -58,9 +70,12 @@ services:
             PRIMARY KEY (thread_id, checkpoint_id, channel, version)
           );
         \"
+        
+        echo 'Database initialization completed'
       "
     depends_on:
-      - langgraph-postgres
+      langgraph-postgres:
+        condition: service_healthy
 
   langgraph-postgres:
     image: postgres:16
@@ -112,7 +127,8 @@ services:
         condition: service_healthy
       langgraph-postgres:
         condition: service_healthy
-      - postgres-init
+      postgres-init:
+        condition: service_completed_successfully
     env_file:
     - .env
     environment:

@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from api.services.chat_session_services import ChatSessionService
+from api.services.chat_session_service import ChatSessionService
 from common.short_term.redis_memory import RedisLangGraphMemory
 from teacher.teacher import Teacher, TeacherState
 from farmer.farmer import Farmer, RouterState

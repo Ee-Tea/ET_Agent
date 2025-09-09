@@ -48,7 +48,7 @@ services:
   auth-api:
     build:
       context: .
-      dockerfile: Dockerfile.auth
+      dockerfile: Dockerfile.auth.slim
     ports:
     - 8124:8000
     depends_on:
@@ -98,7 +98,7 @@ services:
   bff-api:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile.api.slim
     ports:
     - 8000:8000
     environment:
@@ -108,12 +108,19 @@ services:
     - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
     - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
     - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+    - GIT_PYTHON_REFRESH=quiet
     depends_on:
     - redis
     - langgraph-postgres
     volumes:
     - ./api:/app/api
     - ./main.py:/app/main.py
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   nginx:

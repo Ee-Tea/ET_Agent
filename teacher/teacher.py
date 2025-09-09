@@ -2257,7 +2257,8 @@ class Teacher:
             agent_result = agent.invoke({
                 "retrieval_question": state.get("user_query", ""),
                 "user_query": state.get("user_query", ""),
-                "shared": state.get("shared", {})
+                "shared": state.get("shared", {}),
+                "milvus_data": state.get("milvus_data", {})  # MilvusDB 연결 정보 전달
             })
         except Exception as e:
             print(f"[WARN] retriever_agent 실행 실패: {e}")

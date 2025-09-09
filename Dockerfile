@@ -11,8 +11,6 @@ ADD . /deps/LLM-T
 # -- End of local package . --
 ENV PYTHONPATH="/deps/LLM-T"
 
-ENV LANGSERVE_GRAPHS='{"agent":"teacher.graph:graph"}'
-
 
 
 # -- Installing all local dependencies --

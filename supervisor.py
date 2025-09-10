@@ -102,10 +102,27 @@ class MainOrchestrator:
         """세션 데이터 저장"""
         if self.hybrid_session_service:
             try:
+                # 연결 풀 상태 확인/재초기화 (루프 불일치 포함)
+                import asyncio
+                current_loop = asyncio.get_running_loop()
+                pool = getattr(self.hybrid_session_service, "pool", None)
+                pool_closed = getattr(pool, "_closed", False) if pool is not None else True
+                pool_loop = getattr(pool, "_loop", None) if pool is not None else None
+                loop_mismatch = pool is not None and pool_loop is not None and pool_loop is not current_loop
+                if pool is None or pool_closed or loop_mismatch:
+                    # 가능하면 기존 풀 정리 후, 현재 루프에서 재초기화
+                    try:
+                        if pool and hasattr(pool, "close"):
+                            await pool.close()
+                    except Exception:
+                        pass
+                    await self.hybrid_session_service.init_postgres()
+                # JSON-세이프/문자열 스냅샷만 저장
+                snapshot = self._build_session_snapshot(state)
                 await self.hybrid_session_service.save_session_metadata(
-                    self.user_id, 
-                    self.chat_id, 
-                    dict(state)
+                    self.user_id,
+                    self.chat_id,
+                    snapshot
                 )
             except Exception as e:
                 print(f"⚠️ 세션 상태 저장 실패: {e}")
@@ -632,7 +649,8 @@ class MainOrchestrator:
                 "configurable": {
                     "thread_id": f"teacher:{self.user_id}:{self.chat_id}",  # 수정
                     "checkpoint_ns": "teacher",
-                    "checkpoint_id": f"teacher_{self.session_key}"
+                    "checkpoint_id": f"teacher_{self.session_key}",
+                    "recursion_limit": 40
                 }
             }
             result = self.teacher.graph.invoke(teacher_state, config)
@@ -739,6 +757,28 @@ class MainOrchestrator:
         """메인 쿼리 처리 - LangGraph 워크플로우 실행"""
         print(f"\n📝 사용자 질문: {user_query}")
         
+        # 사용자 메시지를 즉시 DB에 기록
+        # 주의: FastAPI 이벤트 루프 내부에서는 호출측(api/main.py)에서 await로 저장합니다.
+        # 여기서는 CLI 등 동기 컨텍스트에서만 best-effort로 처리합니다.
+        try:
+            if self.hybrid_session_service:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    # 이미 루프가 돌고 있으면 호출측에서 처리해야 하므로 skip
+                except RuntimeError:
+                    # 루프 없음(동기 환경): 직접 실행
+                    asyncio.run(
+                        self.hybrid_session_service.add_chat_message(
+                            self.user_id,
+                            self.chat_id,
+                            "user",
+                            user_query
+                        )
+                    )
+        except Exception as e:
+            print(f"⚠️ 사용자 메시지 저장 실패: {e}")
+
         # 특별 명령어 처리
         if user_query.lower() == "clear":
             self.clear_session()
@@ -768,13 +808,29 @@ class MainOrchestrator:
                 "configurable": {
                     "thread_id": f"supervisor:{self.user_id}:{self.chat_id}",
                     "checkpoint_ns": "supervisor",
-                    "checkpoint_id": f"supervisor_{self.session_key}"
+                    "checkpoint_id": f"supervisor_{self.session_key}",
+                    "recursion_limit": 60
                 }
             }
             
             # 그래프 실행
             final_state = self.graph.invoke(initial_state, config)
-            
+
+            # 에이전트 응답을 DB에 기록
+            try:
+                if self.hybrid_session_service:
+                    import asyncio
+                    asyncio.run(
+                        self.hybrid_session_service.add_chat_message(
+                            self.user_id,
+                            self.chat_id,
+                            "assistant",
+                            str(final_state.get("final_response", ""))
+                        )
+                    )
+            except Exception as e:
+                print(f"⚠️ 에이전트 메시지 저장 실패: {e}")
+
             return final_state["final_response"]
             
         except Exception as e:
@@ -790,6 +846,36 @@ class MainOrchestrator:
             return "score"
         else:
             return "generate"
+
+    def _build_session_snapshot(self, state: MainState) -> Dict[str, str]:
+        """세션 저장용 스냅샷을 문자열로만 구성하여 반환"""
+        try:
+            final_response = state.get("final_response", "")
+        except Exception:
+            final_response = ""
+        try:
+            classified_service = state.get("classified_service", "")
+        except Exception:
+            classified_service = ""
+        try:
+            is_relevant = state.get("is_relevant", "")
+        except Exception:
+            is_relevant = ""
+        try:
+            service_consistent = state.get("service_consistent", "")
+        except Exception:
+            service_consistent = ""
+
+        return {
+            "session_id": f"{self.user_id}:{self.chat_id}",
+            "user_id": str(self.user_id),
+            "chat_id": str(self.chat_id),
+            "user_query": str(state.get("user_query", "")),
+            "classified_service": str(classified_service),
+            "is_relevant": str(is_relevant),
+            "service_consistent": str(service_consistent),
+            "final_response": str(final_response)
+        }
     
     def _format_teacher_response(self, teacher_result: Dict) -> str:
         """Teacher 응답 포맷팅"""

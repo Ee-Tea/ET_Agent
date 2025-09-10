@@ -17,6 +17,7 @@ import uvicorn
 import httpx
 from api.routers import chat, health, sessions
 from api.services.hybrid_session_service import HybridSessionService
+# supervisor import는 런타임에 처리
 
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
@@ -57,20 +58,139 @@ hybrid_session_service = None
 
 # langgraph-api 호출 함수 추가
 async def call_langgraph_api(endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    """langgraph-api 호출"""
+    """langgraph-api 호출 - 올바른 LangGraph API 사용법 적용"""
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(
-                f"{LANGGRAPH_API_URL}{endpoint}",
-                json=data,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+            if endpoint == "/chat":
+                # /chat 엔드포인트 대신 올바른 LangGraph API 사용
+                return await call_langgraph_chat(data)
+            else:
+                # 다른 엔드포인트는 기존 방식 유지
+                response = await client.post(
+                    f"{LANGGRAPH_API_URL}{endpoint}",
+                    json=data,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
         except httpx.RequestError as e:
             raise HTTPException(status_code=503, detail=f"LangGraph API 연결 실패: {str(e)}")
         except httpx.HTTPStatusError as e:
             raise HTTPException(status_code=e.response.status_code, detail=f"LangGraph API 오류: {e.response.text}")
+
+async def call_langgraph_chat(data: Dict[str, Any]) -> Dict[str, Any]:
+    """LangGraph API를 사용한 채팅 처리 - 올바른 API 사용법"""
+    async with httpx.AsyncClient() as client:
+        try:
+            # 1. 어시스턴트 조회/생성
+            assistant_id = await get_or_create_assistant(client)
+            
+            # 2. 스레드 생성
+            thread_id = await create_thread(client, data["user_id"], data["chat_id"])
+            
+            # 3. 스레드에서 실행 (스트림 방식)
+            result = await run_thread(client, assistant_id, thread_id, data["message"])
+            
+            return {
+                "response": result.get("response", "응답을 생성할 수 없습니다."),
+                "service_used": "langgraph",
+                "confidence": 1.0,
+                "session_id": f"{data['user_id']}:{data['chat_id']}",
+                "artifacts": result.get("artifacts", {})
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"채팅 처리 실패: {str(e)}")
+
+async def get_or_create_assistant(client: httpx.AsyncClient) -> str:
+    """어시스턴트 조회 또는 생성"""
+    try:
+        # 기존 어시스턴트 조회
+        response = await client.post(
+            f"{LANGGRAPH_API_URL}/assistants/search",
+            json={"graph_id": "agent", "limit": 1},
+            timeout=10.0
+        )
+        
+        if response.status_code == 200:
+            assistants = response.json()
+            if assistants:
+                return assistants[0]["assistant_id"]
+        
+        # 어시스턴트가 없으면 생성
+        response = await client.post(
+            f"{LANGGRAPH_API_URL}/assistants",
+            json={
+                "graph_id": "agent",
+                "name": "ET-Agent",
+                "description": "농업 자격증 및 교육 관련 AI 에이전트"
+            },
+            timeout=10.0
+        )
+        response.raise_for_status()
+        assistant = response.json()
+        return assistant["assistant_id"]
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"어시스턴트 처리 실패: {str(e)}")
+
+async def create_thread(client: httpx.AsyncClient, user_id: str, chat_id: str) -> str:
+    """스레드 생성"""
+    try:
+        response = await client.post(
+            f"{LANGGRAPH_API_URL}/threads",
+            json={
+                "thread_id": f"{user_id}_{chat_id}",
+                "metadata": {
+                    "user_id": user_id,
+                    "chat_id": chat_id
+                }
+            },
+            timeout=10.0
+        )
+        response.raise_for_status()
+        thread = response.json()
+        return thread["thread_id"]
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"스레드 생성 실패: {str(e)}")
+
+async def run_thread(client: httpx.AsyncClient, assistant_id: str, thread_id: str, message: str) -> Dict[str, Any]:
+    """스레드에서 실행"""
+    try:
+        response = await client.post(
+            f"{LANGGRAPH_API_URL}/threads/{thread_id}/runs/wait",
+            json={
+                "assistant_id": assistant_id,
+                "input": {
+                    "message": message,
+                    "user_id": thread_id.split("_")[0],
+                    "chat_id": thread_id.split("_")[1]
+                }
+            },
+            timeout=60.0
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        # 결과에서 응답 추출
+        response_text = ""
+        if "values" in result and "messages" in result["values"]:
+            messages = result["values"]["messages"]
+            if messages and len(messages) > 0:
+                last_message = messages[-1]
+                if isinstance(last_message, dict) and "content" in last_message:
+                    response_text = last_message["content"]
+                elif isinstance(last_message, str):
+                    response_text = last_message
+        
+        return {
+            "response": response_text or "응답을 생성할 수 없습니다.",
+            "artifacts": result.get("artifacts", {})
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"스레드 실행 실패: {str(e)}")
 
 
 def get_redis_memory():
@@ -196,10 +316,11 @@ async def root():
 async def health_check():
     """헬스 체크 엔드포인트"""
     try:
-        # langgraph-api 헬스 체크
+        # langgraph-api 헬스 체크 (LangGraph API는 /health 엔드포인트가 없음)
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{LANGGRAPH_API_URL}/health", timeout=5.0)
+                # LangGraph API의 루트 경로나 docs 엔드포인트로 확인
+                response = await client.get(f"{LANGGRAPH_API_URL}/docs", timeout=5.0)
                 langgraph_status = "healthy" if response.status_code == 200 else "unhealthy"
         except:
             langgraph_status = "unreachable"
@@ -225,10 +346,12 @@ async def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """메인 채팅 엔드포인트"""
-    global hybrid_session_service
+    """메인 채팅 엔드포인트 - 직접 LangGraph 실행"""
+    global orchestrator, hybrid_session_service
     
     try:
+        # 로컬 오케스트레이터 사용
+        
         # 사용자 메시지를 하이브리드 서비스에 저장
         if hybrid_session_service:
             await hybrid_session_service.add_chat_message(
@@ -238,12 +361,23 @@ async def chat(request: ChatRequest):
                 request.message
             )
         
-        # langgraph-api 호출
-        result = await call_langgraph_api("/chat", {
-            "message": request.message,
-            "user_id": request.user_id,
-            "chat_id": request.chat_id
-        })
+        # 직접 LangGraph 실행
+        try:
+            # 동적 import로 순환 의존 회피
+            from supervisor import MainOrchestrator
+            local_orchestrator = MainOrchestrator(request.user_id, request.chat_id)
+            response_text = local_orchestrator.process_query(request.message)
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail=f"MainOrchestrator import failed: {e}")
+        
+        # 결과 포맷팅
+        result = {
+            "response": response_text,
+            "service_used": "orchestrator",
+            "confidence": 1.0,
+            "session_id": f"{request.user_id}:{request.chat_id}",
+            "artifacts": None
+        }
         
         # 에이전트 응답을 하이브리드 서비스에 저장
         if hybrid_session_service:

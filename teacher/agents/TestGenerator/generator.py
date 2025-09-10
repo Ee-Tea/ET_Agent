@@ -468,14 +468,14 @@ class InfoProcessingExamAgent(BaseAgent):
                 }
 
             # LLM 기반 검증으로 변경 (RAGAS 제거)
-                new_attempts = state.get("generation_attempts", 0) + 1
-                print(f"[DEBUG] _generate_quiz_incremental: generated {len(new_questions)} questions, attempts={new_attempts}")
-                return {
-                    **state,
-                    "quiz_questions": new_questions,
-                    "validated_questions": validated_questions,
-                    "generation_attempts": new_attempts
-                }
+            new_attempts = state.get("generation_attempts", 0) + 1
+            print(f"[DEBUG] _generate_quiz_incremental: generated {len(new_questions)} questions, attempts={new_attempts}")
+            return {
+                **state,
+                "quiz_questions": new_questions,
+                "validated_questions": validated_questions,
+                "generation_attempts": new_attempts
+            }
         except Exception as e:
             new_attempts = state.get("generation_attempts", 0) + 1
             print(f"[DEBUG] _generate_quiz_incremental: exception {e}, attempts={new_attempts}")
@@ -1074,19 +1074,20 @@ class InfoProcessingExamAgent(BaseAgent):
             }
             
         except Exception as e:
-            print(f"❌ 문제 생성 실패: {e}")
-        return {
+            err = str(e)
+            print(f"❌ 문제 생성 실패: {err}")
+            return {
                 "success": False,
                 "questions": [],  # 빈 리스트 반환
                 "status": "FAILED",
-                "error": str(e),
+                "error": err,
                 "result": {
                     "exam_title": f"{subject_area} {difficulty} 문제집",
                     "total_questions": 0,
-            "difficulty": difficulty,
+                    "difficulty": difficulty,
                     "subjects": {
                         subject_area: {
-            "requested_count": target_count,
+                            "requested_count": target_count,
                             "actual_count": 0,
                             "questions": [],
                             "status": "FAILED"

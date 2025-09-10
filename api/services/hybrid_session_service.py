@@ -19,14 +19,41 @@ class HybridSessionService:
         self.pool = await asyncpg.create_pool(self.postgres_url)
         await self.create_tables_if_not_exists()
     
+    async def _ensure_pool(self):
+        """연결 풀 보장: None/closed 상태이면 재생성"""
+        if getattr(self, "pool", None) is None:
+            self.pool = await asyncpg.create_pool(self.postgres_url)
+            return
+        # 일부 버전에서 _closed 플래그가 없을 수 있으므로 getattr 사용
+        pool_closed = getattr(self.pool, "_closed", False)
+        if pool_closed:
+            try:
+                await self.pool.close()
+            except Exception:
+                pass
+            self.pool = await asyncpg.create_pool(self.postgres_url)
+    
     async def create_tables_if_not_exists(self):
         """PostgreSQL 테이블 생성"""
+        await self._ensure_pool()
         async with self.pool.acquire() as conn:
             await conn.execute("""
+                -- Users
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    user_name TEXT,
+                    token TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+
+                -- Chat Sessions (augment existing table if present)
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     id SERIAL PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     chat_id TEXT NOT NULL,
+                    session_id TEXT,
+                    title TEXT,
                     session_data JSONB,
                     metadata JSONB,
                     created_at TIMESTAMP DEFAULT NOW(),
@@ -34,20 +61,94 @@ class HybridSessionService:
                     is_active BOOLEAN DEFAULT TRUE,
                     UNIQUE(user_id, chat_id)
                 );
+
+                -- Ensure new columns exist
+                ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
+                ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title TEXT;
                 
+                -- FK to users
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints 
+                        WHERE constraint_name = 'fk_chat_sessions_user'
+                    ) THEN
+                        ALTER TABLE chat_sessions 
+                        ADD CONSTRAINT fk_chat_sessions_user 
+                        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE;
+                    END IF;
+                END$$;
+
+                -- Chat Messages (augment existing table if present)
                 CREATE TABLE IF NOT EXISTS chat_messages (
                     id SERIAL PRIMARY KEY,
-                    user_id TEXT NOT NULL,
+                    user_id TEXT,
                     chat_id TEXT NOT NULL,
-                    message_type TEXT NOT NULL, -- 'user', 'assistant', 'system'
+                    session_id TEXT,
+                    speaker TEXT NOT NULL, -- 'user', 'assistant', 'system'
                     content TEXT NOT NULL,
                     metadata JSONB,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
-                
+
+                -- Ensure new columns exist
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS speaker TEXT;
+
+                -- Indexes
+                CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
                 CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_user_chat ON chat_messages(user_id, chat_id);
+
+                -- Ensure UNIQUE constraint on chat_sessions(session_id) for FK target
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints 
+                        WHERE table_name='chat_sessions' AND constraint_name='uq_chat_sessions_session_id'
+                    ) THEN
+                        ALTER TABLE chat_sessions ADD CONSTRAINT uq_chat_sessions_session_id UNIQUE (session_id);
+                    END IF;
+                END$$;
+
+                -- FK from chat_messages to chat_sessions(session_id)
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints 
+                        WHERE constraint_name = 'fk_chat_messages_session'
+                    ) THEN
+                        ALTER TABLE chat_messages 
+                        ADD CONSTRAINT fk_chat_messages_session 
+                        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE;
+                    END IF;
+                END$$;
             """)
+
+    # ===== Helpers =====
+    @staticmethod
+    def _generate_session_id(user_id: str, chat_id: str) -> str:
+        return f"{user_id}:{chat_id}"
+
+    async def _ensure_user(self, user_id: str, user_name: Optional[str] = None, token: Optional[str] = None):
+        await self._ensure_pool()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO users (user_id, user_name, token)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    user_name = COALESCE(EXCLUDED.user_name, users.user_name),
+                    token = COALESCE(EXCLUDED.token, users.token),
+                    updated_at = NOW()
+                """,
+                user_id, user_name, token
+            )
+
+    async def ensure_user(self, user_id: str, user_name: Optional[str] = None, token: Optional[str] = None):
+        """공개 API: 사용자 업서트"""
+        await self._ensure_user(user_id, user_name, token)
     
     # ==================== Redis (실시간 세션) ====================
     
@@ -63,7 +164,7 @@ class HybridSessionService:
         """채팅 히스토리 Redis 키"""
         return f"history:{user_id}:{chat_id}"
     
-    async def start_session(self, user_id: str, chat_id: str, initial_data: Dict[str, Any] = None):
+    async def start_session(self, user_id: str, chat_id: str, initial_data: Dict[str, Any] = None, title: Optional[str] = None):
         """새 세션 시작 (Redis에 저장)"""
         session_key = self.get_active_session_key(user_id, chat_id)
         shared_key = self.get_shared_key(user_id, chat_id)
@@ -97,7 +198,7 @@ class HybridSessionService:
         self.redis.setex(history_key, 86400, json.dumps([]))
         
         # PostgreSQL에도 메타데이터 저장
-        await self.save_session_metadata(user_id, chat_id, session_data)
+        await self.save_session_metadata(user_id, chat_id, session_data, title=title)
     
     async def update_active_session(self, user_id: str, chat_id: str, updates: Dict[str, Any]):
         """활성 세션 업데이트 (Redis)"""
@@ -135,7 +236,9 @@ class HybridSessionService:
         return json.loads(data) if data else {}
     
     async def add_chat_message(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None):
-        """채팅 메시지 추가 (Redis + PostgreSQL)"""
+        """채팅 메시지 추가 (Redis + PostgreSQL)
+        세션 FK 제약 보장을 위해 메시지 저장 전에 세션 레코드를 업서트합니다.
+        """
         message = {
             "type": message_type,
             "content": content,
@@ -158,37 +261,82 @@ class HybridSessionService:
         
         self.redis.setex(history_key, 86400, json.dumps(history_list))
         
-        # PostgreSQL에 영구 저장
+        # PostgreSQL: 세션 레코드 보장 후 메시지 저장 (FK 보호)
+        try:
+            # 세션 메타데이터 업서트 (last_activity 갱신, 첫 user 메시지는 title 후보 전달)
+            session_snapshot = {
+                "last_activity": message["timestamp"],
+                "status": "active"
+            }
+            title_hint = content if message_type == "user" else None
+            await self.save_session_metadata(user_id, chat_id, session_snapshot, title=title_hint)
+        except Exception:
+            # 세션 보강 실패해도 메시지 저장 시 FK로 다시 오류 나므로 그대로 전파
+            pass
+
         await self.save_message_to_postgres(user_id, chat_id, message_type, content, metadata)
+
+        # 세션 타이틀이 없으면 첫 사용자 메시지로 설정
+        if message_type == "user":
+            await self._ensure_session_title(user_id, chat_id, content)
     
     # ==================== PostgreSQL (영구 저장) ====================
     
-    async def save_session_metadata(self, user_id: str, chat_id: str, session_data: Dict[str, Any]):
+    async def save_session_metadata(self, user_id: str, chat_id: str, session_data: Dict[str, Any], title: Optional[str] = None):
         """세션 메타데이터 저장 (PostgreSQL)"""
+        await self._ensure_pool()
         async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO chat_sessions (user_id, chat_id, session_data, metadata)
-                VALUES ($1, $2, $3, $4)
+            await self._ensure_user(user_id)
+            session_id = self._generate_session_id(user_id, chat_id)
+            await conn.execute(
+                """
+                INSERT INTO chat_sessions (user_id, chat_id, session_id, title, session_data, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (user_id, chat_id) DO UPDATE SET
-                    session_data = $3,
-                    metadata = $4,
+                    session_id = $3,
+                    title = COALESCE($4, chat_sessions.title),
+                    session_data = $5,
+                    metadata = $6,
                     updated_at = NOW(),
                     is_active = TRUE
-            """, user_id, chat_id, json.dumps(session_data), json.dumps({"last_sync": datetime.now().isoformat()}))
+                """,
+                user_id,
+                chat_id,
+                session_id,
+                title,
+                json.dumps(session_data, ensure_ascii=False, default=str),
+                json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
+            )
     
     async def save_message_to_postgres(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None):
         """메시지를 PostgreSQL에 영구 저장"""
+        await self._ensure_pool()
         async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO chat_messages (user_id, chat_id, message_type, content, metadata)
-                VALUES ($1, $2, $3, $4, $5)
-            """, user_id, chat_id, message_type, content, json.dumps(metadata or {}))
+            session_id = self._generate_session_id(user_id, chat_id)
+            # speaker 표준화: user_query → 'user', final_response/assistant → 'chatbot'
+            normalized_speaker = (
+                'user' if str(message_type).lower() == 'user' else
+                'chatbot' if str(message_type).lower() in ('assistant', 'bot', 'chatbot') else
+                str(message_type).lower() or 'system'
+            )
+            await conn.execute(
+                """
+                INSERT INTO chat_messages (user_id, chat_id, session_id, speaker, content, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                user_id,
+                chat_id,
+                session_id,
+                normalized_speaker,
+                content,
+                json.dumps(metadata or {})
+            )
     
     async def get_user_sessions(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """사용자의 모든 세션 조회 (PostgreSQL)"""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT chat_id, session_data, metadata, created_at, updated_at, is_active
+                SELECT chat_id, session_id, title, session_data, metadata, created_at, updated_at, is_active
                 FROM chat_sessions 
                 WHERE user_id = $1 
                 ORDER BY updated_at DESC 
@@ -200,13 +348,18 @@ class HybridSessionService:
     async def get_session_messages(self, user_id: str, chat_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         """특정 세션의 메시지 조회 (PostgreSQL)"""
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT message_type, content, metadata, created_at
+            session_id = self._generate_session_id(user_id, chat_id)
+            rows = await conn.fetch(
+                """
+                SELECT speaker, content, metadata, created_at
                 FROM chat_messages 
-                WHERE user_id = $1 AND chat_id = $2
+                WHERE session_id = $1
                 ORDER BY created_at ASC 
-                LIMIT $3
-            """, user_id, chat_id, limit)
+                LIMIT $2
+                """,
+                session_id,
+                limit
+            )
             
             return [dict(row) for row in rows]
     
@@ -264,13 +417,13 @@ class HybridSessionService:
         # Redis에 없으면 PostgreSQL에서 조회
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
-                SELECT session_data FROM chat_sessions 
+                SELECT session_id, session_data, title FROM chat_sessions 
                 WHERE user_id = $1 AND chat_id = $2
                 ORDER BY updated_at DESC LIMIT 1
             """, user_id, chat_id)
             
             if row:
-                session_data = json.loads(row['session_data'])
+                session_data = json.loads(row['session_data']) if row['session_data'] else {}
                 return {
                     "source": "postgres",
                     "session": session_data.get("session", {}),
@@ -279,3 +432,23 @@ class HybridSessionService:
                 }
         
         return {"source": "none", "session": {}, "shared": {}, "history": []}
+
+    async def _ensure_session_title(self, user_id: str, chat_id: str, first_message: str):
+        """세션 타이틀이 없을 경우 첫 사용자 메시지 기준으로 설정"""
+        session_id = self._generate_session_id(user_id, chat_id)
+        title = (first_message or "").strip()
+        if not title:
+            return
+        # 간단 요약: 앞 50자
+        title = title[:50]
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE chat_sessions
+                SET title = COALESCE(title, $3), updated_at = NOW()
+                WHERE user_id = $1 AND chat_id = $2
+                """,
+                user_id,
+                chat_id,
+                title
+            )

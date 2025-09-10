@@ -10,3 +10,12 @@ asyncpg
 typing
 psutil
 datetime
+langchain-openai
+langchain-core
+langgraph
+langchain-huggingface
+langchain-milvus
+pymilvus
+transformers
+sentence-transformers
+torch

@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, TypedDict
 
@@ -10,7 +11,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain.retrievers import EnsembleRetriever
 
 # --- 1. 환경 설정 ---
 load_dotenv()
@@ -89,7 +89,6 @@ tavily_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
 # --- 3. LangGraph 상태 정의 ---
 class GraphState(TypedDict):
     question: Optional[str]
-    retriever: Optional[EnsembleRetriever]
     answer: Optional[str]
     topics: Optional[List[str]]
     db_context: Optional[str]
@@ -97,62 +96,49 @@ class GraphState(TypedDict):
     db_sources: Optional[List[Dict[str, Any]]]
     is_sufficient: Optional[str]
 
-# --- 4. 핵심 기능 함수 정의 ---
-def create_retriever() -> EnsembleRetriever:
-    print("---기능: Milvus 컬렉션 연결 및 EnsembleRetriever 생성 시작---")
-    try:
-        embeddings = HuggingFaceEmbeddings(model_name="jhgan/ko-sroberta-multitask")
+# --- 4. 커스텀 검색 함수 (두 컬렉션에서 합쳐서 상위 2개만 추출) ---
+def retrieve_top_k_from_collections(question: str, k: int = 3) -> Dict[str, Any]:
+    embeddings = HuggingFaceEmbeddings(model_name="jhgan/ko-sroberta-multitask")
 
-        vectorstore_info = LangChainMilvus(
-            embedding_function=embeddings,
-            collection_name=COLLECTION_NAME_INFO,
-            connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-            consistency_level="Bounded"
-        )
-        print(f"✅ '{COLLECTION_NAME_INFO}' 컬렉션에 연결했습니다.")
+    vectorstore_info = LangChainMilvus(
+        embedding_function=embeddings,
+        collection_name=COLLECTION_NAME_INFO,
+        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
+        consistency_level="Bounded"
+    )
+    vectorstore_grow = LangChainMilvus(
+        embedding_function=embeddings,
+        collection_name=COLLECTION_NAME_GROW,
+        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
+        consistency_level="Bounded"
+    )
 
-        vectorstore_grow = LangChainMilvus(
-            embedding_function=embeddings,
-            collection_name=COLLECTION_NAME_GROW,
-            connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-            consistency_level="Bounded"
-        )
-        print(f"✅ '{COLLECTION_NAME_GROW}' 컬렉션에 연결했습니다.")
+    # 각 컬렉션에서 넉넉히 k=5개 검색
+    docs_info = vectorstore_info.similarity_search_with_score(question, k=5)
+    docs_grow = vectorstore_grow.similarity_search_with_score(question, k=5)
 
-        retriever_info = vectorstore_info.as_retriever(search_kwargs={"k": 2})
-        retriever_grow = vectorstore_grow.as_retriever(search_kwargs={"k": 2})
+    # 두 컬렉션 합치고 점수순 정렬 (낮을수록 유사)
+    all_docs = docs_info + docs_grow
+    all_docs_sorted = sorted(all_docs, key=lambda x: x[1])
+    top_k_docs = all_docs_sorted[:k]
 
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[retriever_info, retriever_grow],
-            weights=[0.5, 0.5]
-        )
-        
-        print("✅ EnsembleRetriever가 성공적으로 생성되었습니다.")
-        return ensemble_retriever
-    except Exception as e:
-        print(f"Milvus 연결 또는 EnsembleRetriever 생성 중 오류 발생: {e}")
-        raise
+    context = "\n\n".join([doc[0].page_content for doc in top_k_docs])
+    db_sources = [
+        {"source": doc[0].metadata.get("source"),
+         "page": doc[0].metadata.get("page"),
+         "content": doc[0].page_content}
+        for doc in top_k_docs
+    ]
 
-def retrieve_relevant_chunks(retriever: EnsembleRetriever, question: str) -> Dict[str, Any]:
-    docs = retriever.invoke(question)
-    context = "\n\n".join([doc.page_content for doc in docs])
-    db_sources = [{"source": doc.metadata.get('source'), "page": doc.metadata.get('page'), "content": doc.page_content} for doc in docs]
-    print(f"검색된 총 청크 수: {len(docs)}개")
+    print(f"🔍 최종 상위 {k}개 검색 완료.")
     return {"context": context, "db_sources": db_sources}
 
 # --- 5. LangGraph 노드 함수 정의 ---
-def load_and_merge_dbs_node(state: GraphState) -> Dict[str, Any]:
-    print("\n---노드: Milvus EnsembleRetriever 생성 실행---")
-    retriever = create_retriever()
-    print("Milvus EnsembleRetriever 로드 완료.\n")
-    return {**state, "retriever": retriever}
-
 def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any]:
     print("\n---노드: DB 검색 실행---")
     question = state["question"]
-    
-    print("🔍 '농작물 재배' 관련 DB 정보 검색 중...")
-    retrieval_result = retrieve_relevant_chunks(state["retriever"], question)
+
+    retrieval_result = retrieve_top_k_from_collections(question, k=3)
     db_context = retrieval_result["context"]
     db_sources = retrieval_result["db_sources"]
     print("✅ DB 검색 완료.")
@@ -170,7 +156,7 @@ def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any
 def retrieve_from_web_node(state: GraphState) -> Dict[str, Any]:
     print("\n---노드: 웹 검색 실행---")
     question = state["question"]
-    
+
     print("🌐 웹 검색으로 답변 생성 중...")
     search_results = tavily_tool.invoke({"query": question})
     web_sources = [{"url": res["url"], "content": res["content"]} for res in search_results]
@@ -187,36 +173,32 @@ def generate_final_answer_node(state: GraphState) -> Dict[str, Any]:
     web_search_results = "웹 검색 결과가 없습니다." if not web_sources else "\n".join([str(res) for res in web_sources])
 
     if is_sufficient == "yes":
-        # ❗ DB 내용만으로 답변을 생성하는 경우
         db_context = state.get("db_context", "내부 DB에서 검색된 정보가 없습니다.")
         final_chain = db_only_prompt | llm | StrOutputParser()
         inputs = {"question": question, "db_context": db_context}
     else:
-        # ❗ 웹 검색 결과만으로 답변을 생성하는 경우
-        db_context = "내부 DB 정보가 충분하지 않아 웹 검색 결과를 참고하여 답변을 생성합니다."
         final_chain = web_only_prompt | llm | StrOutputParser()
         inputs = {"question": question, "web_search_results": web_search_results}
 
     answer = final_chain.invoke(inputs)
     return {**state, "answer": answer}
 
-# --- 6. LangGraph 워크플로우 빌드 및 컴파일 ---
-def build_initial_setup_graph():
-    initial_builder = StateGraph(GraphState)
-    initial_builder.add_node("load_and_merge_dbs", load_and_merge_dbs_node)
-    initial_builder.set_entry_point("load_and_merge_dbs")
-    initial_builder.add_edge("load_and_merge_dbs", END)
-    return initial_builder.compile()
+def remove_markdown_and_special_chars(text: str) -> str:
+    text = re.sub(r'#{1,6}\s', '', text)
+    text = re.sub(r'[\*\-]', '', text)
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)
+    return text.strip()
 
+# --- 6. LangGraph 워크플로우 빌드 ---
 def build_query_graph():
     query_builder = StateGraph(GraphState)
-    
+
     query_builder.add_node("db_retrieval", process_topics_and_retrieve_content_node)
     query_builder.add_node("web_search", retrieve_from_web_node)
     query_builder.add_node("generate_answer", generate_final_answer_node)
 
     query_builder.set_entry_point("db_retrieval")
-    
+
     query_builder.add_conditional_edges(
         "db_retrieval",
         lambda state: state.get("is_sufficient"),
@@ -225,28 +207,17 @@ def build_query_graph():
             "no": "web_search"
         }
     )
-    
+
     query_builder.add_edge("web_search", "generate_answer")
     query_builder.add_edge("generate_answer", END)
-    
+
     return query_builder.compile()
 
 # --- 7. 메인 실행 로직 ---
 if __name__ == "__main__":
     print("🌱 농작물 챗봇 에이전트 시작...")
     print("--------------------------------------------------")
-    
-    print("챗봇 시스템을 준비하는 중입니다... (Milvus EnsembleRetriever 생성)")
-    setup_graph = build_initial_setup_graph()
-    try:
-        setup_result = setup_graph.invoke({"question": "setup"})
-        retriever = setup_result.get("retriever")
-    except Exception as e:
-        print(f"오류가 발생했습니다: {e}")
-        exit()
-        
-    print("챗봇 시스템 준비 완료!\n")
-    
+
     rag_app = build_query_graph()
 
     print("이제 질문을 입력하세요. (종료하려면 'exit' 또는 'quit' 입력)")
@@ -257,17 +228,19 @@ if __name__ == "__main__":
         if prompt.lower() in ["exit", "quit"]:
             print("챗봇을 종료합니다.")
             break
-        
+
         print("답변을 생성하는 중...")
         try:
-            final_state = rag_app.invoke({"question": prompt, "retriever": retriever})
+            final_state = rag_app.invoke({"question": prompt})
             response = final_state.get('answer', "죄송합니다. 답변을 생성하지 못했습니다.")
             
             db_sources = final_state.get('db_sources', [])
             web_sources = final_state.get('web_sources', [])
+            
+            cleaned_response = remove_markdown_and_special_chars(response)
 
             print("\n------------------- 답변 -------------------")
-            print(response)
+            print(cleaned_response)
             print("-------------------------------------------\n")
 
             if db_sources:

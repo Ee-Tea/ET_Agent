@@ -9,6 +9,7 @@ from ragas.testset import TestsetGenerator
 from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper # LangchainEmbeddingsWrapper 다시 사용
 from langchain_community.embeddings import HuggingFaceEmbeddings # langchain_community 임베딩 모델 임포트
+from ragas.testset.persona import Persona
 
 # OpenAI와 Hugging Face 모델을 임포트합니다.
 from langchain_openai import ChatOpenAI
@@ -46,14 +47,14 @@ async def main():
         df = pd.read_csv(csv_file_path, encoding='euc-kr')
         print(f"CSV 파일에서 {len(df)}개의 행을 읽었습니다.")
         print(f"컬럼: {df.columns.tolist()}")
-        
+
         # 모든 컬럼을 문자열로 강제 변환 (Pydantic 오류 방지)
         df = df.astype(str)
         
         # 성능 최적화: 샘플링으로 문서 수 대폭 줄이기
         df['품목'] = df['품목'].fillna("정보 없음")
         
-        # 242개 중 20개만 샘플링 (성능 향상)
+        # 242개 중 3개만 샘플링 (성능 향상)
         sample_size = min(3, len(df))
         sampled_df = df.sample(n=sample_size, random_state=42)
         print(f"성능 최적화: {len(df)}개 중 {sample_size}개 샘플링")
@@ -76,17 +77,19 @@ async def main():
             # content = f"판매장명 {store_name} 위치 {address} 판매품목 {products} 업종 농산물유통. {store_name}은 {address}에 위치한 농산물 판매장으로 {products}를 판매합니다."
             # content = store_name # page_content를 판매장 이름으로 극단적으로 단순화
 
-            # page_content를 key-value 형식으로 재구성하여 100 토큰 이상으로 늘립니다.
+            # 농가 관점에서 농작물 판매처 정보를 찾는 내용으로 재구성
             content = (
-                f"판매장 이름: {store_name}. "
-                f"판매장 유형: 농산물유통. "
-                f"판매장 주소: {address}. "
-                f"판매장 주요 품목: {products}. "
-                f"이 판매장은 농산물 생산자들이 판로를 확보하고 수익을 창출할 수 있는 중요한 유통 채널입니다. "
-                f"농가에서 직접 생산한 신선한 농산물을 소비자에게 효율적으로 공급하며, "
-                f"생산자들은 안정적인 판매 기회를 얻고 유통 과정을 단순화할 수 있습니다. "
-                f"관심 있는 농가에서는 이 판매장을 통해 농산물 공급 및 판매 협력을 논의할 수 있습니다. "
-                f"자세한 내용은 판매장 담당자에게 문의 바랍니다."
+                f"농산물 판매처 정보: {store_name}. "
+                f"판매처 유형: 농산물유통업체. "
+                f"판매처 위치: {address}. "
+                f"수취하는 농산물 품목: {products}. "
+                f"이 판매처는 농가에서 생산한 농산물을 직접 수취하여 판매하는 유통업체입니다."
+                f"농가에서는 이 판매처를 통해 자신이 재배한 농작물을 안정적으로 판매할 수 있으며,"
+                f"직거래를 통해 중간 유통업체를 거치지 않고 더 높은 수익을 얻을 수 있습니다. "
+                f"판매처에서는 신선하고 품질 좋은 농산물을 선호하며,"
+                f"농가와의 지속적인 거래 관계를 중시합니다. "
+                f"농가에서는 이 판매처에 연락하여 농산물 공급 조건, 가격, 수취 시기 등을 문의할 수 있습니다."
+                f"농산물 판매를 원하는 농가에게는 좋은 판로 확보 기회가 될 수 있습니다."
             )
 
             documents.append(Document(page_content=content, metadata={"store_name": store_name, "address": address, "products": products}))
@@ -104,10 +107,20 @@ async def main():
     print(f"\n총 {len(documents)}개의 문서를 로드했습니다.")
     print("---")
 
-    # 2. RAGAS 테스트셋 생성기 설정 (공식 문서 방식)
+    # 2. 농가 페르소나 정의
+    FARMER_PERSONA = Persona(
+        name = "Beginner Farming",
+        role_description = "농사를 시작한지 얼마되지 않은 농가 주인으로, 자신이 키운 농작물을 팔 수 있는 판매처를 찾고 있습니다. 영어를 못하고 한국어만을 사용합니다."
+    )
+    personas = [FARMER_PERSONA]
+    
+    # 3. RAGAS 테스트셋 생성기 설정 (농가 페르소나 적용)
     # LLM을 LangchainLLMWrapper로 감싸기
     generator_llm = LangchainLLMWrapper(
-        ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
+        ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.8
+        )
     )
     
     # 임베딩 모델을 LangchainEmbeddingsWrapper로 감싸기
@@ -117,24 +130,30 @@ async def main():
 
     # TestsetGenerator 초기화 (공식 문서 방식)
     generator = TestsetGenerator(
-        llm=generator_llm, 
-        embedding_model=generator_embeddings
+        llm=generator_llm,
+        embedding_model=generator_embeddings,
+        persona_list=personas
     )
 
     # 3. RAGAS를 통한 골든 데이터셋 생성
     TARGET_QUESTIONS = 3
     print(f"\n총 {TARGET_QUESTIONS}개의 질문을 RAGAS로 생성 중입니다...")
     try:
+        
         # 공식 문서에 따른 테스트셋 생성
         testset = generator.generate_with_langchain_docs(
             documents=documents, 
-            testset_size=TARGET_QUESTIONS,
-            with_debugging_logs=False,
-            raise_exceptions=True # 오류 디버깅을 위해 True로 설정
+            testset_size=TARGET_QUESTIONS
         )
 
         # 4. 생성된 데이터셋을 Pandas DataFrame으로 확인 및 저장
         df = testset.to_pandas()
+        
+        # 요청한 개수만큼만 사용 (3개로 제한)
+        if len(df) > TARGET_QUESTIONS:
+            df = df.head(TARGET_QUESTIONS)
+            print(f"요청한 {TARGET_QUESTIONS}개로 제한했습니다.")
+        
         print("---")
         print("생성된 골든 데이터셋:")
         print(df.head())

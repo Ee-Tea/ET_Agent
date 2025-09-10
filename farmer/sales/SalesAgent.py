@@ -513,6 +513,7 @@ def make_system_instruction(classification="시세+판매처"):
     [지시]
     - [참고 정보]의 가격과 단위를 정확히 사용
     - 없는 정보는 없다고 안내
+    - **이나 ##같은 마크다운 형식은 제외
     - 순서: {template['order']}
     [출처 규칙] 
     - `[실시간시세 정보 (API)]`에서 가져온 정보의 출처는 'https://www.kamis.or.kr/customer/main/main.do'을 명시

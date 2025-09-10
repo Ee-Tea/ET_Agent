@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from .db import get_db
-from .auth_service import auth_service
+from .auth_service import auth_service, GoogleOAuthError
 from .schemas import AuthResponse, User, GoogleAuthRequest
 from .config import settings
 
@@ -48,46 +48,27 @@ async def google_callback(
     error: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """Handle Google OAuth callback"""
+    print("[OAUTH] settings.GOOGLE_REDIRECT_URI =", settings.GOOGLE_REDIRECT_URI)
+    
     if error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"OAuth error: {error}"
-        )
-    
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
     if not code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Authorization code not provided"
-        )
-    
-    # Authenticate with Google
-    auth_response = await auth_service.authenticate_google(db, code)
-    if not auth_response:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Failed to authenticate with Google"
-        )
-    
-    # For web applications, you might want to redirect to frontend with token
-    # For API usage, return the response directly
-    return auth_response
+        raise HTTPException(status_code=400, detail="Authorization code not provided")
 
-@router.post("/google/callback")
-async def google_callback_post(
-    request: GoogleAuthRequest,
-    db: Session = Depends(get_db)
-):
-    """Handle Google OAuth callback via POST (for API usage)"""
-    # Authenticate with Google
-    auth_response = await auth_service.authenticate_google(db, request.code)
-    if not auth_response:
+    try:
+        auth_response = await auth_service.authenticate_google(db, code)
+        return auth_response
+    except GoogleOAuthError as e:
+        # 개발 중엔 400으로 상세 원인 그대로 노출
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Failed to authenticate with Google"
+            status_code=400,
+            detail={
+                "message": e.args[0],
+                "status": e.status,
+                "payload": e.payload,  # 예: {"error":"invalid_grant","error_description":"..."}
+            },
         )
-    
-    return auth_response
+
 
 @router.get("/me", response_model=User)
 async def get_current_user_info(
@@ -126,3 +107,18 @@ async def auth_health():
     """Authentication service health check"""
     return {"status": "healthy", "service": "authentication"}
 
+@router.get("/new")
+async def auth_info():
+    """인증 API 정보"""
+    return {
+        "message": "ET Agent Authentication API",
+        "version": "1.0.0",
+        "docs": "/docs",  # FastAPI에서 기본적으로 제공하는 문서 경로
+        "auth_endpoints": {
+            "google_auth": "/auth/google",
+            "google_callback": "/auth/google/callback",
+            "me": "/auth/me",
+            "refresh": "/auth/refresh",
+            "logout": "/auth/logout"
+        }
+    }

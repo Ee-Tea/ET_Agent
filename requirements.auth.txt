@@ -6,3 +6,4 @@ sqlalchemy
 psycopg[binary]
 passlib[bcrypt]
 python-jose[cryptography]
+pydantic_settings

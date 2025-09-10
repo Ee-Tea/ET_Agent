@@ -24,3 +24,4 @@ app.include_router(auth_router)
 @app.get("/auth/health")
 async def auth_health():
     return {"status": "healthy", "service": "authentication"}
+

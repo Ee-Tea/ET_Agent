@@ -7,6 +7,8 @@ from .db import get_db
 from .auth_service import auth_service, GoogleOAuthError
 from .schemas import AuthResponse, User, GoogleAuthRequest
 from .config import settings
+from fastapi.responses import RedirectResponse
+
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -50,7 +52,6 @@ async def google_callback(
     print("[OAUTH] settings.GOOGLE_REDIRECT_URI =", settings.GOOGLE_REDIRECT_URI)
     print("[OAUTH] query_params:", dict(request.query_params))
     print("[OAUTH] code:", code, "error:", error)
-    print("[OAUTH] settings.GOOGLE_REDIRECT_URI:", settings.GOOGLE_REDIRECT_URI)
     
     if error:
         raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
@@ -59,7 +60,20 @@ async def google_callback(
 
     try:
         auth_response = await auth_service.authenticate_google(db, code)
-        return auth_response
+
+        # JWT를 HttpOnly 쿠키로 심기 (개발환경이라 secure=False)
+        resp = RedirectResponse(
+            url=f"{settings.FRONTEND_BASE_URL}/?login=ok"
+        )
+        resp.set_cookie(
+            key="access_token",
+            value=auth_response.token.access_token,
+            httponly=True,
+            secure=False,          # 개발환경에선 False, 배포땐 True
+            samesite="lax",        # 필요에 맞게 조정
+            max_age=auth_response.token.expires_in
+        )
+        return resp
     except GoogleOAuthError as e:
         # 개발 중엔 400으로 상세 원인 그대로 노출
         raise HTTPException(
@@ -124,3 +138,8 @@ async def auth_info():
             "logout": "/auth/logout"
         }
     }
+
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon_noop():
+    from fastapi import Response
+    return Response(status_code=204)

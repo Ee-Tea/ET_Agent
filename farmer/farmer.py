@@ -12,7 +12,6 @@ import operator
 from langsmith import traceable
 from dotenv import load_dotenv
 import os, sys
-import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -546,15 +545,6 @@ class Farmer:
             if agent_func:
                 agent_state = {"query": question_part}
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "작물추천_agent 실행 함수가 연결되어 있지 않습니다."
@@ -614,15 +604,6 @@ class Farmer:
             if agent_func:
                 agent_state = {"query": question_part}
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "작물재배_agent 실행 함수가 연결되어 있지 않습니다."
@@ -667,15 +648,6 @@ class Farmer:
             if agent_func:
                 agent_state = {"query": question_part}
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "재해_agent 실행 함수가 연결되어 있지 않습니다."
@@ -720,15 +692,6 @@ class Farmer:
             if agent_func:
                 agent_state = {"query": question_part}
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "판매처_agent 실행 함수가 연결되어 있지 않습니다."
@@ -770,15 +733,6 @@ class Farmer:
             if agent_func:
                 agent_state = {"query": question_part}
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "날씨_agent 실행 함수가 연결되어 있지 않습니다."
@@ -836,12 +790,7 @@ class Farmer:
             agent = selected_agents[0]
             if agent in agent_results:
                 result = agent_results[agent]
-                # coroutine 객체인지 확인
-                if asyncio.iscoroutine(result):
-                    print(f"[⚠️ {agent} 결과가 coroutine입니다. 기본 메시지로 대체합니다.")
-                    output = f"{agent} 실행이 완료되었습니다."
-                else:
-                    output = str(result)
+                output = str(result)
                 print(f"[✅ 단일 에이전트 응답 완료] {agent}")
             else:
                 output = f"{agent} 실행 결과를 찾을 수 없습니다."
@@ -860,10 +809,6 @@ class Farmer:
             # 다른 에이전트들의 답변 표시
             for agent, answer in agent_results.items():
                 if agent != "작물추천_agent":  # 이미 표시됨
-                    # coroutine 객체인지 확인
-                    if asyncio.iscoroutine(answer):
-                        print(f"[⚠️ {agent} 결과가 coroutine입니다. 기본 메시지로 대체합니다.")
-                        answer = f"{agent} 실행이 완료되었습니다."
                     # 에이전트 결과 추가
                     output += f"[{agent} 결과]\n{str(answer)}\n"
             
@@ -873,12 +818,8 @@ class Farmer:
                 output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
                 output += f"'{state['selected_crop'][0] if state['selected_crop'] else ''} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
         
-        # coroutine 객체인지 확인하고 안전하게 처리
-        if asyncio.iscoroutine(output):
-            print("[⚠️ output이 coroutine입니다. 기본 메시지로 대체합니다.")
-            merged_output = "에이전트 실행이 완료되었습니다."
-        else:
-            merged_output = str(output).strip()
+        # 최종 출력 처리
+        merged_output = str(output).strip()
         
         # 에이전트가 하나뿐인 경우 LLM 요약 생략
         if len(selected_agents) == 1:
@@ -1025,8 +966,6 @@ class Farmer:
         #     print(f"그래프 시각화 중 오류 발생: {e}")
         return workflow.compile()
 
-
-    
     def run_standalone(self):
         """독립 실행용 함수 (기존 방식과 호환)"""
         while True:
@@ -1042,6 +981,3 @@ class Farmer:
                 print(f"\n오류가 발생했습니다: {e}")
                 traceback.print_exc()
                 continue
-
-if __name__ == "__main__":
-    run_orchestrator_langgraph()

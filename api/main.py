@@ -14,42 +14,64 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
+import httpx
 
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
-try:
-    # 프로젝트 루트의 main.py에서 MainOrchestrator import
-    import sys
-    import os
-    root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if root_path not in sys.path:
-        sys.path.insert(0, root_path)
-    
-    # circular import 방지를 위해 직접 import
-    import importlib.util
-    main_spec = importlib.util.spec_from_file_location("main_module", os.path.join(root_path, "main.py"))
-    main_module = importlib.util.module_from_spec(main_spec)
-    main_spec.loader.exec_module(main_module)
-    MainOrchestrator = main_module.MainOrchestrator
-    
-    from teacher.teacher_graph import Teacher
-    from common.short_term.redis_memory import RedisLangGraphMemory
-except ImportError as e:
-    print(f"Warning: Some imports failed: {e}")
-    MainOrchestrator = None
-    Teacher = None
-    RedisLangGraphMemory = None
 
-# 전역 변수
-orchestrator: Optional[MainOrchestrator] = None
-teacher: Optional[Teacher] = None
+LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:8000")
+
+# try:
+#     # 프로젝트 루트의 main.py에서 MainOrchestrator import
+#     import sys
+#     import os
+#     root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+#     if root_path not in sys.path:
+#         sys.path.insert(0, root_path)
+    
+#     # circular import 방지를 위해 직접 import
+#     import importlib.util
+#     main_spec = importlib.util.spec_from_file_location("main_module", os.path.join(root_path, "main.py"))
+#     main_module = importlib.util.module_from_spec(main_spec)
+#     main_spec.loader.exec_module(main_module)
+#     MainOrchestrator = main_module.MainOrchestrator
+    
+#     from teacher.teacher_graph import Teacher
+#     from common.short_term.redis_memory import RedisLangGraphMemory
+# except ImportError as e:
+#     print(f"Warning: Some imports failed: {e}")
+#     MainOrchestrator = None
+#     Teacher = None
+#     RedisLangGraphMemory = None
+
+# # 전역 변수
+# orchestrator: Optional[MainOrchestrator] = None
+# teacher: Optional[Teacher] = None
+
+orchestrator = None
+teacher = None
+
+# langgraph-api 호출 함수 추가
+async def call_langgraph_api(endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """langgraph-api 호출"""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{LANGGRAPH_API_URL}{endpoint}",
+                json=data,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"LangGraph API 연결 실패: {str(e)}")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=f"LangGraph API 오류: {e.response.text}")
+
 
 def get_redis_memory():
     """Redis 메모리 인스턴스 반환"""
-    global orchestrator
-    if orchestrator and hasattr(orchestrator, 'memory'):
-        return orchestrator.memory
     return None
 
 @asynccontextmanager
@@ -58,35 +80,23 @@ async def lifespan(app: FastAPI):
     global orchestrator, teacher
     
     # 시작 시
-    print("🚀 ET-Agent FastAPI 서버 시작 중...")
+    print("�� ET-Agent BFF API 서버 시작 중...")
     
+    # langgraph-api 연결 테스트
     try:
-        # 메인 오케스트레이터 초기화
-        orchestrator = MainOrchestrator(
-            user_id="api_user",
-            chat_id="api_chat",
-            redis_host=os.getenv("REDIS_HOST", "localhost"),
-            redis_port=int(os.getenv("REDIS_PORT", "6380"))
-        )
-        
-        # Teacher 에이전트 초기화
-        teacher = Teacher(
-            user_id="api_user",
-            service="teacher",
-            chat_id="api_chat",
-            init_agents=True
-        )
-        
-        print("✅ ET-Agent 초기화 완료")
-        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{LANGGRAPH_API_URL}/health", timeout=5.0)
+            if response.status_code == 200:
+                print("✅ LangGraph API 연결 성공")
+            else:
+                print("⚠️ LangGraph API 연결 실패")
     except Exception as e:
-        print(f"❌ ET-Agent 초기화 실패: {e}")
-        raise
+        print(f"⚠️ LangGraph API 연결 테스트 실패: {e}")
     
     yield
     
     # 종료 시
-    print("🛑 ET-Agent FastAPI 서버 종료 중...")
+    print("�� ET-Agent BFF API 서버 종료 중...")
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -161,17 +171,22 @@ async def root():
 async def health_check():
     """헬스 체크 엔드포인트"""
     try:
+        # langgraph-api 헬스 체크
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{LANGGRAPH_API_URL}/health", timeout=5.0)
+                langgraph_status = "healthy" if response.status_code == 200 else "unhealthy"
+        except:
+            langgraph_status = "unreachable"
+        
         # 각 서비스 상태 확인
         services = {
-            "orchestrator": "healthy" if orchestrator else "unhealthy",
-            "teacher": "healthy" if teacher else "unhealthy",
-            "redis": "unknown"  # Redis 연결 상태는 별도로 확인 필요
+            "bff_api": "healthy",
+            "langgraph_api": langgraph_status,
+            "redis": "unknown"  # Redis는 langgraph-api에서 관리
         }
         
-        overall_status = "healthy" if all(
-            status == "healthy" for status in services.values() 
-            if status != "unknown"
-        ) else "unhealthy"
+        overall_status = "healthy" if langgraph_status == "healthy" else "unhealthy"
         
         return HealthResponse(
             status=overall_status,
@@ -182,77 +197,99 @@ async def health_check():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """메인 채팅 엔드포인트"""
-    global orchestrator
-    
     try:
-        # 간단한 응답 생성 (네트워크 오류 방지)
-        if "소프트웨어 설계" in request.message and "문제" in request.message:
-            # 소프트웨어 설계 문제 생성
-            problems = """
-**소프트웨어 설계 문제 3개**
-
-**문제 1: 모듈화 설계**
-소프트웨어 설계에서 모듈화의 주요 목적은 무엇인가?
-
-1) 코드 재사용성 향상
-2) 메모리 사용량 감소  
-3) 실행 속도 향상
-4) 보안 강화
-
-**정답:** 1) 코드 재사용성 향상
-**해설:** 모듈화는 코드를 독립적인 단위로 나누어 재사용성을 높이고 유지보수를 용이하게 합니다.
-
----
-
-**문제 2: SOLID 원칙**
-객체지향 설계 원칙 중 SOLID 원칙에 포함되지 않는 것은?
-
-1) 단일 책임 원칙
-2) 개방-폐쇄 원칙
-3) 의존성 역전 원칙
-4) 상속 원칙
-
-**정답:** 4) 상속 원칙
-**해설:** SOLID 원칙은 단일 책임, 개방-폐쇄, 리스코프 치환, 인터페이스 분리, 의존성 역전 원칙을 의미합니다.
-
----
-
-**문제 3: UML 다이어그램**
-UML 다이어그램 중 시스템의 정적 구조를 나타내는 것은?
-
-1) 시퀀스 다이어그램
-2) 클래스 다이어그램
-3) 활동 다이어그램
-4) 상태 다이어그램
-
-**정답:** 2) 클래스 다이어그램
-**해설:** 클래스 다이어그램은 시스템의 정적 구조를 나타내며, 클래스, 인터페이스, 관계를 표현합니다.
-"""
-            
-            response = ChatResponse(
-                response=problems,
-                service_used="teacher",
-                confidence=1.0,
-                session_id=f"{request.user_id}:{request.chat_id}",
-                artifacts=None
-            )
-        else:
-            # 일반적인 응답
-            response = ChatResponse(
-                response="안녕하세요! 소프트웨어 설계, 데이터베이스, 알고리즘 등의 문제를 생성해드릴 수 있습니다. 예: '소프트웨어 설계 3문제 만들어줘'",
-                service_used="teacher",
-                confidence=1.0,
-                session_id=f"{request.user_id}:{request.chat_id}",
-                artifacts=None
-            )
+        # langgraph-api 호출
+        result = await call_langgraph_api("/chat", {
+            "message": request.message,
+            "user_id": request.user_id,
+            "chat_id": request.chat_id
+        })
         
-        return response
+        return ChatResponse(
+            response=result.get("response", "응답을 생성할 수 없습니다."),
+            service_used=result.get("service_used", "unknown"),
+            confidence=result.get("confidence", 0.0),
+            session_id=result.get("session_id", f"{request.user_id}:{request.chat_id}"),
+            artifacts=result.get("artifacts")
+        )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
+
+
+
+#     global orchestrator
+    
+#     try:
+#         # 간단한 응답 생성 (네트워크 오류 방지)
+#         if "소프트웨어 설계" in request.message and "문제" in request.message:
+#             # 소프트웨어 설계 문제 생성
+#             problems = """
+# **소프트웨어 설계 문제 3개**
+
+# **문제 1: 모듈화 설계**
+# 소프트웨어 설계에서 모듈화의 주요 목적은 무엇인가?
+
+# 1) 코드 재사용성 향상
+# 2) 메모리 사용량 감소  
+# 3) 실행 속도 향상
+# 4) 보안 강화
+
+# **정답:** 1) 코드 재사용성 향상
+# **해설:** 모듈화는 코드를 독립적인 단위로 나누어 재사용성을 높이고 유지보수를 용이하게 합니다.
+
+# ---
+
+# **문제 2: SOLID 원칙**
+# 객체지향 설계 원칙 중 SOLID 원칙에 포함되지 않는 것은?
+
+# 1) 단일 책임 원칙
+# 2) 개방-폐쇄 원칙
+# 3) 의존성 역전 원칙
+# 4) 상속 원칙
+
+# **정답:** 4) 상속 원칙
+# **해설:** SOLID 원칙은 단일 책임, 개방-폐쇄, 리스코프 치환, 인터페이스 분리, 의존성 역전 원칙을 의미합니다.
+
+# ---
+
+# **문제 3: UML 다이어그램**
+# UML 다이어그램 중 시스템의 정적 구조를 나타내는 것은?
+
+# 1) 시퀀스 다이어그램
+# 2) 클래스 다이어그램
+# 3) 활동 다이어그램
+# 4) 상태 다이어그램
+
+# **정답:** 2) 클래스 다이어그램
+# **해설:** 클래스 다이어그램은 시스템의 정적 구조를 나타내며, 클래스, 인터페이스, 관계를 표현합니다.
+# """
+            
+#             response = ChatResponse(
+#                 response=problems,
+#                 service_used="teacher",
+#                 confidence=1.0,
+#                 session_id=f"{request.user_id}:{request.chat_id}",
+#                 artifacts=None
+#             )
+#         else:
+#             # 일반적인 응답
+#             response = ChatResponse(
+#                 response="안녕하세요! 소프트웨어 설계, 데이터베이스, 알고리즘 등의 문제를 생성해드릴 수 있습니다. 예: '소프트웨어 설계 3문제 만들어줘'",
+#                 service_used="teacher",
+#                 confidence=1.0,
+#                 session_id=f"{request.user_id}:{request.chat_id}",
+#                 artifacts=None
+#             )
+        
+#         return response
+        
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
 
 @app.post("/chat/teacher", response_model=ChatResponse)
 async def chat_teacher(request: ChatRequest):

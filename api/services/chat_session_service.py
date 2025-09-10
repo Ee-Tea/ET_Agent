@@ -1,4 +1,5 @@
 # api/services/chat_session_service.py
+import time
 import asyncpg
 from typing import List, Dict, Any, Optional
 import json
@@ -44,7 +45,7 @@ class ChatSessionService:
     
     async def save_chat_session(self, user_id: str, chat_id: str, session_data: Dict[str, Any]):
         """채팅 세션 저장"""
-        thread_id = f"{user_id}:{chat_id}"
+        thread_id = f"supervisor:{user_id}:{chat_id}"
         checkpoint_id = f"checkpoint_{int(time.time())}"
         
         async with self.pool.acquire() as conn:

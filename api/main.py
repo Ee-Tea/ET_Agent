@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
 import httpx
+from api.routers import chat, health, sessions
 
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))

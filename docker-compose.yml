@@ -1,113 +1,114 @@
+# AUTO-MERGED docker-compose (sources: docker-compose.yml, docker-compose.api.yml, docker-compose.override.yml)
+# This file preserves settings from the above files with later files overriding earlier ones.
+# Edit build.dockerfile paths per-service if needed:
+#   Available Dockerfiles in this upload: Dockerfile, Dockerfile.api, Dockerfile.auth
+
 volumes:
-    langgraph-data:
-        driver: local
+  langgraph-data:
+    driver: local
+  redis_data: null
+  postgres_data: null
 
 services:
-#  etcd:
-#    container_name: milvus-etcd
-#    image: quay.io/coreos/etcd:v3.5.5
-#    environment:
-#      - ETCD_AUTO_COMPACTION_MODE=revision
-#      - ETCD_AUTO_COMPACTION_RETENTION=1000
-#      - ETCD_QUOTA_BACKEND_BYTES=4294967296
-#      - ETCD_SNAPSHOT_COUNT=50000
-#    volumes:
-#      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
-#    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
-#    healthcheck:
-#      test: ["CMD", "etcdctl", "endpoint", "health"]
-#      interval: 30s
-#      timeout: 20s
-#      retries: 3
-#
-#  minio:
-#    container_name: milvus-minio
-#    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
-#    environment:
-#      MINIO_ACCESS_KEY: minioadmin
-#      MINIO_SECRET_KEY: minioadmin
-#    ports:
-#      - "9001:9001"
-#      - "9000:9000"
-#    volumes:
-#      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
-#    command: minio server /minio_data --console-address ":9001"
-#    healthcheck:
-#      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-#      interval: 30s
-#      timeout: 20s
-#      retries: 3
-#
-#  standalone:
-#    container_name: milvus-standalone
-#    image: milvusdb/milvus:v2.4.15
-#    command: ["milvus", "run", "standalone"]
-#    security_opt:
-#    - seccomp:unconfined
-#    environment:
-#      ETCD_ENDPOINTS: etcd:2379
-#      MINIO_ADDRESS: minio:9000
-#    volumes:
-#      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
-#    healthcheck:
-#      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-#      interval: 30s
-#      start_period: 90s
-#      timeout: 20s
-#      retries: 3
-#    ports:
-#      - "19530:19530"
-#      - "9091:9091"
-#    depends_on:
-#      - "etcd"
-#      - "minio"
 
   redis:
     image: redis:7.2
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+      - CMD
+      - redis-cli
+      - ping
       interval: 5s
       timeout: 1s
       retries: 5
     ports:
-      - "6380:6379"
+    - 6380:6379
     command: redis-server --appendonly no
     volumes:
-      - ./data/redis:/data
+    - ./data/redis:/data
+
+  postgres-init:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGHOST: langgraph-postgres
+      PGPORT: 5432
+    command: |
+      sh -c "
+        echo 'Waiting for PostgreSQL to be ready...'
+        until pg_isready -h langgraph-postgres -p 5432 -U postgres; do
+          echo 'PostgreSQL is unavailable - sleeping'
+          sleep 2
+        done
+        echo 'PostgreSQL is up - executing command'
+        
+        # PostgresSaver 테이블 생성
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS checkpoints (
+            thread_id TEXT PRIMARY KEY,
+            checkpoint_id TEXT NOT NULL,
+            parent_checkpoint_id TEXT,
+            checkpoint_ns TEXT,
+            checkpoint JSONB,
+            metadata JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+        \"
+        
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+            thread_id TEXT,
+            checkpoint_id TEXT,
+            channel TEXT,
+            version TEXT,
+            type TEXT,
+            blob BYTEA,
+            created_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (thread_id, checkpoint_id, channel, version)
+          );
+        \"
+        
+        echo 'Database initialization completed'
+      "
+    depends_on:
+      langgraph-postgres:
+        condition: service_healthy
 
   langgraph-postgres:
-      image: postgres:16
-      ports:
-          - "5433:5432"
-      environment:
-          POSTGRES_DB: postgres
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-      volumes:
-          - langgraph-data:/var/lib/postgresql/data
-      healthcheck:
-          test: pg_isready -U postgres
-          start_period: 10s
-          timeout: 1s
-          retries: 5
-          interval: 5s
+    image: postgres:16
+    ports:
+    - 5433:5432
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+    - langgraph-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   auth-api:
     build:
       context: .
-      dockerfile: Dockerfile.auth
+      dockerfile: Dockerfile.auth.slim
     ports:
-      - "8124:8000"
+    - 8124:8000
     depends_on:
       langgraph-postgres:
         condition: service_healthy
     env_file:
-      - .env
+    - .env
     environment:
       DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
       PYTHONPATH: /deps/LLM-T
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/auth/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/auth/health', timeout=2).read(); print('ok')\""]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -119,31 +120,74 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8123:8000"
+    - 8123:8000
     depends_on:
       redis:
         condition: service_healthy
       langgraph-postgres:
         condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
     env_file:
-      - .env
+    - .env
     environment:
       REDIS_URI: redis://redis:6379/0
       LANGSMITH_API_KEY=REDACTED}
       POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
-      # Milvus 연결 설정 (애플리케이션 컨테이너 내부에서는 'localhost' 대신 서비스명 사용)
-
-      MILVUS_HOST: ${MILVUS_HOST:-standalone}
-      MILVUS_PORT: ${MILVUS_PORT:-19530}
-      MILVUS_COLLECTION: problems
       PYTHONPATH: /deps/LLM-T
+      LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
+      RUN_IN_CONTAINER: '1'
+      REDIS_DEBUG: 'false'
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+    volumes:
+    - ./:/deps/LLM-T:rw
 
-      LANGGRAPH_GRAPHS: >-
-        [{"id":"agent","import_path":"graph:graph"}]
-      
+  bff-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api.slim
+    ports:
+    - 8100:8000
+    environment:
+    - PYTHONPATH=/app
+    - REDIS_HOST=redis
+    - REDIS_PORT=6379
+    - OPENAI_API_KEY=REDACTED}
+    - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
+    - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
+    - LANGCHAIN_API_KEY=REDACTED}
+    - GIT_PYTHON_REFRESH=quiet
+    - LANGGRAPH_API_BASE=http://langgraph-api:8000
+    - LANGGRAPH_API_URL=http://langgraph-api:8000
+    depends_on:
+    - redis
+    - langgraph-postgres
+    - langgraph-api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+    - ./api:/app/api 
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
-
+  nginx:
+    image: nginx:alpine
+    ports:
+    - 80:80
+    - 443:443
+    volumes:
+    - ./nginx.conf:/etc/nginx/nginx.conf
+    - ./ssl:/etc/nginx/ssl
+    depends_on:
+    - bff-api
+    restart: unless-stopped
 
 networks:
   default:
-    name: milvus
+    name: et-agent-network
+    driver: bridge
+

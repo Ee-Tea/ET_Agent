@@ -430,7 +430,7 @@ class SolutionAgent(BaseAgent):
 
     
 
-    def _extract_triplet(self, text: str, options: List[str]) -> tuple[Optional[int], str, str]:
+    def _extract_triplet(self, text: str, options: List[str], similar_problems: List = None) -> tuple[Optional[int], str, str]:
 
         """
 
@@ -550,7 +550,7 @@ class SolutionAgent(BaseAgent):
 
 
 
-        # 3) 과목: 5개로 정규화
+        # 3) 과목: 유사도 검색 결과를 활용한 정확한 과목 판단
 
         subject_raw = ""
 
@@ -561,6 +561,12 @@ class SolutionAgent(BaseAgent):
             subject_raw = m_subject.group(1).strip()
 
 
+
+        # 유사도 검색 결과에서 과목 정보 추출
+
+        subject_from_similar = self._extract_subject_from_similar_problems(similar_problems or [])
+
+        
 
         SUBJECT_SET = {
 
@@ -600,7 +606,21 @@ class SolutionAgent(BaseAgent):
 
 
 
-        subject = _normalize_subject(subject_raw)
+        # LLM 응답에서 추출한 과목과 유사도 검색 결과를 결합
+
+        llm_subject = _normalize_subject(subject_raw)
+
+        if llm_subject and llm_subject != "":
+
+            subject = llm_subject
+
+        elif subject_from_similar and subject_from_similar != "":
+
+            subject = subject_from_similar
+
+        else:
+
+            subject = "일반"
 
 
 
@@ -615,6 +635,56 @@ class SolutionAgent(BaseAgent):
 
 
         return ans_num, expl, subject
+
+    def _extract_subject_from_similar_problems(self, similar_problems: List) -> str:
+        """
+        유사도 검색 결과에서 과목 정보를 추출하는 함수
+        """
+        try:
+            if not similar_problems:
+                return ""
+            
+            # 과목 키워드 매핑
+            subject_keywords = {
+                "소프트웨어설계": ["소프트웨어 설계", "소프트웨어-설계", "설계", "UML", "요구사항", "아키텍처"],
+                "소프트웨어개발": ["소프트웨어 개발", "개발", "프로그래밍", "코딩", "구현"],
+                "데이터베이스구축": ["데이터베이스", "DB", "SQL", "관계형", "정규화", "인덱스", "트랜잭션"],
+                "프로그래밍언어활용": ["프로그래밍 언어", "언어활용", "프언활", "Java", "Python", "C++"],
+                "정보시스템구축관리": ["정보시스템", "구축관리", "정시관", "시스템", "관리", "운영"]
+            }
+            
+            # 유사 문제들의 과목 정보 수집
+            subject_votes = {}
+            
+            for problem in similar_problems:
+                if isinstance(problem, dict):
+                    # 메타데이터에서 과목 정보 추출
+                    metadata = problem.get("metadata", {})
+                    subject = metadata.get("subject", "")
+                    
+                    if subject and subject != "일반":
+                        subject_votes[subject] = subject_votes.get(subject, 0) + 1
+                        continue
+                    
+                    # 문제 내용에서 과목 키워드 추출
+                    problem_text = problem.get("page_content", "")
+                    for subject, keywords in subject_keywords.items():
+                        for keyword in keywords:
+                            if keyword.lower() in problem_text.lower():
+                                subject_votes[subject] = subject_votes.get(subject, 0) + 1
+                                break
+            
+            # 가장 많이 나온 과목 반환
+            if subject_votes:
+                best_subject = max(subject_votes.items(), key=lambda x: x[1])[0]
+                print(f"🔍 [Subject] 유사 문제에서 과목 추출: {best_subject} (투표: {subject_votes})")
+                return best_subject
+            
+            return ""
+            
+        except Exception as e:
+            print(f"⚠️ [Subject] 유사 문제에서 과목 추출 실패: {e}")
+            return ""
 
     
 
@@ -1274,7 +1344,9 @@ class SolutionAgent(BaseAgent):
 
             clean,
 
-            state.get('user_problem_options') or []
+            state.get('user_problem_options') or [],
+
+            state.get('problems_contexts', [])  # 유사도 검색 결과 전달
 
         )
 

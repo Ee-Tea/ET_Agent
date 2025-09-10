@@ -14,6 +14,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from api.services.chat_session_service import ChatSessionService
 from common.short_term.redis_memory import RedisLangGraphMemory
+from common.milvus_manager import MilvusDBManager
 from teacher.teacher import Teacher, TeacherState
 from farmer.farmer import Farmer, RouterState
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -29,6 +30,9 @@ class MainState(TypedDict):
     existing_questions: Annotated[List[Dict], "기존 문제 목록"]
     locked_service: Optional[str]
     short_term_data: Annotated[Dict[str, Any], "숏텀 메모리 데이터"]
+    
+    # MilvusDB 데이터
+    milvus_data: Annotated[Dict[str, Any], "MilvusDB에서 주입된 데이터"]
     
     # 분류 결과
     is_relevant: bool
@@ -57,6 +61,13 @@ class MainOrchestrator:
             api_key=os.getenv("OPENAI_API_KEY")
         )
         
+        # MilvusDB 관리자 초기화
+        self.milvus_manager = MilvusDBManager()
+        
+        # MilvusDB 연결
+        if not self.milvus_manager.connect():
+            print("⚠️ MilvusDB 연결 실패 - 일부 기능이 제한될 수 있습니다.")
+        
         # 메모리 시스템 초기화
         self.memory = RedisLangGraphMemory(
             user_id=user_id,
@@ -72,6 +83,7 @@ class MainOrchestrator:
         self.graph = self._create_graph()
         
         print(f"✅ MainOrchestrator 초기화 완료 (session: {self.session_key})")
+        print(f"🔗 MilvusDB 연결 상태: {'✅ 연결됨' if self.milvus_manager.is_connected else '❌ 연결 안됨'}")
 
     async def initialize(self):
         """초기화 - 테이블 생성 및 연결 풀 설정"""
@@ -169,6 +181,7 @@ class MainOrchestrator:
         
         # 노드 추가
         workflow.add_node("load_memory", self.load_memory_data)
+        workflow.add_node("inject_milvus_data", self.inject_milvus_data)
         workflow.add_node("classify_question_and_service", self.classify_question_and_service)
         workflow.add_node("validate_classification", self._refine_classification_if_needed)
         workflow.add_node("check_consistency", self.check_final_service_consistency)
@@ -185,7 +198,8 @@ class MainOrchestrator:
         workflow.set_entry_point("load_memory")
         
         # 엣지 추가
-        workflow.add_edge("load_memory", "classify_question_and_service")
+        workflow.add_edge("load_memory", "inject_milvus_data")
+        workflow.add_edge("inject_milvus_data", "classify_question_and_service")
         workflow.add_conditional_edges(
             "classify_question_and_service",
             self._route_after_classification,
@@ -276,6 +290,41 @@ class MainOrchestrator:
             state["existing_questions"] = []
             state["locked_service"] = None
             state["short_term_data"] = {}
+        
+        return state
+    
+    def inject_milvus_data(self, state: MainState) -> MainState:
+        """2. MilvusDB 연결 정보 주입"""
+        print("🔗 MilvusDB 연결 정보 주입 중...")
+        
+        try:
+            # MilvusDB가 연결되어 있지 않으면 빈 데이터로 진행
+            if not self.milvus_manager.is_connected:
+                print("⚠️ MilvusDB가 연결되지 않음 - 빈 연결 정보로 진행")
+                state["milvus_data"] = {
+                    "teacher": {"connection_status": False},
+                    "farmer": {"connection_status": False},
+                    "connection_status": False
+                }
+                return state
+            
+            # MilvusDB 연결 정보 제공 (직렬화 가능한 형태로)
+            state["milvus_data"] = {
+                "connection_status": True,
+                "host": self.milvus_manager.host,
+                "port": self.milvus_manager.port,
+                "embedding_model_name": self.milvus_manager.embedding_model_name
+            }
+            
+            print(f"✅ MilvusDB 연결 정보 주입 완료")
+            
+        except Exception as e:
+            print(f"❌ MilvusDB 연결 정보 주입 실패: {e}")
+            state["milvus_data"] = {
+                "milvus_manager": None,
+                "connection_status": False,
+                "error": str(e)
+            }
         
         return state
     
@@ -501,10 +550,15 @@ class MainOrchestrator:
             short_term_data = state.get("short_term_data", {})
             farmer_data = short_term_data.get("farmer", {})
             
-            # Farmer 상태 준비 (기존 데이터 + 숏텀 메모리 데이터)
+            # MilvusDB 연결 정보 로드
+            milvus_data = state.get("milvus_data", {})
+            
+            # Farmer 상태 준비 (기존 데이터 + 숏텀 메모리 데이터 + MilvusDB 연결 정보)
             farmer_state = {
                 "query": state["user_query"],
-                "selected_crop": farmer_data.get("selected_crop", "")
+                "selected_crop": farmer_data.get("selected_crop", ""),
+                # MilvusDB 연결 정보 주입
+                "milvus_data": milvus_data
             }
             
             # Farmer 그래프 실행
@@ -528,7 +582,10 @@ class MainOrchestrator:
             short_term_data = state.get("short_term_data", {})
             teacher_data = short_term_data.get("teacher", {})
             
-            # Teacher 상태 준비 (기존 문제 + 숏텀 메모리 데이터)
+            # MilvusDB 연결 정보 로드
+            milvus_data = state.get("milvus_data", {})
+            
+            # Teacher 상태 준비 (기존 문제 + 숏텀 메모리 데이터 + MilvusDB 연결 정보)
             teacher_state = {
                 "user_query": state["user_query"],
                 "intent": self._determine_teacher_intent(state["user_query"]),
@@ -542,7 +599,9 @@ class MainOrchestrator:
                 },
                 "routing": {
                     "output_mode": "pdf"  # 비대화형 모드
-                }
+                },
+                # MilvusDB 연결 정보 주입
+                "milvus_data": milvus_data
             }
             
             # Teacher 그래프 실행 (config 추가)
@@ -671,6 +730,7 @@ class MainOrchestrator:
             existing_questions=[],
             locked_service=None,
             short_term_data={},
+            milvus_data={},
             is_relevant=False,
             classified_service="",
             service_consistent=False,

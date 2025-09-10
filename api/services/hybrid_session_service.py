@@ -474,8 +474,7 @@ class HybridSessionService:
         title = (first_message or "").strip()
         if not title:
             return
-        # 간단 요약: 앞 50자
-        title = title[:50]
+        await self._ensure_pool()
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """

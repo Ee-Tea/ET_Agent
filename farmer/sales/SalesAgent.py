@@ -24,7 +24,6 @@ from typing import Dict, Any, List, Optional, TypedDict
 from tavily import TavilyClient
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
-import asyncio
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -114,12 +113,12 @@ def classify_question_simple(query: str) -> str:
 1. "시세" - 가격, 시세, 얼마, 값, 원 등 가격 정보만 요구하는 경우
 2. "판매처" - 파는 곳, 판매점, 직매장, 시장, 어디, 판매처 등 판매 장소만 요구하는 경우  
 3. "시세+판매처" - 가격과 판매처 정보를 모두 요구하는 경우
-4. "정보 부족" - 구체적인 작물명이 없는데 시세를 요구한 경우 혹은 구체적인 지역명이 없는데 판매처를 요구한 경우
+4. "정보부족" - 구체적인 작물명이 없는데 시세를 요구한 경우 혹은 구체적인 지역명이 없는데 판매처를 요구한 경우
 
 **분류 기준 예시:**
 - "시세"와 "판매처" 키워드가 함께 있으면 → "시세+판매처"
-- "농작물"과 "시세" 키워드가 함께 있을 때는 작물명의 유무에 따라 → "시세" or "정보 부족"
-- "농작물"과 "판매처" 키워드가 함께 있을 때는 지역명의 유무에 따라 → "판매처" or "정보 부족"
+- "농작물"과 "시세" 키워드가 함께 있을 때는 작물명의 유무에 따라 → "시세" or "정보부족"
+- "농작물"과 "판매처" 키워드가 함께 있을 때는 지역명의 유무에 따라 → "판매처" or "정보부족"
 - 구체적인 작물명과 "팔고 싶어", "판매" 등 팔고 싶은 의도가 있으면('지역명'에서 '작물명' 팔고 싶어) → "시세+판매처"
 - 가격 관련 키워드만 있으면 → "시세"
 - 판매처 관련 키워드만 있으면 → "판매처"
@@ -127,7 +126,7 @@ def classify_question_simple(query: str) -> str:
 
 질문: {query}
 
-분류 결과 (반드시 위 4가지 중 하나만 출력):
+분류 결과 (반드시 위 4가지 중 하나만 출력, 따옴표나 마침표 없이):
 """)
     
     try:
@@ -136,14 +135,19 @@ def classify_question_simple(query: str) -> str:
         
         # 분류 실행
         result = chain.invoke({"query": query})
+        print(f"🔍 LLM 원본 응답: '{result}'")
         
-        # 결과 정리
+        # 결과 정리 - 더 강력한 정리 로직
         classification = result.strip()
         
+        # 추가 정리: 따옴표, 마침표, 공백 제거
+        classification = classification.replace('"', '').replace("'", '').replace('.', '').replace(' ', '')
+        print(f"🔍 정리된 분류: '{classification}'")
+        
         # 유효한 분류인지 확인
-        valid_classifications = ["시세", "판매처", "시세+판매처", "정보 부족"]
+        valid_classifications = ["시세", "판매처", "시세+판매처", "정보부족"]
         if classification not in valid_classifications:
-            print(f"⚠️ LLM 분류 결과가 유효하지 않음: {classification}, 기본값 사용")
+            print(f"⚠️ LLM 분류 결과가 유효하지 않음: '{result.strip()}' -> '{classification}', 기본값 사용")
             return "시세+판매처"
         
         return classification
@@ -1043,7 +1047,7 @@ graph.add_edge("output", END)
 graph.set_entry_point("input")
 
 # 실행 함수
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
     OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수 (비동기)
     
@@ -1067,12 +1071,16 @@ async def run(state: dict) -> dict:
         app = graph.compile()
         result_state = app.invoke(state)
         
-        # 답변 추출
+        # 답변 및 컨텍스트 추출
         answer = result_state.get("final_answer", "답변을 생성할 수 없습니다.")
+        context = result_state.get("context", {})
         
         print(f"[판매처_agent] 답변 생성 완료: {len(answer)}자")
         
-        return {"agent_answer": answer}
+        return {
+            "agent_answer": answer,
+            "context": context
+        }
         
     except Exception as e:
         error_msg = f"판매처 에이전트 실행 중 오류가 발생했습니다: {e}"

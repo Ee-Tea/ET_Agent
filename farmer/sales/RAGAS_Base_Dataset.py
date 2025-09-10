@@ -165,7 +165,7 @@ async def main():
             print("CSV 파일을 찾을 수 없습니다.")
             return
         
-        dataset_filename = "sales_golden_dataset.csv"
+        dataset_filename = "./farmer/sales/data/sales_golden_dataset.csv"
         
     elif choice == '2':
         # API 문서만 사용
@@ -186,7 +186,7 @@ async def main():
             print(f"API 데이터 처리 중 오류: {e}")
             return
         
-        dataset_filename = "price_golden_dataset.csv"
+        dataset_filename = "./farmer/sales/data/price_golden_dataset.csv"
     
     print(f"총 {len(documents)}개의 문서를 생성했습니다.")
             
@@ -276,6 +276,8 @@ async def main():
             df = df.head(TARGET_QUESTIONS)
             print(f"요청한 {TARGET_QUESTIONS}개로 제한했습니다.")
 
+        # 디렉토리가 없으면 생성
+        os.makedirs(os.path.dirname(dataset_filename), exist_ok=True)
         df.to_csv(dataset_filename, index=False, encoding="utf-8-sig")
         print(f"\n총 {len(df)}개의 농가 관점 질문이 {dataset_filename} 파일로 저장되었습니다.")
         if choice == '1':

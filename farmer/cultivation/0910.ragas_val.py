@@ -1,5 +1,3 @@
-# validation.py (새 파일)
-
 import os
 import sys
 import pandas as pd
@@ -19,7 +17,7 @@ from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # 챗봇 파일에서 핵심 함수를 import합니다.
-from CG_agent_valv import create_retriever, run_agent
+from CG_agent_valv import retrieve_top_k_from_collections, run_agent
 
 # 환경 변수 로드
 load_dotenv()
@@ -90,15 +88,8 @@ def run_ragas_evaluation(question: str, answer: str, contexts: List[str]):
 # --- 메인 실행 로직 ---
 if __name__ == "__main__":
     print("🌱 챗봇 검증 시스템 시작...")
-    
-    # 챗봇 에이전트 준비
     print("챗봇 시스템을 준비하는 중입니다...")
-    try:
-        retriever = create_retriever()
-    except Exception as e:
-        print(f"오류: 챗봇 시스템을 초기화할 수 없습니다. {e}")
-        sys.exit()
-
+    # retriever 객체를 생성하는 부분이 필요 없습니다.
     print("챗봇 시스템 준비 완료!\n")
     
     while True:
@@ -109,9 +100,10 @@ if __name__ == "__main__":
         
         print("\n🔍 챗봇 답변을 생성하는 중...")
         
-        # CG_agent_valv.py의 함수를 호출하여 답변 및 컨텍스트를 가져옴
         try:
-            chatbot_result = run_agent(prompt, retriever)
+            # ❗ 해결책: 수정된 run_agent 함수에 question(prompt)만 전달합니다.
+            chatbot_result = run_agent(prompt)
+            
         except Exception as e:
             print(f"챗봇 답변 생성 중 오류가 발생했습니다: {e}")
             continue
@@ -120,7 +112,6 @@ if __name__ == "__main__":
         db_sources = chatbot_result.get('db_sources', [])
         web_sources = chatbot_result.get('web_sources', [])
         
-        # 답변 생성에 사용된 모든 컨텍스트를 하나의 리스트로 통합
         contexts = [src.get('content') for src in db_sources] + \
                    [src.get('content') for src in web_sources]
         

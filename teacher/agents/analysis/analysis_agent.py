@@ -234,8 +234,8 @@ subject 는 각 문항의 과목명(문자열)입니다.
     "action_plan": {{
       "title": "맞춤 학습 계획",
       "short_term_goal": "1~2주 내 실행 목표",
-      "long_term_goal": "장기적 성장 목표",
-      "recommended_strategies": ["구체적 전략 1", "구체적 전략 2"],
+      "long_term_goal": "장기적 성장 목표: 3주차 ~ 8주차 목표를 주차별로 구체적이고 자세한 내용으로로 정리해서 알려주기",
+      "recommended_strategies": ["구체적 전략 1", "구체적 전략 2","구체적 전략 3"], 자세하고 구체적인 전략 제시,
       "recommended_resources": ["자료/강의 (선택)"]
     }},
     "final_message": "격려 메시지"
@@ -255,16 +255,23 @@ subject 는 각 문항의 과목명(문자열)입니다.
 
                 feedback_content = completion.choices[0].message.content
                 print(f"✅ [AnalysisAgent] LLM 응답 완료: {len(feedback_content)}자")
+                print(f"🔍 [AnalysisAgent] LLM 응답 내용: {feedback_content[:200]}...")
                 
                 try:
                     parsed_feedback = json.loads(feedback_content)
                     print(f"✅ [AnalysisAgent] JSON 파싱 성공")
+                    print(f"🔍 [AnalysisAgent] 파싱된 키들: {list(parsed_feedback.keys())}")
                 except json.JSONDecodeError as e:
                     print(f"⚠️ [AnalysisAgent] JSON 파싱 실패: {e}")
+                    print(f"🔍 [AnalysisAgent] 원본 응답: {feedback_content}")
                     parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
                     
                 state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
                 state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+                
+                print(f"🔍 [AnalysisAgent] 최종 결과:")
+                print(f"  - detailed_analysis: {len(state['detailed_analysis'])}개")
+                print(f"  - overall_assessment: {state['overall_assessment']}")
                 
             except Exception as e:
                 print(f"❌ [AnalysisAgent] LLM 호출 실패: {e}")

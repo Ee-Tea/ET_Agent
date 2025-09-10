@@ -2176,6 +2176,21 @@ class Teacher:
             print(f"  - detailed_analysis: {len(detailed_analysis)}개")
             print(f"  - overall_assessment: {'있음' if overall_assessment else '없음'}")
             print(f"  - weak_types: {weak_type}")
+            
+            # overall_assessment 상세 내용 확인
+            if overall_assessment:
+                print(f"  - overall_assessment 키들: {list(overall_assessment.keys())}")
+                print(f"  - strengths: {overall_assessment.get('strengths', '없음')}")
+                print(f"  - weaknesses: {overall_assessment.get('weaknesses', '없음')}")
+                print(f"  - final_message: {overall_assessment.get('final_message', '없음')}")
+                print(f"  - action_plan: {'있음' if overall_assessment.get('action_plan') else '없음'}")
+                if overall_assessment.get('action_plan'):
+                    action_plan = overall_assessment.get('action_plan')
+                    print(f"    - action_plan 타입: {type(action_plan)}")
+                    if isinstance(action_plan, dict):
+                        print(f"    - action_plan 키들: {list(action_plan.keys())}")
+            else:
+                print(f"  - overall_assessment가 비어있음!")
 
             analysis_data = {
                 "problems": problems,

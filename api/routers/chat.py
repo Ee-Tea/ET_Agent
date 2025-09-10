@@ -5,6 +5,7 @@
 from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from datetime import datetime
+from ..services import chat_session_service
 
 from ..models import (
     ChatRequest, ChatResponse, 

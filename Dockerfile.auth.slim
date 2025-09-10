@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Auth 코드만 복사
 COPY auth/ /app/auth
+COPY alembic/ /app/alembic
+COPY alembic.ini /app/alembic.ini
+
 
 EXPOSE 8000
 CMD ["uvicorn", "auth.main:app", "--host","0.0.0.0","--port","8000"]

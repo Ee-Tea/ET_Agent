@@ -105,8 +105,7 @@ services:
     env_file:
     - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
-      PYTHONPATH: /deps/LLM-T
+      PYTHONPATH: /app
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/auth/health', timeout=2).read(); print('ok')\""]
       interval: 10s
@@ -114,6 +113,10 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    volumes:
+    - ./auth:/app/auth
+    - ./alembic:/app/alembic
+    - ./alembic.ini:/app/alembic.ini
 
   langgraph-api:
     build:
@@ -133,7 +136,6 @@ services:
     environment:
       REDIS_URI: redis://redis:6379/0
       LANGSMITH_API_KEY=REDACTED}
-      POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
       RUN_IN_CONTAINER: '1'

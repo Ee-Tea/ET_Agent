@@ -351,7 +351,6 @@ class ComprehensivePDFGenerator:
 
         # 상세 분석(LLM 산출) 섹션
         if isinstance(detailed, list) and detailed:
-            story.append(PageBreak())
             story.append(Paragraph("🧠 LLM 상세 분석", self.styles["section"]))
             story.append(Spacer(1, 3*mm))
             rows = [["문항", "유형", "과목", "분석"]]
@@ -388,21 +387,147 @@ class ComprehensivePDFGenerator:
             story.append(dt)
             story.append(Spacer(1, 6*mm))
 
-        # 종합 평가(LLM 산출)
+        # 종합 평가(LLM 산출) - 개선된 버전
         if isinstance(overall, dict) and overall:
+            story.append(PageBreak())
             story.append(Paragraph("📝 종합 평가", self.styles["section"]))
-            for k in ["final_message", "strengths", "weaknesses", "tips", "next_steps"]:
-                val = overall.get(k) or overall.get(k.title().replace("_"," "))
-                if val:
-                    label = {
-                        "final_message":"총평",
-                        "strengths":"강점",
-                        "weaknesses":"약점",
-                        "tips":"팁",
-                        "next_steps":"다음 단계"
-                    }[k]
-                    story.append(Paragraph(f"<b>{label}</b> — {str(val)}", self.styles["explanation"]))
             story.append(Spacer(1, 6*mm))
+            
+            # 제목 (title)
+            title = overall.get("title") or overall.get("Title") or overall.get("제목")
+            if title:
+                story.append(Paragraph(f"📋 {title}", self.styles["subtitle"]))
+                story.append(Spacer(1, 6*mm))
+            
+            # 총평 (final_message)
+            final_message = overall.get("final_message") or overall.get("Final Message") or overall.get("총평")
+            if final_message:
+                story.append(Paragraph("🎯 총평", self.styles["subtitle"]))
+                story.append(Paragraph(str(final_message), self.styles["explanation"]))
+                story.append(Spacer(1, 8*mm))
+            
+            # 강점 분석 (strengths_analysis)
+            strengths_analysis = overall.get("strengths_analysis") or overall.get("Strengths Analysis") or overall.get("강점 분석")
+            if strengths_analysis:
+                story.append(Paragraph("💪 강점 분석", self.styles["subtitle"]))
+                story.append(Paragraph(str(strengths_analysis), self.styles["explanation"]))
+                story.append(Spacer(1, 6*mm))
+            
+            # 강점과 약점을 나란히 표시
+            strengths = overall.get("strengths") or overall.get("Strengths") or overall.get("강점")
+            weaknesses = overall.get("weaknesses") or overall.get("Weaknesses") or overall.get("약점")
+            
+            if strengths or weaknesses:
+                story.append(Paragraph("📊 강점과 약점", self.styles["subtitle"]))
+                story.append(Spacer(1, 4*mm))
+                
+                # 강점과 약점을 2열 테이블로 표시
+                strength_weakness_data = []
+                if strengths:
+                    strength_weakness_data.append(["✅ 강점", str(strengths)])
+                if weaknesses:
+                    strength_weakness_data.append(["❌ 약점", str(weaknesses)])
+                
+                if strength_weakness_data:
+                    # 텍스트를 Paragraph로 감싸서 자동 줄바꿈 처리
+                    formatted_data = []
+                    for row in strength_weakness_data:
+                        formatted_row = [
+                            Paragraph(row[0], self.styles["answer"]),  # 강점/약점 라벨
+                            Paragraph(row[1], self.styles["explanation"])  # 내용
+                        ]
+                        formatted_data.append(formatted_row)
+                    
+                    sw_table = Table(formatted_data, colWidths=[25*mm, 155*mm])
+                    sw_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (0, -1), HexColor('#E8F5E8')),
+                        ('BACKGROUND', (1, 0), (1, -1), HexColor('#F8F8F8')),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('FONTNAME', (0, 0), (-1, -1), FONT_NAME),
+                        ('FONTSIZE', (0, 0), (-1, -1), 9),
+                        ('GRID', (0, 0), (-1, -1), 1, black),
+                        ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                        ('TOPPADDING', (0, 0), (-1, -1), 4),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4)
+                    ]))
+                    story.append(sw_table)
+                    story.append(Spacer(1, 8*mm))
+            
+            # 맞춤 학습 계획 (action_plan)
+            action_plan = overall.get("action_plan") or overall.get("Action Plan") or overall.get("맞춤 학습 계획")
+            if action_plan:
+                story.append(Paragraph("📚 맞춤 학습 계획", self.styles["subtitle"]))
+                if isinstance(action_plan, dict):
+                    plan_title = action_plan.get("title") or action_plan.get("Title") or "학습 계획"
+                    story.append(Paragraph(f"<b>{plan_title}</b>", self.styles["explanation"]))
+                    
+                    short_term = action_plan.get("short_term_goal") or action_plan.get("Short Term Goal")
+                    if short_term:
+                        story.append(Paragraph(f"🎯 단기 목표: {str(short_term)}", self.styles["explanation"]))
+                    
+                    long_term = action_plan.get("long_term_goal") or action_plan.get("Long Term Goal")
+                    if long_term:
+                        story.append(Paragraph(f"🚀 장기 목표: {str(long_term)}", self.styles["explanation"]))
+                    
+                    # 추천 전략 (recommended_strategies)
+                    recommend_strategies = action_plan.get("recommended_strategies") or action_plan.get("Recommended Strategies")
+                    if recommend_strategies and isinstance(recommend_strategies, list):
+                        story.append(Paragraph("🎯 추천 전략:", self.styles["explanation"]))
+                        for i, strategy in enumerate(recommend_strategies, 1):
+                            story.append(Paragraph(f"  {i}. {str(strategy)}", self.styles["explanation"]))
+                        story.append(Spacer(1, 4*mm))
+                    
+                    recommendations = action_plan.get("recommendations") or action_plan.get("Recommendations")
+                    if recommendations and isinstance(recommendations, list):
+                        story.append(Paragraph("💡 권장사항:", self.styles["explanation"]))
+                        for i, rec in enumerate(recommendations, 1):
+                            story.append(Paragraph(f"  {i}. {str(rec)}", self.styles["explanation"]))
+                else:
+                    story.append(Paragraph(str(action_plan), self.styles["explanation"]))
+                story.append(Spacer(1, 6*mm))
+            
+            # 심화 학습 계획 (deepen_learning_plan)
+            deepen_plan = overall.get("deepen_learning_plan") or overall.get("Deepen Learning Plan") or overall.get("심화 학습 계획")
+            if deepen_plan:
+                story.append(Paragraph("🔥 심화 학습 계획", self.styles["subtitle"]))
+                if isinstance(deepen_plan, dict):
+                    plan_title = deepen_plan.get("title") or deepen_plan.get("Title") or "심화 학습"
+                    story.append(Paragraph(f"<b>{plan_title}</b>", self.styles["explanation"]))
+                    
+                    recommendations = deepen_plan.get("recommendations") or deepen_plan.get("Recommendations")
+                    if recommendations and isinstance(recommendations, list):
+                        for i, rec in enumerate(recommendations, 1):
+                            story.append(Paragraph(f"  {i}. {str(rec)}", self.styles["explanation"]))
+                else:
+                    story.append(Paragraph(str(deepen_plan), self.styles["explanation"]))
+                story.append(Spacer(1, 6*mm))
+            
+            # 추천 전략 (recommend_strategies)
+            recommend_strategies = overall.get("recommend_strategies") or overall.get("Recommend Strategies") or overall.get("추천 전략")
+            if recommend_strategies:
+                story.append(Paragraph("🎯 추천 전략", self.styles["subtitle"]))
+                if isinstance(recommend_strategies, list):
+                    for i, strategy in enumerate(recommend_strategies, 1):
+                        story.append(Paragraph(f"{i}. {str(strategy)}", self.styles["explanation"]))
+                else:
+                    story.append(Paragraph(str(recommend_strategies), self.styles["explanation"]))
+                story.append(Spacer(1, 6*mm))
+            
+            # 팁과 다음 단계
+            tips = overall.get("tips") or overall.get("Tips") or overall.get("팁")
+            next_steps = overall.get("next_steps") or overall.get("Next Steps") or overall.get("다음 단계")
+            
+            if tips:
+                story.append(Paragraph("💡 학습 팁", self.styles["subtitle"]))
+                story.append(Paragraph(str(tips), self.styles["explanation"]))
+                story.append(Spacer(1, 6*mm))
+            
+            if next_steps:
+                story.append(Paragraph("🚀 다음 단계", self.styles["subtitle"]))
+                story.append(Paragraph(str(next_steps), self.styles["explanation"]))
+                story.append(Spacer(1, 6*mm))
 
         doc.build(story)
         print(f"✅ 오답 분석 리포트 생성 완료: {output_path}")

@@ -49,6 +49,9 @@ async def google_callback(
     db: Session = Depends(get_db)
 ):
     print("[OAUTH] settings.GOOGLE_REDIRECT_URI =", settings.GOOGLE_REDIRECT_URI)
+    print("[OAUTH] query_params:", dict(request.query_params))
+    print("[OAUTH] code:", code, "error:", error)
+    print("[OAUTH] settings.GOOGLE_REDIRECT_URI:", settings.GOOGLE_REDIRECT_URI)
     
     if error:
         raise HTTPException(status_code=400, detail=f"OAuth error: {error}")

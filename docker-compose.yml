@@ -45,7 +45,7 @@ services:
         echo 'PostgreSQL is up - executing command'
         
         # PostgresSaver 테이블 생성
-        psql -h langgraph-postgres -U postgres -d postgres -c \"
+        psql -h langgraph-postgres -U postgres -d appdb -c \"
           CREATE TABLE IF NOT EXISTS checkpoints (
             thread_id TEXT PRIMARY KEY,
             checkpoint_id TEXT NOT NULL,
@@ -57,7 +57,7 @@ services:
           );
         \"
         
-        psql -h langgraph-postgres -U postgres -d postgres -c \"
+        psql -h langgraph-postgres -U postgres -d appdb -c \"
           CREATE TABLE IF NOT EXISTS checkpoint_blobs (
             thread_id TEXT,
             checkpoint_id TEXT,
@@ -140,7 +140,9 @@ services:
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
       RUN_IN_CONTAINER: '1'
       REDIS_DEBUG: 'false'
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+      DATABASE_URL: postgresql+psycopg://appuser:apppw@langgraph-postgres:5432/appdb
+      POSTGRES_URI: postgres://appuser:apppw@langgraph-postgres:5432/appdb
+
     volumes:
     - ./:/deps/LLM-T:rw
 

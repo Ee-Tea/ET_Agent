@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 import httpx
 from api.routers import chat, health, sessions
+from api.services.hybrid_session_service import HybridSessionService
 
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
@@ -52,6 +53,7 @@ LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:8000")
 
 orchestrator = None
 teacher = None
+hybrid_session_service = None
 
 # langgraph-api 호출 함수 추가
 async def call_langgraph_api(endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -78,10 +80,27 @@ def get_redis_memory():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행되는 함수"""
-    global orchestrator, teacher
+    global orchestrator, teacher, hybrid_session_service
     
     # 시작 시
-    print("�� ET-Agent BFF API 서버 시작 중...")
+    print("🚀 ET-Agent BFF API 서버 시작 중...")
+    
+    # 하이브리드 세션 서비스 초기화
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
+        postgres_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/postgres")
+        
+        hybrid_session_service = HybridSessionService(redis_url, postgres_url)
+        await hybrid_session_service.init_postgres()
+        print("✅ 하이브리드 세션 서비스 초기화 완료")
+        
+        # 채팅 라우터에 서비스 주입
+        import api.routers.chat as chat_module
+        chat_module.set_services(orchestrator, teacher, hybrid_session_service)
+        
+    except Exception as e:
+        print(f"⚠️ 하이브리드 세션 서비스 초기화 실패: {e}")
+        hybrid_session_service = None
     
     # langgraph-api 연결 테스트
     try:
@@ -97,7 +116,12 @@ async def lifespan(app: FastAPI):
     yield
     
     # 종료 시
-    print("�� ET-Agent BFF API 서버 종료 중...")
+    print("🛑 ET-Agent BFF API 서버 종료 중...")
+    
+    # 하이브리드 세션 서비스 정리
+    if hybrid_session_service and hasattr(hybrid_session_service, 'pool'):
+        await hybrid_session_service.pool.close()
+        print("✅ 하이브리드 세션 서비스 정리 완료")
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -202,13 +226,38 @@ async def health_check():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """메인 채팅 엔드포인트"""
+    global hybrid_session_service
+    
     try:
+        # 사용자 메시지를 하이브리드 서비스에 저장
+        if hybrid_session_service:
+            await hybrid_session_service.add_chat_message(
+                request.user_id, 
+                request.chat_id, 
+                "user", 
+                request.message
+            )
+        
         # langgraph-api 호출
         result = await call_langgraph_api("/chat", {
             "message": request.message,
             "user_id": request.user_id,
             "chat_id": request.chat_id
         })
+        
+        # 에이전트 응답을 하이브리드 서비스에 저장
+        if hybrid_session_service:
+            await hybrid_session_service.add_chat_message(
+                request.user_id, 
+                request.chat_id, 
+                "assistant", 
+                result.get("response", "응답을 생성할 수 없습니다."),
+                {
+                    "service_used": result.get("service_used", "unknown"),
+                    "confidence": result.get("confidence", 0.0),
+                    "artifacts": result.get("artifacts")
+                }
+            )
         
         return ChatResponse(
             response=result.get("response", "응답을 생성할 수 없습니다."),
@@ -295,12 +344,21 @@ async def chat(request: ChatRequest):
 @app.post("/chat/teacher", response_model=ChatResponse)
 async def chat_teacher(request: ChatRequest):
     """Teacher 서비스 전용 채팅 엔드포인트"""
-    global teacher
+    global teacher, hybrid_session_service
     
     if not teacher:
         raise HTTPException(status_code=503, detail="Teacher service not initialized")
     
     try:
+        # 사용자 메시지를 하이브리드 서비스에 저장
+        if hybrid_session_service:
+            await hybrid_session_service.add_chat_message(
+                request.user_id, 
+                request.chat_id, 
+                "user", 
+                request.message
+            )
+        
         # Teacher 상태 초기화
         teacher_state = {
             "user_query": request.message,
@@ -322,6 +380,20 @@ async def chat_teacher(request: ChatRequest):
         # Teacher 실행
         result = teacher.execute(teacher_state)
         
+        # 에이전트 응답을 하이브리드 서비스에 저장
+        if hybrid_session_service:
+            await hybrid_session_service.add_chat_message(
+                request.user_id, 
+                request.chat_id, 
+                "assistant", 
+                result.get("llm_response", "응답을 생성할 수 없습니다."),
+                {
+                    "service_used": "teacher",
+                    "confidence": 1.0,
+                    "artifacts": result.get("artifacts")
+                }
+            )
+        
         # 응답 구성
         response = ChatResponse(
             response=result.get("llm_response", "응답을 생성할 수 없습니다."),
@@ -339,10 +411,20 @@ async def chat_teacher(request: ChatRequest):
 @app.post("/sessions", response_model=SessionResponse)
 async def create_session(request: SessionRequest):
     """새 세션 생성"""
+    global hybrid_session_service
+    
     try:
         from datetime import datetime
         
         session_id = f"{request.user_id}:{request.chat_id}"
+        
+        # 하이브리드 서비스로 세션 시작
+        if hybrid_session_service:
+            await hybrid_session_service.start_session(
+                request.user_id, 
+                request.chat_id,
+                {"service_type": "general"}
+            )
         
         return SessionResponse(
             session_id=session_id,
@@ -370,13 +452,15 @@ async def delete_session(session_id: str):
 @app.get("/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
     """세션 히스토리 조회"""
+    global hybrid_session_service
+    
     try:
-        if not orchestrator or not hasattr(orchestrator, 'memory'):
-            raise HTTPException(status_code=503, detail="Memory service not available")
+        if not hybrid_session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
         
         # 세션 히스토리 조회
         user_id, chat_id = session_id.split(":", 1)
-        history = orchestrator.memory.get_chat_history()
+        history = await hybrid_session_service.get_session_messages(user_id, chat_id)
         
         return {
             "session_id": session_id,

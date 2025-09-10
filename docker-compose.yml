@@ -70,6 +70,42 @@ services:
           );
         \"
         
+        # 하이브리드 세션 서비스용 테이블 생성
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS chat_sessions (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            session_data JSONB,
+            metadata JSONB,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            is_active BOOLEAN DEFAULT TRUE,
+            UNIQUE(user_id, chat_id)
+          );
+        \"
+        
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS chat_messages (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            message_type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+        \"
+        
+        # 인덱스 생성
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+        \"
+        
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE INDEX IF NOT EXISTS idx_chat_messages_user_chat ON chat_messages(user_id, chat_id);
+        \"
+        
         echo 'Database initialization completed'
       "
     depends_on:
@@ -148,10 +184,14 @@ services:
       dockerfile: Dockerfile.api.slim
     ports:
     - 8100:8000
+    env_file:
+    - .env
     environment:
     - PYTHONPATH=/app
     - REDIS_HOST=redis
     - REDIS_PORT=6379
+    - REDIS_URL=redis://redis:6379
+    - DATABASE_URL=postgresql://postgres:postgres@langgraph-postgres:5432/postgres
     - OPENAI_API_KEY=REDACTED}
     - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
     - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
@@ -162,6 +202,7 @@ services:
     depends_on:
     - redis
     - langgraph-postgres
+    - postgres-init
     - langgraph-api
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:

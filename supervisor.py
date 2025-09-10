@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from api.services.chat_session_service import ChatSessionService
+from api.services.hybrid_session_service import HybridSessionService
 from common.short_term.redis_memory import RedisLangGraphMemory
 from common.milvus_manager import MilvusDBManager
 from teacher.teacher import Teacher, TeacherState
@@ -52,7 +52,18 @@ class MainOrchestrator:
         self.user_id = user_id
         self.chat_id = chat_id
         self.session_key = f"{user_id}_{chat_id}"
-        self.chat_session_service = ChatSessionService(os.getenv("DATABASE_URL"))
+        self.hybrid_session_service = HybridSessionService(
+            os.getenv("REDIS_URL", "redis://localhost:6380"),
+            os.getenv("DATABASE_URL")
+        )
+        
+        # 하이브리드 세션 서비스 초기화
+        import asyncio
+        try:
+            asyncio.run(self.hybrid_session_service.init_postgres())
+        except Exception as e:
+            print(f"⚠️ 하이브리드 세션 서비스 초기화 실패: {e}")
+            self.hybrid_session_service = None
         
         # LLM 초기화
         self.llm = ChatOpenAI(
@@ -84,17 +95,22 @@ class MainOrchestrator:
 
     async def initialize(self):
         """초기화 - 테이블 생성 및 연결 풀 설정"""
-        await self.chat_session_service.init_pool()
-        await self.chat_session_service.create_tables_if_not_exists()
+        await self.hybrid_session_service.init_postgres()
     
     
     async def save_session(self, state: MainState):
         """세션 데이터 저장"""
-        await self.chat_session_service.save_chat_session(
-            self.user_id, 
-            self.chat_id, 
-            dict(state)
-        )
+        if self.hybrid_session_service:
+            try:
+                await self.hybrid_session_service.save_session_metadata(
+                    self.user_id, 
+                    self.chat_id, 
+                    dict(state)
+                )
+            except Exception as e:
+                print(f"⚠️ 세션 상태 저장 실패: {e}")
+        else:
+            print("⚠️ 하이브리드 세션 서비스가 초기화되지 않음")
     
     def load_recent_questions(self, limit: int = 10) -> List[Dict[str, Any]]:
         """최근 생성된 문제들을 불러오기 (added_count 사용)"""

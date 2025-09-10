@@ -255,14 +255,16 @@ def build_graph():  # LangGraph 그래프를 구축하는 함수입니다.
     agent_app = g.compile()  # 그래프를 컴파일하여 실행 가능한 객체로 만듭니다.
     return agent_app  # 컴파일된 객체를 반환합니다.
 
-async def run(state: dict) -> dict:  # 에이전트를 비동기적으로 실행하는 함수입니다.
+def run(state: dict) -> dict:  # 에이전트를 실행하는 함수입니다.
     try:
         query = state.get("query", "")  # 상태에서 쿼리를 가져옵니다.
         if not query:  # 쿼리가 없으면
             return {"agent_answer": "질문이 제공되지 않았습니다. 작물추천 관련 질문을 해주세요."}  # 오류 메시지를 반환합니다.
         print(f"[작물추천_agent] 질문 처리 시작: {query}")  # 질문 처리 시작을 알립니다.
 
-        final_state = agent_app.invoke({"question": query})  # LangGraph 애플리케이션을 호출하여 그래프를 실행합니다.
+        # 그래프를 빌드하고 실행
+        app = build_graph()
+        final_state = app.invoke({"question": query})  # LangGraph 애플리케이션을 호출하여 그래프를 실행합니다.
 
         if isinstance(final_state, dict):  # 최종 상태가 딕셔너리이면
             answer = final_state.get("answer", "답변 생성에 실패했습니다.")  # 'answer'를 가져옵니다.

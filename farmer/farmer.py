@@ -179,8 +179,8 @@ class Farmer:
         """에이전트 함수들을 로드"""
         from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
         from farmer.cultivation.CG_agent_edit import run as crop_cultivation_run
-        from farmer.disaster.DisasterAgent import run as disaster_run
-        from farmer.WeatherAgent import run as weather_run
+        from farmer.disaster.DisasterAgent_LLM import run as disaster_run
+        from farmer.weather.run_weather_agent_simple import run as weather_run
         from farmer.sales.SalesAgent import run as market_run
         
         self.agent_functions = {
@@ -272,7 +272,7 @@ class Farmer:
             "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
         ),
         "판매처_agent": (
-            "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 실시간 시세, 최근 가격 변동을 안내합니다."
+            "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
         )
     }
@@ -557,7 +557,9 @@ class Farmer:
         selected_crop = self.select_single_crop_from_recommendations(answer)
         
         state["crop_info"] = [answer]
-        state["selected_crop"] = [selected_crop]  # 선택된 단일 작물 저장
+        # 기존 selected_crop을 완전히 클리어하고 새 값으로 대체
+        state["selected_crop"].clear()  # 기존 리스트 완전 클리어
+        state["selected_crop"].append(selected_crop)  # 새 값만 추가
         
         # 작물 추출 실패 시 fallback 플래그 설정
         if not selected_crop or selected_crop.strip() == "":
@@ -811,12 +813,6 @@ class Farmer:
                 if agent != "작물추천_agent":  # 이미 표시됨
                     # 에이전트 결과 추가
                     output += f"[{agent} 결과]\n{str(answer)}\n"
-            
-            # 다른 작물 정보 안내 추가
-            if state.get("crop_info") and state.get("selected_crop"):
-                output += f"\n[추가 정보 안내]\n"
-                output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
-                output += f"'{state['selected_crop'][0] if state['selected_crop'] else ''} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
         
         # 최종 출력 처리
         merged_output = str(output).strip()

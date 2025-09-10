@@ -379,8 +379,20 @@ async def chat(request: ChatRequest):
             "artifacts": None
         }
         
-        # 에이전트 응답을 하이브리드 서비스에 저장
+        # 보강: 챗봇 응답 저장 시점에 사용자 메시지도 한 번 더 저장 (중복 방지 메타태그 포함)
         if hybrid_session_service:
+            try:
+                await hybrid_session_service.add_chat_message(
+                    request.user_id,
+                    request.chat_id,
+                    "user",
+                    request.message,
+                    {"source": "post_assistant_save"}
+                )
+            except Exception:
+                pass
+            
+            # 에이전트 응답을 하이브리드 서비스에 저장
             await hybrid_session_service.add_chat_message(
                 request.user_id, 
                 request.chat_id, 
@@ -514,8 +526,20 @@ async def chat_teacher(request: ChatRequest):
         # Teacher 실행
         result = teacher.execute(teacher_state)
         
-        # 에이전트 응답을 하이브리드 서비스에 저장
+        # 보강: 챗봇 응답 저장 시점에 사용자 메시지도 한 번 더 저장 (중복 방지 메타태그 포함)
         if hybrid_session_service:
+            try:
+                await hybrid_session_service.add_chat_message(
+                    request.user_id,
+                    request.chat_id,
+                    "user",
+                    request.message,
+                    {"source": "post_assistant_save"}
+                )
+            except Exception:
+                pass
+            
+            # 에이전트 응답을 하이브리드 서비스에 저장
             await hybrid_session_service.add_chat_message(
                 request.user_id, 
                 request.chat_id, 

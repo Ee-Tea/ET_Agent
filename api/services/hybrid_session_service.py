@@ -21,12 +21,20 @@ class HybridSessionService:
     
     async def _ensure_pool(self):
         """연결 풀 보장: None/closed 상태이면 재생성"""
+        import asyncio
+        # 풀이 없으면 생성
         if getattr(self, "pool", None) is None:
             self.pool = await asyncpg.create_pool(self.postgres_url)
             return
-        # 일부 버전에서 _closed 플래그가 없을 수 있으므로 getattr 사용
+        # 닫힘 또는 이벤트 루프 불일치 시 재생성
         pool_closed = getattr(self.pool, "_closed", False)
-        if pool_closed:
+        pool_loop = getattr(self.pool, "_loop", None)
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        loop_mismatch = pool_loop is not None and current_loop is not None and pool_loop is not current_loop
+        if pool_closed or loop_mismatch:
             try:
                 await self.pool.close()
             except Exception:
@@ -130,6 +138,23 @@ class HybridSessionService:
     @staticmethod
     def _generate_session_id(user_id: str, chat_id: str) -> str:
         return f"{user_id}:{chat_id}"
+
+    @staticmethod
+    def _normalize_speaker(message_type: str) -> str:
+        """스피커 표준화: 다양한 입력 값을 'user' | 'chatbot' | 'system' 으로 매핑"""
+        mt = str(message_type or "").strip().lower()
+        if mt in {"user", "human", "human_message", "user_query", "input", "request"}:
+            return "user"
+        if mt in {"assistant", "bot", "chatbot", "model", "assistant_message", "ai", "response", "reply"}:
+            return "chatbot"
+        if mt in {"system", "server"}:
+            return "system"
+        # 부분 일치 보정
+        if "user" in mt or "human" in mt:
+            return "user"
+        if "assistant" in mt or "bot" in mt or "model" in mt or "ai" in mt:
+            return "chatbot"
+        return mt or "system"
 
     async def _ensure_user(self, user_id: str, user_name: Optional[str] = None, token: Optional[str] = None):
         await self._ensure_pool()
@@ -313,24 +338,34 @@ class HybridSessionService:
         await self._ensure_pool()
         async with self.pool.acquire() as conn:
             session_id = self._generate_session_id(user_id, chat_id)
-            # speaker 표준화: user_query → 'user', final_response/assistant → 'chatbot'
-            normalized_speaker = (
-                'user' if str(message_type).lower() == 'user' else
-                'chatbot' if str(message_type).lower() in ('assistant', 'bot', 'chatbot') else
-                str(message_type).lower() or 'system'
-            )
-            await conn.execute(
-                """
-                INSERT INTO chat_messages (user_id, chat_id, session_id, speaker, content, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                """,
-                user_id,
-                chat_id,
-                session_id,
-                normalized_speaker,
-                content,
-                json.dumps(metadata or {})
-            )
+            # speaker 표준화
+            normalized_speaker = self._normalize_speaker(message_type)
+            try:
+                print(
+                    f"[HybridSessionService] insert chat_message: session_id={session_id}, "
+                    f"speaker={normalized_speaker}, user_id={user_id}, chat_id={chat_id}"
+                )
+            except Exception:
+                pass
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO chat_messages (user_id, chat_id, session_id, speaker, content, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    user_id,
+                    chat_id,
+                    session_id,
+                    normalized_speaker,
+                    content,
+                    json.dumps(metadata or {})
+                )
+            except Exception as err:
+                try:
+                    print(f"[HybridSessionService][ERROR] insert failed: {err}")
+                except Exception:
+                    pass
+                raise
     
     async def get_user_sessions(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """사용자의 모든 세션 조회 (PostgreSQL)"""

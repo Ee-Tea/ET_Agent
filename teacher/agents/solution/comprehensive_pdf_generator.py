@@ -362,15 +362,28 @@ class ComprehensivePDFGenerator:
                 mistake      = str(item.get("mistake_type") or item.get("Mistake Type") or "")
                 subject      = str(item.get("subject") or item.get("Subject") or "")
                 pnum         = str(item.get("problem_number") or item.get("Problem Number") or i)
-                rows.append([pnum, mistake, subject, analysis_txt])
-            dt = Table(rows, colWidths=[15*mm, 30*mm, 35*mm, 100*mm])
+                
+                # 긴 텍스트를 Paragraph로 감싸서 자동 줄바꿈 처리
+                analysis_para = Paragraph(analysis_txt, self.styles["explanation"])
+                mistake_para = Paragraph(mistake, self.styles["answer"])
+                subject_para = Paragraph(subject, self.styles["answer"])
+                
+                rows.append([pnum, mistake_para, subject_para, analysis_para])
+            
+            # 열 너비 조정: 분석 열을 더 넓게, 전체 너비를 A4에 맞게 조정
+            dt = Table(rows, colWidths=[20*mm, 40*mm, 40*mm, 100*mm])
             dt.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), gray),
                 ('TEXTCOLOR', (0, 0), (-1, 0), white),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('FONTNAME', (0, 0), (-1, -1), FONT_NAME),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('GRID', (0, 0), (-1, -1), 1, black)
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 1, black),
+                ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),  # 한글 줄바꿈 활성화
+                ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3)
             ]))
             story.append(dt)
             story.append(Spacer(1, 6*mm))

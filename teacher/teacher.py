@@ -1206,11 +1206,19 @@ class Teacher:
         if need > 0:
             shared.setdefault("subject", []).extend(["일반"] * need)
 
-        # 전처리에서 추출한 문제가 있을 경우에만 added_count 업데이트
+        # added_count 설정 - 사용자 답안 수를 우선 고려
+        user_query = state.get("user_query", "")
+        user_answer = get_user_answer(user_query) if user_query else []
+        user_answer_count = len(user_answer) if isinstance(user_answer, list) else 0
+        
         if total_problems > 0:
             # PDF나 추출된 문제를 풀이했으므로 해당 문제 개수만큼 added_count 업데이트
             shared["added_count"] = total_problems
             print(f"📝 [Solution] 전처리 추출 문제 풀이 완료 후 added_count 업데이트: {total_problems}")
+        elif user_answer_count > 0:
+            # 전처리에서 추출한 문제가 없어도 사용자가 답안을 제출했으면 그 수만큼 채점
+            shared["added_count"] = user_answer_count
+            print(f"📝 [Solution] 사용자 답안 기반 added_count 설정: {user_answer_count}")
         else:
             # 전처리에서 추출한 문제가 없으면 added_count는 그대로 유지
             print(f"📝 [Solution] 전처리 추출 문제 없음, added_count 유지: {shared.get('added_count', 0)}")
@@ -1657,15 +1665,15 @@ class Teacher:
             raise RuntimeError("score_runner is not initialized (init_agents=False).")
         
         try:
-            user_query = state.get("user_query", "")
-            sh = shared
+            # added_count는 artifacts에서 가져오기 (기존 값 사용)
+            artifacts = new_state.get("artifacts", {})
+            added_count = artifacts.get("pdf_added_count", 0)
             
-            # score_agent를 subgraph로 실행
+            # ScoreEngine 실행
             agent_result = agent.invoke({
                 "user_answer": user_answer,
                 "solution_answer": solution_answers,
-                "user_query": user_query,
-                "shared": sh
+                "added_count": added_count
             })
             
             # ===== 채점 결과 확인 =====
@@ -1674,49 +1682,46 @@ class Teacher:
             print(f"  - agent_result 키: {list(agent_result.keys()) if isinstance(agent_result, dict) else 'N/A'}")
             print(f"  - agent_result 전체 내용: {agent_result}")
             
-            if agent_result:
+            if agent_result and agent_result.get("status") == "success":
+                # ScoreEngine 결과에서 results 추출
+                results = agent_result.get("results", [])
+                correct_count = sum(results)
+                total_count = len(results)
+                accuracy = correct_count / max(total_count, 1) if total_count > 0 else 0.0
+                
+                # 오답 번호 추출 (1-based)
+                wrong_indices = [i + 1 for i, r in enumerate(results) if r == 0]
+                correct_indices = [i + 1 for i, r in enumerate(results) if r == 1]
+                
                 # 채점 결과를 score state에 저장
-                new_state["score"].update(agent_result)
+                new_state["score"].update({
+                    "results": results,
+                    "correct_count": correct_count,
+                    "total_count": total_count,
+                    "accuracy": accuracy,
+                    "wrong_indices": wrong_indices,
+                    "correct_indices": correct_indices
+                })
                 print(f"  - new_state['score'] 업데이트 후: {new_state['score']}")
                 
                 # shared state에 채점 결과 추가
-                if "score_result" in agent_result:
-                    shared["score_result"] = agent_result["score_result"]
-                    print(f"  - shared['score_result'] 설정: {shared['score_result']}")
-                else:
-                    # score_result가 없으면 기본 구조 생성
-                    shared["score_result"] = {
-                        "correct_count": shared.get("correct_count", 0),
-                        "total_count": shared.get("total_count", 0),
-                        "accuracy": shared.get("correct_count", 0) / max(shared.get("total_count", 1), 1)
-                    }
-                    print(f"  - shared['score_result'] 기본값 설정: {shared['score_result']}")
-                
-                if "correct_count" in agent_result:
-                    shared["correct_count"] = agent_result["correct_count"]
-                    print(f"  - shared['correct_count'] 설정: {shared['correct_count']}")
-                
-                if "total_count" in agent_result:
-                    shared["total_count"] = agent_result["total_count"]
-                    print(f"  - shared['total_count'] 설정: {shared['total_count']}")
-                
-                # score_agent의 결과 구조에 따른 추가 처리
-                if "results" in agent_result:
-                    # ScoreEngine의 표준 결과 형태
-                    results = agent_result["results"]
-                    if isinstance(results, list):
-                        correct_count = sum(1 for r in results if r == 1)
-                        total_count = len(results)
-                        shared["correct_count"] = correct_count
-                        shared["total_count"] = total_count
-                        print(f"  - results에서 계산된 정답 수: {correct_count}")
-                        print(f"  - results에서 계산된 총 문제 수: {total_count}")
-                
-                print(f"  - 최종 정답 수: {shared.get('correct_count', 0)}")
-                print(f"  - 최종 총 문제 수: {shared.get('total_count', 0)}")
-                print(f"  - 정답률: {shared.get('correct_count', 0)}/{shared.get('total_count', 0)}")
-                
-                print(f"✅ [Score] 채점 완료: {shared.get('correct_count', 0)}/{shared.get('total_count', 0)} 정답")
+                shared["score_result"] = {
+                    "correct_count": correct_count,
+                    "total_count": total_count,
+                    "accuracy": accuracy,
+                    "wrong_indices": wrong_indices,
+                    "correct_indices": correct_indices
+                }
+                shared["correct_count"] = correct_count
+                shared["total_count"] = total_count
+                shared["wrong_indices"] = wrong_indices
+                shared["correct_indices"] = correct_indices
+                print(f"  - shared['score_result'] 설정: {shared['score_result']}")
+                print(f"  - shared['correct_count'] 설정: {shared['correct_count']}")
+                print(f"  - shared['total_count'] 설정: {shared['total_count']}")
+                print(f"  - 오답 번호: {wrong_indices}")
+                print(f"  - 정답 번호: {correct_indices}")
+                print(f"✅ [Score] 채점 완료: {correct_count}/{total_count} 정답")
             else:
                 print("⚠️ [Score] 채점 실패")
                 
@@ -1867,15 +1872,14 @@ class Teacher:
             
             print(f"  - 최종 results_data: {results_data}")
             
-            # analysis_agent를 subgraph로 실행 (added_count만큼만)
+            # AnalysisAgent 실행 (ScoreEngine의 결과를 grade_result로 전달)
             agent_input = {
-                "problem": questions,  # added_count만큼만 필터링된 문제들
+                "problem": questions,
                 "user_answer": user_answer,
-                "problem_types": problem_types,  # added_count만큼만 필터링된 과목들
-                "solution_answer": solution_answers,  # added_count만큼만 필터링된 정답들
-                "user_query": user_query,
-                "solution": solution,  # added_count만큼만 필터링된 해설들
-                "results": results_data  # score_result에서 추출한 결과
+                "problem_types": problem_types,
+                "solution_answer": solution_answers,
+                "solution": solution,
+                "grade_result": results_data  # ScoreEngine의 results를 grade_result로 전달
             }
             
             print(f"\n🔍 [Analysis] analysis_agent 입력 데이터:")
@@ -1894,22 +1898,26 @@ class Teacher:
             print(f"  - agent_result 타입: {type(agent_result)}")
             print(f"  - agent_result 키: {list(agent_result.keys()) if isinstance(agent_result, dict) else 'N/A'}")
             
-            if agent_result:
+            if agent_result and agent_result.get("status") == "success":
                 # 분석 결과를 analysis state에 저장
-                new_state["analysis"].update(agent_result)
+                analysis_data = agent_result.get("analysis", {})
+                new_state["analysis"].update(analysis_data)
                 
                 # shared state에 분석 결과 추가
-                if "weak_type" in agent_result:
-                    shared["weak_type"] = agent_result["weak_type"]
-                    print(f"  - 약점 유형: {len(agent_result['weak_type'])}개")
+                detailed_analysis = analysis_data.get("detailed_analysis", [])
+                overall_assessment = analysis_data.get("overall_assessment", {})
                 
-                if "wrong_question" in agent_result:
-                    shared["wrong_question"] = agent_result["wrong_question"]
-                    print(f"  - 오답 문제: {len(agent_result['wrong_question'])}개")
+                if detailed_analysis:
+                    shared["detailed_analysis"] = detailed_analysis
+                    print(f"  - 상세 분석: {len(detailed_analysis)}개")
+                
+                if overall_assessment:
+                    shared["overall_assessment"] = overall_assessment
+                    print(f"  - 종합 평가: {overall_assessment.get('title', 'N/A')}")
                 
                 print("✅ [Analysis] 분석 완료")
             else:
-                print("⚠️ [Analysis] 분석 실패")
+                print(f"⚠️ [Analysis] 분석 실패: {agent_result.get('error_message', '알 수 없는 오류') if agent_result else '결과 없음'}")
                 
         except Exception as e:
             print(f"❌ [Analysis] 분석 중 오류: {e}")
@@ -1918,8 +1926,8 @@ class Teacher:
         
         # ===== 분석 완료 후 최종 상태 확인 =====
         print(f"\n�� [Analysis] 분석 완료 후 최종 상태:")
-        print(f"  - shared['weak_type']: {len(shared.get('weak_type', []))}개")
-        print(f"  - shared['wrong_question']: {len(shared.get('wrong_question', []))}개")
+        print(f"  - shared['detailed_analysis']: {len(shared.get('detailed_analysis', []))}개")
+        print(f"  - shared['overall_assessment']: {'있음' if shared.get('overall_assessment') else '없음'}")
         print(f"  - analysis state 키: {list(new_state.get('analysis', {}).keys())}")
         
         return new_state
@@ -2159,7 +2167,19 @@ class Teacher:
                 }
 
             # analysis 에이전트 결과(상세/총평)도 함께 전달
-            analysis_payload = (new_state.get("analysis") or {}).get("analysis")
+            # shared에서 직접 가져오기
+            detailed_analysis = sh.get("detailed_analysis", [])
+            overall_assessment = sh.get("overall_assessment", {})
+            
+            analysis_payload = {
+                "detailed_analysis": detailed_analysis,
+                "overall_assessment": overall_assessment
+            }
+            
+            print(f"🔍 [PDF] 분석 데이터 확인:")
+            print(f"  - detailed_analysis: {len(detailed_analysis)}개")
+            print(f"  - overall_assessment: {'있음' if overall_assessment else '없음'}")
+            print(f"  - weak_types: {weak_type}")
 
             analysis_data = {
                 "problems": problems,

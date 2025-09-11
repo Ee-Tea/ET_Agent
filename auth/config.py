@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str
     GOOGLE_REDIRECT_URI: str
+    FRONTEND_BASE_URL: str
     
     # JWT Settings
     SECRET_KEY: str = "your-secret-key-change-in-production"

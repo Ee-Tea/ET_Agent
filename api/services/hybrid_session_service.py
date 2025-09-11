@@ -55,6 +55,27 @@ class HybridSessionService:
                     updated_at TIMESTAMP DEFAULT NOW()
                 );
 
+                -- Add OAuth columns to users table
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS provider TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_account_id TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS access_token TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_token TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS scope TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+
+                -- Add unique constraint for provider + provider_account_id
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints 
+                        WHERE table_name='users' AND constraint_name='uq_users_provider_account'
+                    ) THEN
+                        ALTER TABLE users ADD CONSTRAINT uq_users_provider_account UNIQUE (provider, provider_account_id);
+                    END IF;
+                END$$;
+
                 -- Chat Sessions (augment existing table if present)
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     id SERIAL PRIMARY KEY,

@@ -1,17 +1,43 @@
 # auth/main.py
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+import os, json
 from .auth_routes import router as auth_router  # prefix="/auth"
+from .config import settings
 
-FRONTEND_ORIGIN = "http://localhost:3000"  # 필요하면 .env로 관리
+def _parse_allowed_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "")
+    if not raw:
+        defaults = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://172.29.208.1:3000",
+        ]
+        # Ensure FRONTEND_BASE_URL is included
+        if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in defaults:
+            defaults.append(settings.FRONTEND_BASE_URL)
+        return defaults
+    try:
+        val = json.loads(raw)
+        if isinstance(val, list):
+            origins = [str(v) for v in val]
+            if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in origins:
+                origins.append(settings.FRONTEND_BASE_URL)
+            return origins
+    except Exception:
+        pass
+    origins = [v.strip() for v in raw.split(",") if v.strip()]
+    if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in origins:
+        origins.append(settings.FRONTEND_BASE_URL)
+    return origins
 
 app = FastAPI(title="Auth API")
 
 # CORS는 반드시 최종 app 인스턴스에 1회만 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],  # "*" 금지, 정확한 오리진만
-    allow_credentials=True,           # 쿠키 전달 허용
+    allow_origins=_parse_allowed_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

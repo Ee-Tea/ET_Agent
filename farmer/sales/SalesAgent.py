@@ -26,9 +26,10 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from common.milvus_helpers import search_milvus_documents, create_context_from_documents
 
 # 임베딩 모델
-embedder = SentenceTransformer("BAAI/bge-m3")
+embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
 
 # 환경 변수 로드
 load_dotenv()
@@ -56,6 +57,8 @@ class GraphState(TypedDict):
     missing_info_types: List[str]
     used_web_search: bool
     validation_details: Optional[dict]
+    milvus_data: Optional[Dict[str, Any]]
+    milvus_context: Optional[str]
 
 # 키워드 추출
 def extract_keywords(query):
@@ -163,6 +166,7 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
     """질문 분류에 따라 적절한 도구를 선택하여 정보를 수집합니다."""
     query = state["query"]
     classification = state.get("question_classification", "시세+판매처")
+    milvus_data = state.get("milvus_data", {})
     
     print(f"🛠️ 정보 수집 중...")
     
@@ -178,10 +182,10 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
         results["판매처"] = ["해당 지역에 위치한 판매점 정보가 없습니다."]
     elif classification == "판매처":
         results["실시간시세"] = ["해당 작물에 대한 정보는 현재 없습니다."]
-        results["판매처"] = execute_milvus_search(query)
+        results["판매처"] = execute_milvus_search(query, milvus_data)
     elif classification == "시세+판매처":
         results["실시간시세"] = fetch_api_data(query)[:1]
-        results["판매처"] = execute_milvus_search(query)
+        results["판매처"] = execute_milvus_search(query, milvus_data)
 
     state["context"] = results
     
@@ -310,25 +314,48 @@ def fetch_api_data(query=None):
 # ===============================
 # 정보 수집 - milvus 검색 함수
 # ===============================
-def execute_milvus_search(query: str) -> list[str]:
-    """Milvus 검색을 실행하는 공통 함수"""
+def execute_milvus_search(query: str, milvus_data: Dict[str, Any] = None) -> list[str]:
+    """Milvus 검색을 실행하는 공통 함수 (common.milvus_helpers 사용)"""
     try:
-        connections.connect("default", host=milvus_host, port=milvus_port)
+        # milvus_data가 제공되지 않으면 기존 방식 사용
+        if not milvus_data or not milvus_data.get("connection_status", False):
+            print("⚠️ MilvusDB 연결 정보 없음 - 기존 방식 사용")
+            connections.connect("default", host=milvus_host, port=milvus_port)
 
-        if not utility.has_collection(collection_name):
-            print(f"❌ Milvus 컬렉션 '{collection_name}'을 찾을 수 없습니다.")
+            if not utility.has_collection(collection_name):
+                print(f"❌ Milvus 컬렉션 '{collection_name}'을 찾을 수 없습니다.")
+                connections.disconnect("default")
+                return ["판매점 정보를 찾을 수 없습니다."]
+
+            collection = Collection(collection_name)
+            collection.load()
+            print(f"✅ Milvus 컬렉션 '{collection_name}' 로드 완료")
+
+            results = search_market_docs(query, collection, top_k=3)
             connections.disconnect("default")
+            return results
+        
+        # common.milvus_helpers 사용
+        documents = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=collection_name,
+            query=query,
+            k=3
+        )
+        
+        if not documents:
             return ["판매점 정보를 찾을 수 없습니다."]
-
-        collection = Collection(collection_name)
-        collection.load()
-        print(f"✅ Milvus 컬렉션 '{collection_name}' 로드 완료")
-
-        results = search_market_docs(query, collection, top_k=3)
-        connections.disconnect("default")
-        return results 
+        
+        # 문서를 문자열 리스트로 변환
+        results = []
+        for doc in documents:
+            results.append(doc.page_content)
+        
+        print(f"✅ MilvusDB 검색 완료: {len(documents)}개 문서")
+        return results
+        
     except Exception as e:
-        print(f"❌ Milvus 연결 오류: {e}")
+        print(f"❌ Milvus 검색 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
 
 # CSV 파일 임베딩 및 Milvus에 저장 함수
@@ -1054,6 +1081,8 @@ def run(state: dict) -> dict:
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
                - query: 사용자 질문 (필수)
+               - milvus_data: MilvusDB 연결 정보 (선택)
+               - milvus_context: 기존 Milvus 컨텍스트 (선택)
     
     Returns:
         dict: 실행 결과
@@ -1062,10 +1091,14 @@ def run(state: dict) -> dict:
     try:
         # 질문 추출
         query = state.get("query", "")
+        milvus_data = state.get("milvus_data", {})
+        milvus_context = state.get("milvus_context", "")
+        
         if not query:
             return {"agent_answer": "질문이 제공되지 않았습니다. 판매처 관련 질문을 해주세요."}
         
         print(f"[판매처_agent] 질문 처리 시작: {query}")
+        print(f"[판매처_agent] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
         # 그래프 컴파일 및 실행
         app = graph.compile()

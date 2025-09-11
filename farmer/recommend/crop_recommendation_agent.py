@@ -15,6 +15,7 @@ from tavily import TavilyClient  # Tavily API를 사용하여 웹 검색을 수�
 from langchain_openai import ChatOpenAI  # OpenAI 챗 모델을 사용합니다.
 from langgraph.graph import StateGraph, END  # LangGraph의 상태 그래프와 종료 노드를 정의합니다.
 from pymilvus import connections  # Milvus 서버와의 연결을 관리합니다.
+from common.milvus_helpers import search_milvus_documents, create_context_from_documents
 
 # ==================== 환경 변수 로드 ====================
 load_dotenv(find_dotenv())  # .env 파일의 환경 변수들을 로드합니다.
@@ -94,6 +95,8 @@ class GraphState(TypedDict, total=False):  # LangGraph의 상태를 정의하는
     answer: Optional[str]  # 최종 답변을 저장하는 필드입니다.
     answer_draft: Optional[str]  # 답변 초안을 저장하는 필드입니다.
     answer_source: Optional[str]  # 답변의 출처를 저장하는 필드입니다.
+    milvus_data: Optional[Dict[str, Any]]  # MilvusDB 연결 정보를 저장하는 필드입니다.
+    milvus_context: Optional[str]  # 기존 Milvus 컨텍스트를 저장하는 필드입니다.
 
 # ==================== 노드 분기 함수 ====================
 def route_after_retrieve(state: "GraphState") -> str:  # DB 검색 결과에 따라 다음 노드를 결정하는 분기 함수입니다.
@@ -122,37 +125,49 @@ def load_milvus_node(state: GraphState) -> Dict[str, Any]:  # Milvus 벡터스�
         raise ConnectionError("Milvus 벡터스토어 로드 실패")  # Milvus 연결 실패 에러를 발생시킵니다.
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:  # 문서를 검색하는 노드 함수입니다.
-    print("--- 노드: 문서 검색 ---")  # 노드 실행 시작을 알립니다.
+    print("--- 노드: 문서 검색 (MilvusDB 통합) ---")  # 노드 실행 시작을 알립니다.
     question = state.get("question")  # 상태에서 질문을 가져옵니다.
-    global _vectorstore  # 전역 변수 _vectorstore에 접근을 선언합니다.
-    vectorstore = _vectorstore  # 지역 변수에 할당합니다.
-    if not question or not vectorstore:
-        raise ValueError("질문 또는 벡터스토어가 누락되었습니다.")  # 필수 인자가 없으면 에러를 발생시킵니다.
+    milvus_data = state.get("milvus_data", {})  # MilvusDB 연결 정보를 가져옵니다.
     
-    enhanced_query = f"{question} 재배 방법 키우기 팁"  # 검색 정확도를 높이기 위해 쿼리를 보강합니다.
-    docs_with_scores = vectorstore.similarity_search_with_score(enhanced_query, k=10)  # 유사도 검색을 수행합니다.
+    if not question:
+        raise ValueError("질문이 누락되었습니다.")  # 필수 인자가 없으면 에러를 발생시킵니다.
     
-    filtered_docs = []  # 필터링된 문서를 저장할 리스트를 생성합니다.
-    for doc, score in docs_with_scores:  # 검색된 문서와 점수를 반복합니다.
-        content = doc.page_content or ""  # 문서 내용을 가져옵니다.
-        if score > 0.5 and len(content.strip()) > 100:  # 점수가 0.5보다 높고 내용이 100자 이상일 경우
-            filtered_docs.append(doc)  # 필터링된 문서 리스트에 추가합니다.
+    # MilvusDB 연결 확인
+    if not milvus_data.get("connection_status", False):
+        print("⚠️ MilvusDB 연결 안됨 - 빈 컨텍스트 반환")
+        return {**state, "db_context": "관련 문서를 찾을 수 없습니다."}
     
-    final_docs = filtered_docs[:5]  # 최종적으로 상위 5개의 문서만 선택합니다.
-
-    context = ""  # 컨텍스트 문자열을 초기화합니다.
-    if final_docs:  # 최종 문서가 존재하면
-        print(f"✅ {len(final_docs)}개 문서 검색 완료.")  # 검색 완료 메시지를 출력합니다.
-        for i, doc in enumerate(final_docs):
-            preview = (doc.page_content or "")[:100].replace("\n", " ")
-            print(f"   - 문서 {i+1}: '{preview}...'")  # 문서 미리보기를 출력합니다.
-            context += f"\n\n{doc.page_content}"  # 문서 내용을 컨텍스트에 추가합니다.
-    else:  # 문서가 없으면
-        print("⚠️ 검색된 문서가 없습니다.")  # 경고 메시지를 출력합니다.
-        context = "관련 문서를 찾을 수 없습니다."  # 컨텍스트에 실패 메시지를 저장합니다.
+    try:
+        # MilvusDB에서 작물 정보 검색
+        enhanced_query = f"{question} 재배 방법 키우기 팁"  # 검색 정확도를 높이기 위해 쿼리를 보강합니다.
+        documents = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=MILVUS_COLLECTION,
+            query=enhanced_query,
+            k=5
+        )
         
-    print(f"   - 컨텍스트 길이: {len(context)}자")  # 컨텍스트 길이를 출력합니다.
-    return {**state, "db_context": context}  # 상태에 DB 컨텍스트를 추가하여 반환합니다.
+        if not documents:
+            print("⚠️ MilvusDB에서 관련 문서를 찾지 못함")
+            return {**state, "db_context": "관련 문서를 찾을 수 없습니다."}
+        
+        # 기존 Milvus 컨텍스트가 있으면 추가
+        existing_milvus_context = state.get("milvus_context", "")
+        if existing_milvus_context:
+            # 기존 컨텍스트와 결합
+            context = f"{existing_milvus_context}\n\n[MilvusDB 검색 결과]\n{create_context_from_documents(documents, max_length=2000)}"
+            print("✅ 기존 Milvus 컨텍스트와 결합")
+        else:
+            # 새로 생성
+            context = create_context_from_documents(documents, max_length=2000)
+        
+        print(f"✅ MilvusDB 검색 완료: {len(documents)}개 문서")
+        print(f"   - 컨텍스트 길이: {len(context)}자")
+        return {**state, "db_context": context}
+        
+    except Exception as e:
+        print(f"❌ MilvusDB 검색 실패: {e}")
+        return {**state, "db_context": "관련 문서를 찾을 수 없습니다."}
 
 def combine_context_node(state: GraphState) -> Dict[str, Any]:  # 컨텍스트를 결합하는 노드 함수입니다.
     print("--- 노드: 컨텍스트 결합 ---")  # 노드 실행 시작을 알립니다.
@@ -258,13 +273,21 @@ def build_graph():  # LangGraph 그래프를 구축하는 함수입니다.
 def run(state: dict) -> dict:  # 에이전트를 실행하는 함수입니다.
     try:
         query = state.get("query", "")  # 상태에서 쿼리를 가져옵니다.
+        milvus_data = state.get("milvus_data", {})  # MilvusDB 연결 정보를 가져옵니다.
+        milvus_context = state.get("milvus_context", "")  # 기존 Milvus 컨텍스트를 가져옵니다.
+        
         if not query:  # 쿼리가 없으면
             return {"agent_answer": "질문이 제공되지 않았습니다. 작물추천 관련 질문을 해주세요."}  # 오류 메시지를 반환합니다.
         print(f"[작물추천_agent] 질문 처리 시작: {query}")  # 질문 처리 시작을 알립니다.
+        print(f"[작물추천_agent] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
 
         # 그래프를 빌드하고 실행
         app = build_graph()
-        final_state = app.invoke({"question": query})  # LangGraph 애플리케이션을 호출하여 그래프를 실행합니다.
+        final_state = app.invoke({
+            "question": query,
+            "milvus_data": milvus_data,
+            "milvus_context": milvus_context
+        })  # LangGraph 애플리케이션을 호출하여 그래프를 실행합니다.
 
         if isinstance(final_state, dict):  # 최종 상태가 딕셔너리이면
             answer = final_state.get("answer", "답변 생성에 실패했습니다.")  # 'answer'를 가져옵니다.

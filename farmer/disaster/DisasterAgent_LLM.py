@@ -7,6 +7,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # =========[ 벡터스토어 / 임베딩 관련 Import (맨 위) ]=========
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
+from common.milvus_helpers import search_milvus_documents, create_context_from_documents
 
 # =========[ 표준/외부 라이브러리 ]=========
 import os
@@ -111,6 +112,8 @@ class GraphState(TypedDict):
     retrieved_docs: Optional[List[Document]]
     is_retrieval_sufficient: bool
     temporal: Optional[Dict[str, Any]]
+    milvus_data: Optional[Dict[str, Any]]
+    milvus_context: Optional[str]
 
 def make_llm() -> ChatOpenAI:
     if not OPENAI_API_KEY:
@@ -251,19 +254,14 @@ _vectorstore = None
 
 # =========[ LangGraph 노드 ]=========
 def load_store_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 벡터스토어 연결 (LangChain-Milvus)")
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL_NAME,
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    vectorstore = Milvus(
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME,
-        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-    )
-    # Milvus 객체를 상태에 저장하지 않고 전역 변수로 관리
-    global _vectorstore
-    _vectorstore = vectorstore
+    print("🧩 노드: MilvusDB 연결 확인")
+    milvus_data = state.get("milvus_data", {})
+    
+    if milvus_data.get("connection_status", False):
+        print("   - ✅ MilvusDB 연결됨")
+    else:
+        print("   - ⚠️ MilvusDB 연결 안됨")
+    
     return {**state}
 
 def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
@@ -276,49 +274,44 @@ def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "question": q_raw, "temporal": temporal, "question_resolved": q_resolved}
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 검색 (메타데이터 필터링 활용)")
+    print("🧩 노드: 검색 (MilvusDB 통합)")
     q = state.get("question_resolved", state.get("question", ""))
-    vectorstore = _vectorstore
+    milvus_data = state.get("milvus_data", {})
 
-    region = extract_region_from_question(q)
-    results_with_score = []
+    # MilvusDB 연결 확인
+    if not milvus_data.get("connection_status", False):
+        print("   - ⚠️ MilvusDB 연결 안됨 - 빈 컨텍스트 반환")
+        return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
 
-    if region:
-        print(f"   - 지역명 '{region}'을(를) 사용하여 필터링된 검색 수행")
-        try:
-            expr = f"json_contains(regions, '\"{region}\"')"
-            filtered_results_with_score = vectorstore.similarity_search_with_score(q, k=5, expr=expr)
-            print(f"   - 필터링된 검색 결과: {len(filtered_results_with_score)}개")
-            results_with_score.extend(filtered_results_with_score)
-            if len(results_with_score) < 3:
-                print("   - 결과가 부족하여 일반 검색을 추가로 수행합니다.")
-                unfiltered_results_with_score = vectorstore.similarity_search_with_score(q, k=5)
-                existing_content = {doc.page_content for doc, _ in results_with_score}
-                for doc, score in unfiltered_results_with_score:
-                    if doc.page_content not in existing_content:
-                        results_with_score.append((doc, score))
-                        existing_content.add(doc.page_content)
-        except Exception as e:
-            print(f"   - ⚠️ 메타데이터 필터링 검색 실패, 일반 검색으로 대체: {e}")
-            results_with_score = vectorstore.similarity_search_with_score(q, k=8)
-    else:
-        print("   - 지역명이 없어 일반 유사도 검색 수행")
-        results_with_score = vectorstore.similarity_search_with_score(q, k=8)
-
-    results_with_score.sort(key=lambda x: x[1])
-    docs = [doc for doc, score in results_with_score]
-
-    ctx_parts = []
-    for d, score in results_with_score[:8]:
-        meta = getattr(d, "metadata", {})
-        fname = meta.get("file_name") or meta.get("source") or "unknown"
-        page = meta.get("page")
-        tag = meta.get("type") or "text"
-        header = f"[유사도:{score:.4f}][{tag}][{fname}{f' p.{page}' if page else ''}]"
-        ctx_parts.append(f"{header}\n{d.page_content}")
-
-    context = "\n\n".join(ctx_parts) or "관련 문서를 찾을 수 없습니다."
-    return {**state, "db_context": context, "retrieved_docs": docs}
+    try:
+        # MilvusDB에서 재해 관련 문서 검색
+        documents = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=COLLECTION_NAME,
+            query=q,
+            k=8
+        )
+        
+        if not documents:
+            print("   - ⚠️ MilvusDB에서 관련 문서를 찾지 못함")
+            return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
+        
+        # 기존 Milvus 컨텍스트가 있으면 추가
+        existing_milvus_context = state.get("milvus_context", "")
+        if existing_milvus_context:
+            # 기존 컨텍스트와 결합
+            context = f"{existing_milvus_context}\n\n[MilvusDB 검색 결과]\n{create_context_from_documents(documents, max_length=2000)}"
+            print("   - ✅ 기존 Milvus 컨텍스트와 결합")
+        else:
+            # 새로 생성
+            context = create_context_from_documents(documents, max_length=2000)
+        
+        print(f"   - ✅ MilvusDB 검색 완료: {len(documents)}개 문서")
+        return {**state, "db_context": context, "retrieved_docs": documents}
+        
+    except Exception as e:
+        print(f"   - ❌ MilvusDB 검색 실패: {e}")
+        return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
 
 def combine_context_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 컨텍스트 결합")
@@ -523,25 +516,35 @@ def run(state: dict) -> dict:
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
                - query: 사용자 질문 (필수)
+               - milvus_data: MilvusDB 연결 정보 (선택)
+               - milvus_context: 기존 Milvus 컨텍스트 (선택)
     
     Returns:
         dict: 실행 결과
-            - pred_answer: 최종 답변
+            - agent_answer: 최종 답변
             - source: "disaster_agent"
     """
     try:
         # 질문 추출
         query = state.get("query", "")
+        milvus_data = state.get("milvus_data", {})
+        milvus_context = state.get("milvus_context", "")
+        
         if not query:
             return {"agent_answer": "질문이 제공되지 않았습니다. 재해 관련 질문을 해주세요."}
         
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
+        print(f"[재해_agent_LLM] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
         # 그래프 빌드 및 실행
         app = build_graph()
         
         # 그래프 실행
-        result = app.invoke({"question": query})
+        result = app.invoke({
+            "question": query,
+            "milvus_data": milvus_data,
+            "milvus_context": milvus_context
+        })
         
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")

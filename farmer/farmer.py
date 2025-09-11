@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import traceback
 import signal
+from common.milvus_helpers import search_milvus_documents, search_milvus_documents_by_subject, get_milvus_retriever, create_context_from_documents
 load_dotenv()
 
 # 전역 인터럽트 플래그
@@ -63,6 +64,8 @@ class RouterState(dict):
     routing: Annotated[Dict[str, any], merge_dicts] = None
     error_info: Annotated[Dict[str, str], merge_dicts] = None
     crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = None
+    milvus_context: Annotated[str, merge_dicts] = None
+    milvus_data: Annotated[Dict[str, any], merge_dicts] = None
 
 def signal_handler(signum, frame):
     """키보드 인터럽트 시그널 핸들러"""
@@ -107,13 +110,15 @@ class Farmer:
         """그래프 시작 시 상태 초기화 - supervisor에서 query와 selected_crop만 받음"""
         print(f"📋 상태 로딩 시작...")
         
-        # supervisor에서 전달받은 상태들 백업 (query, selected_crop만)
+        # supervisor에서 전달받은 상태들 백업 (query, selected_crop, milvus_data)
         received_query = state.get("query", [])
         received_selected_crop = state.get("selected_crop", [])
+        received_milvus_data = state.get("milvus_data", {})
         
         print(f"📥 Supervisor에서 받은 상태들:")
         print(f"  - query: {received_query}")
         print(f"  - selected_crop: {received_selected_crop}")
+        print(f"  - milvus_data: {'연결됨' if received_milvus_data.get('connection_status') else '연결 안됨'}")
         
         # 기본 상태 설정
         state["session"] = {"loaded": True, "new_question": True}
@@ -127,6 +132,7 @@ class Farmer:
         state["error_info"] = {}
         state["crop_recommendation_failed"] = []
         state["artifacts"] = {}
+        state["milvus_context"] = ""
         
         # supervisor에서 받은 상태들 복원
         if received_query:
@@ -139,9 +145,15 @@ class Farmer:
         else:
             state["selected_crop"] = []
         
+        if received_milvus_data:
+            state["milvus_data"] = received_milvus_data
+        else:
+            state["milvus_data"] = {}
+        
         print(f"✅ 상태 로딩 완료:")
         print(f"  - query: {state['query']}")
         print(f"  - selected_crop: {state['selected_crop']}")
+        print(f"  - milvus_data: {'연결됨' if state['milvus_data'].get('connection_status') else '연결 안됨'}")
         
         return state
     
@@ -191,6 +203,47 @@ class Farmer:
             "판매처_agent": market_run
         }
     
+    def _retrieve_milvus_context(self, state: RouterState, query: str) -> str:
+        """MilvusDB에서 관련 컨텍스트 검색"""
+        milvus_data = state.get("milvus_data", {})
+        
+        if not milvus_data.get("connection_status", False):
+            print("⚠️ MilvusDB 연결 안됨 - 컨텍스트 없이 진행")
+            return ""
+        
+        try:
+            # Farmer 관련 컬렉션들에서 검색
+            collections = [
+                ("crop_info", 3),
+                ("crop_grow", 3),
+                ("agri_disaster_docs", 2),
+                ("market_price_docs", 2)
+            ]
+            
+            all_documents = []
+            for collection_name, k in collections:
+                documents = search_milvus_documents(
+                    milvus_data=milvus_data,
+                    collection_name=collection_name,
+                    query=query,
+                    k=k
+                )
+                all_documents.extend(documents)
+                print(f"✅ {collection_name}: {len(documents)}개 문서")
+            
+            # 컨텍스트 생성
+            if all_documents:
+                context = create_context_from_documents(all_documents, max_length=2000)
+                print(f"✅ MilvusDB 통합 컨텍스트 생성: {len(context)}자")
+                return context
+            else:
+                print("⚠️ MilvusDB에서 관련 문서를 찾지 못함")
+                return ""
+                
+        except Exception as e:
+            print(f"❌ MilvusDB 검색 실패: {e}")
+            return ""
+    
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
         """
         Supervisor에서 호출되는 메인 실행 함수 - LangGraph 워크플로우를 따라 실행
@@ -224,6 +277,12 @@ class Farmer:
                 router_state["selected_crop"] = [state.get("selected_crop")] if isinstance(state.get("selected_crop"), str) else state.get("selected_crop", [])
             else:
                 router_state["selected_crop"] = []
+            
+            # MilvusDB 연결 정보 전달
+            if state.get("milvus_data"):
+                router_state["milvus_data"] = state.get("milvus_data")
+            else:
+                router_state["milvus_data"] = {}
             
             print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
             
@@ -433,6 +492,12 @@ class Farmer:
         state.setdefault("session", {})
         state["session"]["new_question"] = True
         
+        # MilvusDB 컨텍스트 검색
+        milvus_context = self._retrieve_milvus_context(state, user_input)
+        if milvus_context:
+            state["milvus_context"] = milvus_context
+            print(f"✅ MilvusDB 컨텍스트 추가: {len(milvus_context)}자")
+        
         # 질문에서 작물명 추출
         extracted_crop = self.extract_crop_from_question(user_input)
         
@@ -543,7 +608,11 @@ class Farmer:
         try:
             agent_func = self.agent_functions.get("작물추천_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                    "milvus_context": state.get("milvus_context", "")
+                }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
@@ -604,7 +673,11 @@ class Farmer:
         try:
             agent_func = self.agent_functions.get("작물재배_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                    "milvus_context": state.get("milvus_context", "")
+                }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
@@ -648,7 +721,11 @@ class Farmer:
         try:
             agent_func = self.agent_functions.get("재해_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                    "milvus_context": state.get("milvus_context", "")
+                }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
@@ -692,7 +769,11 @@ class Farmer:
         try:
             agent_func = self.agent_functions.get("판매처_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                    "milvus_context": state.get("milvus_context", "")
+                }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
@@ -733,7 +814,11 @@ class Farmer:
         try:
             agent_func = self.agent_functions.get("날씨_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                    "milvus_context": state.get("milvus_context", "")
+                }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:

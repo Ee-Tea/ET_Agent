@@ -565,6 +565,11 @@ class Farmer:
             # 간단한 정리 (첫 번째 단어만, 줄바꿈/구두점 제거)
             cleaned_crop = extracted_crop.split('\n')[0].split('.')[0].split(',')[0].strip()
             
+            # 특정 작물명 정규화 (파 관련)
+            if cleaned_crop in ["경량파", "파"]:
+                cleaned_crop = "대파"
+                print(f"🔄 작물명 정규화: '{extracted_crop}' → '{cleaned_crop}'")
+            
             print(f"✅ 작물명 추출 성공: '{cleaned_crop}'")
             return cleaned_crop
             

@@ -1,6 +1,6 @@
 from .nodes.extractor import extract_query_elements, query_rewrite, query_reinforce
 from .nodes.merge_responder import merge_context, generate_answer
-from .nodes.search import wiki_tool, ddg_tool, milvus_tool
+from .nodes.search import wiki_tool, ddg_tool
 from langgraph.graph import END, StateGraph
 from langchain_core.runnables import RunnableLambda
 from typing_extensions import TypedDict
@@ -18,6 +18,7 @@ class RetrievalState(TypedDict):
     merged_context: str
     answer: str
     fact_check_result: dict
+    milvus_data: dict  # MilvusDB 연결 정보
 
 def extract_fn(state):
     """키워드 추출 노드"""
@@ -50,8 +51,39 @@ def search_ddg_fn(state):
 def search_milvus_fn(state):
     """MilvusDB 벡터 유사도 검색 노드"""
     question = state["rewritten_question"]
-    milvus_result = milvus_tool.run(question)
-    return {"milvus": milvus_result}
+    milvus_data = state.get("milvus_data", {})
+    
+    if not milvus_data:
+        print("⚠️ milvus_data 없음 → MilvusDB 검색 건너뜀")
+        return {"milvus": ""}
+    
+    try:
+        from common.milvus_helpers import search_milvus_documents
+        
+        # MilvusDB에서 검색 (개념 컬렉션)
+        results = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name="concepts",  # 개념 컬렉션에서 검색
+            query=question,
+            k=10
+        )
+        
+        if not results:
+            print("⚠️ MilvusDB에서 관련 문서를 찾을 수 없음")
+            return {"milvus": ""}
+        
+        # 검색 결과를 텍스트로 변환 (Document 객체 사용)
+        milvus_text = "\n\n".join([
+            f"[문서 {i+1}] {result.page_content}" 
+            for i, result in enumerate(results)
+        ])
+        
+        print(f"✅ MilvusDB에서 {len(results)}개 문서 검색 완료")
+        return {"milvus": milvus_text}
+        
+    except Exception as e:
+        print(f"❌ MilvusDB 검색 실패: {e}")
+        return {"milvus": ""}
 
 def merge_fn(state):
     """검색 결과 병합 노드"""
@@ -157,7 +189,8 @@ class retrieve_agent(BaseAgent):
             Dict[str, Any]: 에이전트 실행 결과 데이터입니다.
         """
         initial_state = {
-            "retrieval_question": input_data.get("retrieval_question", "")
+            "retrieval_question": input_data.get("retrieval_question", ""),
+            "milvus_data": input_data.get("milvus_data", {})  # MilvusDB 연결 정보 추가
         }
         result = self.graph.invoke(initial_state)
         

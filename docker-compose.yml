@@ -45,29 +45,72 @@ services:
         echo 'PostgreSQL is up - executing command'
         
         # PostgresSaver 테이블 생성
-        psql -h langgraph-postgres -U postgres -d appdb -c \"
-          CREATE TABLE IF NOT EXISTS checkpoints (
-            thread_id TEXT PRIMARY KEY,
-            checkpoint_id TEXT NOT NULL,
-            parent_checkpoint_id TEXT,
-            checkpoint_ns TEXT,
-            checkpoint JSONB,
+        
+        # 사용자/세션/메시지 테이블 생성 및 컬럼 보강
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            user_name TEXT,
+            token TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+          );
+        \"
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS chat_sessions (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            session_id TEXT,
+            title TEXT,
+            session_data JSONB,
+            metadata JSONB
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            is_active BOOLEAN DEFAULT TRUE,
+            UNIQUE(user_id, chat_id)
+          );
+        \"
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
+          ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title TEXT;
+        \"
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE TABLE IF NOT EXISTS chat_messages (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT,
+            chat_id TEXT NOT NULL,
+            session_id TEXT,
+            speaker TEXT,
+            content TEXT NOT NULL,
             metadata JSONB,
             created_at TIMESTAMP DEFAULT NOW()
           );
         \"
-        
-        psql -h langgraph-postgres -U postgres -d appdb -c \"
-          CREATE TABLE IF NOT EXISTS checkpoint_blobs (
-            thread_id TEXT,
-            checkpoint_id TEXT,
-            channel TEXT,
-            version TEXT,
-            type TEXT,
-            blob BYTEA,
-            created_at TIMESTAMP DEFAULT NOW(),
-            PRIMARY KEY (thread_id, checkpoint_id, channel, version)
-          );
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
+          ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS speaker TEXT;
+        \"
+
+        # 인덱스 생성
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
+        \"
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+        \"
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE INDEX IF NOT EXISTS idx_chat_sessions_session_id ON chat_sessions(session_id);
+        \"
+
+        psql -h langgraph-postgres -U postgres -d postgres -c \"
+          CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
         \"
         
         echo 'Database initialization completed'
@@ -152,10 +195,14 @@ services:
       dockerfile: Dockerfile.api.slim
     ports:
     - 8100:8000
+    env_file:
+    - .env
     environment:
     - PYTHONPATH=/app
     - REDIS_HOST=redis
     - REDIS_PORT=6379
+    - REDIS_URL=redis://redis:6379
+    - DATABASE_URL=postgresql://postgres:postgres@langgraph-postgres:5432/postgres
     - OPENAI_API_KEY=REDACTED}
     - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
     - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
@@ -163,13 +210,18 @@ services:
     - GIT_PYTHON_REFRESH=quiet
     - LANGGRAPH_API_BASE=http://langgraph-api:8000
     - LANGGRAPH_API_URL=http://langgraph-api:8000
+    volumes:
+    - ./supervisor.py:/app/supervisor.py
+    - ./teacher:/app/teacher
+    - ./farmer:/app/farmer
+    - ./common:/app/common
+    - ./api:/app/api
     depends_on:
     - redis
     - langgraph-postgres
+    - postgres-init
     - langgraph-api
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-    volumes:
-    - ./api:/app/api 
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload 
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""]
       interval: 10s
@@ -177,6 +229,8 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+
+  # orchestrator 서비스 제거 (BFF가 직접 실행)
 
   nginx:
     image: nginx:alpine

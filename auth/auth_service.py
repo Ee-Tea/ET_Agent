@@ -393,9 +393,114 @@ class NaverOAuthService:
         )
 
 
+# Kakao OAuth
+class KakaoOAuthService:
+    @property
+    def client_id(self) -> Optional[str]:
+        return settings.KAKAO_CLIENT_ID
+
+    @property
+    def client_secret(self) -> Optional[str]:
+        return settings.KAKAO_CLIENT_SECRET
+
+    @property
+    def redirect_uri(self) -> Optional[str]:
+        return settings.KAKAO_REDIRECT_URI
+
+    async def exchange_token(self, code: str) -> dict:
+        if not (self.client_id and self.redirect_uri):
+            raise GoogleOAuthError("Missing KAKAO_* settings (client_id/redirect_uri)")
+        token_url = "https://kauth.kakao.com/oauth/token"
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": self.client_id,
+            "code": code,
+            "redirect_uri": self.redirect_uri,
+        }
+        if self.client_secret:
+            form["client_secret"] = self.client_secret
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.post(token_url, data=form, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            try:
+                payload = res.json()
+            except Exception:
+                payload = {"raw": res.text}
+            if res.status_code != 200 or (isinstance(payload, dict) and payload.get("error")):
+                raise GoogleOAuthError("Kakao token exchange failed", status=res.status_code, payload=payload)
+            return payload
+
+    async def fetch_userinfo(self, access_token: str) -> dict:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(
+                "https://kapi.kakao.com/v2/user/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if res.status_code != 200:
+                try:
+                    payload = res.json()
+                except Exception:
+                    payload = {"raw": res.text}
+                raise GoogleOAuthError("Kakao userinfo fetch failed", status=res.status_code, payload=payload)
+            return res.json()
+
+    def get_or_create_user(self, db: Session, ud: dict) -> tuple[User, bool]:
+        kid = str(ud.get("id"))
+        kakao_account = (ud or {}).get("kakao_account", {})
+        email = kakao_account.get("email")
+        profile = kakao_account.get("profile") or {}
+        name = profile.get("nickname") or ""
+
+        existing = db.query(User).filter(and_(User.provider == "kakao", User.provider_account_id == kid)).first()
+        if existing:
+            if email:
+                existing.email = email
+            if name:
+                existing.name = name
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing, False
+
+        if email:
+            existing_by_email = db.query(User).filter(User.email == email).first()
+            if existing_by_email:
+                existing_by_email.provider = "kakao"
+                existing_by_email.provider_account_id = kid
+                existing_by_email.updated_at = datetime.utcnow()
+                db.commit()
+                db.refresh(existing_by_email)
+                return existing_by_email, False
+
+        new_user = User(
+            email=email,
+            name=name,
+            is_active=True,
+            provider="kakao",
+            provider_account_id=kid,
+            scope="profile",
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        return new_user, True
+
+    async def authenticate(self, db: Session, code: str) -> AuthResponse:
+        token_json = await self.exchange_token(code)
+        access_token = token_json.get("access_token")
+        if not access_token:
+            raise GoogleOAuthError("No access_token in Kakao token response", payload=token_json)
+        userinfo = await self.fetch_userinfo(access_token)
+        user, is_new = self.get_or_create_user(db, userinfo)
+        jwt_token = auth_service.create_access_token(data={"sub": str(user.user_id)})
+        return AuthResponse(
+            user=user,
+            token=Token(access_token=jwt_token, token_type="bearer", expires_in=auth_service.access_token_expire_minutes * 60),
+            is_new_user=is_new,
+        )
 # 전역 인스턴스
 auth_service = AuthService()
 naver_oauth_service = NaverOAuthService()
+kakao_oauth_service = KakaoOAuthService()
 __all__ = [
     "AuthService",
     "auth_service",
@@ -403,4 +508,5 @@ __all__ = [
     "NaverOAuthError",
     "NaverOAuthService",
     "naver_oauth_service",
+    "kakao_oauth_service",
 ]

@@ -2,6 +2,7 @@ import json
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Header, status, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
+from urllib.parse import urlparse
 from typing import Optional
 
 from .db import get_db
@@ -13,7 +14,7 @@ from fastapi.responses import RedirectResponse
 from .schemas import AuthResponse, User as UserSchema  # <- 스키마 이름 충돌 방지
 from .models.user import User as UserModel   
 from secrets import token_urlsafe
-from .auth_service import naver_oauth_service
+from .auth_service import naver_oauth_service, kakao_oauth_service
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -105,7 +106,7 @@ async def google_auth():
         "include_granted_scopes=true&"
         "prompt=consent"
     )
-    return {"auth_url": google_auth_url}
+    return RedirectResponse(url=google_auth_url, status_code=302)
 
 from fastapi.responses import HTMLResponse
 
@@ -145,17 +146,98 @@ async def google_callback(
         samesite="lax",   # 8124 ↔ 3000 이동 OK
         path="/",
         max_age=auth_response.token.expires_in,
-        # domain 생략 (localhost는 지정하지 않는게 안전)
     )
+    # 프론트 디버깅/폴백용(로컬 개발): JS에서 읽을 수 있는 토큰 복제 쿠키
+    try:
+        resp.set_cookie(
+            key="access_token_web",
+            value=auth_response.token.access_token,
+            httponly=False,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=auth_response.token.expires_in,
+        )
+    except Exception:
+        pass
     return resp
 
 
+# ================= KAKAO OAuth =================
+@router.get("/kakao")
+async def kakao_auth():
+    if not (settings.KAKAO_CLIENT_ID and settings.KAKAO_REDIRECT_URI):
+        raise HTTPException(status_code=500, detail="KAKAO OAuth not configured")
+    state = token_urlsafe(16)
+    auth_url = (
+        "https://kauth.kakao.com/oauth/authorize?"
+        f"response_type=code&client_id={settings.KAKAO_CLIENT_ID}&"
+        f"redirect_uri={settings.KAKAO_REDIRECT_URI}&state={state}"
+    )
+    resp = RedirectResponse(url=auth_url, status_code=302)
+    resp.set_cookie("kakao_oauth_state", state, httponly=True, samesite="lax", path="/")
+    return resp
+
+@router.get("/kakao/callback")
+async def kakao_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code not provided")
+
+    cookie_state = request.cookies.get("kakao_oauth_state")
+    if cookie_state and state and cookie_state != state:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    auth_response = await kakao_oauth_service.authenticate(db, code)
+
+    html = f"""<!doctype html>
+<html>
+  <head><meta charset=\"utf-8\"><title>Login OK</title></head>
+  <body>
+    <p>카카오 로그인 완료! 잠시 후 이동합니다...</p>
+    <script>
+      window.location.replace(\"{settings.FRONTEND_BASE_URL}/?login=ok\");
+    </script>
+  </body>
+</html>"""
+
+    resp = HTMLResponse(content=html, status_code=200)
+    resp.delete_cookie("kakao_oauth_state", path="/")
+    resp.set_cookie(
+        key="access_token",
+        value=auth_response.token.access_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        path="/",
+        max_age=auth_response.token.expires_in,
+    )
+    try:
+        resp.set_cookie(
+            key="access_token_web",
+            value=auth_response.token.access_token,
+            httponly=False,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=auth_response.token.expires_in,
+        )
+    except Exception:
+        pass
+    return resp
 
 @router.get("/me", response_model=UserPublic)
 async def get_current_user_info(current_user: UserModel = Depends(get_current_user)):
     return UserPublic(
         id=str(current_user.user_id),
-        name=current_user.name,
+        name=(current_user.name or ""),
         email=current_user.email,
         picture=getattr(current_user, "picture", None),
         provider=(current_user.provider or "google"),
@@ -238,7 +320,7 @@ async def naver_auth(request: Request):
         f"response_type=code&client_id={settings.NAVER_CLIENT_ID}&"
         f"redirect_uri={settings.NAVER_REDIRECT_URI}&state={state}"
     )
-    resp = JSONResponse({"auth_url": auth_url})
+    resp = RedirectResponse(url=auth_url, status_code=302)
     resp.set_cookie("naver_oauth_state", state, httponly=True, samesite="lax", path="/")
     return resp
 
@@ -284,4 +366,16 @@ async def naver_callback(
         path="/",
         max_age=auth_response.token.expires_in,
     )
+    try:
+        resp.set_cookie(
+            key="access_token_web",
+            value=auth_response.token.access_token,
+            httponly=False,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=auth_response.token.expires_in,
+        )
+    except Exception:
+        pass
     return resp

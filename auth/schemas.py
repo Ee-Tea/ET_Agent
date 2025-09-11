@@ -6,7 +6,7 @@ from typing import Literal
 class UserPublic(BaseModel):
     id: str
     name: str
-    email: EmailStr
+    email: Optional[EmailStr] = None
     picture: str | None = None
     provider: Literal["google", "kakao", "naver"] = "google"
 

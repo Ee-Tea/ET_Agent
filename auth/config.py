@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     NAVER_CLIENT_ID: str | None = None
     NAVER_CLIENT_SECRET: str | None = None
     NAVER_REDIRECT_URI: str | None = None
+    # Kakao OAuth Settings
+    KAKAO_CLIENT_ID: str | None = None
+    KAKAO_CLIENT_SECRET: str | None = None
+    KAKAO_REDIRECT_URI: str | None = None
     FRONTEND_BASE_URL: str
     
     # JWT Settings

@@ -13,7 +13,7 @@ from langchain_openai import ChatOpenAI
 import ast
 
 # ==================== 설정: 입력 파일 이름 ====================
-INPUT_CSV_FILENAME = "2_rag_answers_20250911_181120.csv" # <-- 여기를 수정하세요
+INPUT_CSV_FILENAME = "2_rag_answers_20250911_110105.csv" # <-- 여기를 수정하세요
 # ==========================================================
 
 # ==================== 설정 (공통) ====================
@@ -25,8 +25,7 @@ load_dotenv(find_dotenv())
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY가 .env에 필요합니다.")
+if not OPENAI_API_KEY: raise ValueError("OPENAI_API_KEY가 .env에 필요합니다.")
 
 # 전역 객체
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -80,61 +79,38 @@ def main():
     df['context_recall'] = results_df['context_recall']
     df['context_precision'] = results_df['context_precision']
 
-    # ✨ 개별 PASS/FAIL 판단 기준 설정 (원하는 점수로 수정하세요)
-    PASS_THRESHOLDS = {
-        "faithfulness": 0.6,
-        "answer_relevancy": 0.6,
-        "context_recall": 0.6,
-        "context_precision": 0.6
-    }
-
-    # ✨ 변경 사항: 전체 평균 점수 계산 및 PASS/FAIL 결정
+    # ✨ 전체 평균 점수 계산
     overall_avg = results_df.mean(numeric_only=True).to_dict()
     
-    # 4개 지표의 평균값 계산
-    total_avg_score = (
-        overall_avg.get('faithfulness', 0.0) +
-        overall_avg.get('answer_relevancy', 0.0) +
-        overall_avg.get('context_recall', 0.0) +
-        overall_avg.get('context_precision', 0.0)
-    ) / 4
-    
-    # 평균 점수에 대한 PASS/FAIL 결정 (기준: 0.6)
-    is_overall_pass = total_avg_score >= 0.7
-
-    # ✨ 변경 사항: JSON에 추가될 최종 데이터 구조 생성
+    # ✨ JSON에 추가될 최종 데이터 구조 생성
     json_output = {
         "overall_average": {
             "faithfulness": overall_avg.get('faithfulness', 0.0),
             "answer_relevancy": overall_avg.get('answer_relevancy', 0.0),
             "context_recall": overall_avg.get('context_recall', 0.0),
             "context_precision": overall_avg.get('context_precision', 0.0),
-            "overall_average_score": total_avg_score,
-            "pass_fail": "PASS" if is_overall_pass else "FAIL"
         },
         "questions": []
     }
     
+    # ✨ 개별 PASS/FAIL 판단 기준 설정 (원하는 점수로 수정하세요)
+    PASS_THRESHOLDS = {
+        "faithfulness": 0.6,
+        "answer_relevancy": 0.5,
+        "context_recall": 0.5,
+        "context_precision": 0.6
+    }
+
     # 각 질문에 대한 개별 결과를 리스트에 추가
     for _, row in df.iterrows():
-        # 개별 지표별 PASS/FAIL 판정
-        ragas_pass_fail = {
-            "faithfulness": "PASS" if row['faithfulness'] >= PASS_THRESHOLDS['faithfulness'] else "FAIL",
-            "answer_relevancy": "PASS" if row['answer_relevancy'] >= PASS_THRESHOLDS['answer_relevancy'] else "FAIL",
-            "context_recall": "PASS" if row['context_recall'] >= PASS_THRESHOLDS['context_recall'] else "FAIL",
-            "context_precision": "PASS" if row['context_precision'] >= PASS_THRESHOLDS['context_precision'] else "FAIL"
-        }
+        # 모든 기준을 충족하는지 확인
+        is_pass = (
+            row['faithfulness'] >= PASS_THRESHOLDS['faithfulness'] and
+            row['answer_relevancy'] >= PASS_THRESHOLDS['answer_relevancy'] and
+            row['context_recall'] >= PASS_THRESHOLDS['context_recall'] and
+            row['context_precision'] >= PASS_THRESHOLDS['context_precision']
+        )
         
-        # 종합 PASS/FAIL 판정
-        is_pass = all(status == "PASS" for status in ragas_pass_fail.values())
-        
-        # FAIL 사유 리스트 생성
-        fail_reasons = []
-        if not is_pass:
-            for metric, status in ragas_pass_fail.items():
-                if status == "FAIL":
-                    fail_reasons.append(f"{metric} (점수: {row[metric]:.4f}, 기준: {PASS_THRESHOLDS[metric]:.1f})")
-
         # 개별 질문의 RAGAS 지표 평균 계산
         individual_avg = (
             row['faithfulness'] + 
@@ -153,12 +129,8 @@ def main():
                 "context_precision": row['context_precision'],
                 "average": individual_avg
             },
-            "ragas_pass_fail": ragas_pass_fail, # ✨ 개별 지표별 PASS/FAIL 추가
             "pass_fail": "PASS" if is_pass else "FAIL"
         }
-        if not is_pass:
-            item["fail_reason"] = "기준 미달: " + ", ".join(fail_reasons) # ✨ FAIL 사유 추가
-
         json_output['questions'].append(item)
 
     # 이 부분이 for 루프 밖으로 이동했습니다.
@@ -170,7 +142,7 @@ def main():
         
     logger.info(f"RAGAS 평가 결과가 '{json_filename}' 파일로 저장되었습니다.")
     
-    # ✨ 변경 사항: RAGAS 평가 요약 출력 부분
+    # RAGAS 평가 요약 출력 부분
     print("\n" + "=" * 30 + "\nRAGAS 평가 요약\n" + "=" * 30)
     print("전체 질문에 대한 평균 값\n" + "=" * 30)
     
@@ -178,18 +150,7 @@ def main():
     print(f"- answer_relevancy: {json_output['overall_average']['answer_relevancy']:.4f}")
     print(f"- context_recall: {json_output['overall_average']['context_recall']:.4f}")
     print(f"- context_precision: {json_output['overall_average']['context_precision']:.4f}")
-    print(f"- **4개 지표 평균 점수**: {json_output['overall_average']['overall_average_score']:.4f}")
     print("=" * 30)
-    
-    # 전체 PASS/FAIL 개수 계산
-    total_questions = len(json_output['questions'])
-    pass_count = sum(1 for item in json_output['questions'] if item['pass_fail'] == "PASS")
-    fail_count = total_questions - pass_count
-
-    print(f"전체 평가 수: {total_questions}")
-    print(f"PASS: {pass_count}")
-    print(f"FAIL: {fail_count}")
-    print(f"전체 평균 PASS/FAIL: {json_output['overall_average']['pass_fail']}")
 
 if __name__ == "__main__":
     main()

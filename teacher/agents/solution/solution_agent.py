@@ -31,17 +31,22 @@ import os
 
 from collections.abc import Mapping
 
-
-
-# RAGAS 대신 LLM 기반 검증 사용
-
-# RAGAS 관련 코드 제거됨 - LLM 기반 검증 사용
-
-
 import os, json, glob
 from datetime import datetime
 # MilvusDB는 common.milvus_helpers를 통해 사용
 from difflib import SequenceMatcher
+
+try:
+    from rank_bm25 import BM25Okapi  # optional fallback(bm25 인덱스 없이 후보군 위에서 sparse 스코어링)
+    HAS_RANK_BM25 = True
+except Exception:
+    HAS_RANK_BM25 = False
+
+try:
+    from sentence_transformers import CrossEncoder
+    HAS_CROSS_ENCODER = True
+except Exception:
+    HAS_CROSS_ENCODER = False
 
 # LLM 기반 검증 함수들
 def evaluate_with_llm(question: str, answer: str, contexts: list) -> dict:
@@ -798,56 +803,154 @@ class SolutionAgent(BaseAgent):
             # 문제 검색을 위한 쿼리 구성
             query = self._build_concept_query(state.get("user_problem",""), state.get("user_problem_options", []))
             
-            # MilvusDB에서 유사 문제 검색
-            results = search_milvus_documents(
-                milvus_data=milvus_data,
-                collection_name="problems",
-                query=query,
-                k=20
-            )
-            
+            # ---------- (1) Dense 후보 넉넉히 수집 ----------
+            try:
+                # 점수 포함 버전이 가능하면 사용(없으면 아래 except에서 대체)
+                dense_scored = vectorstore_p.similarity_search_with_score(q, k=self.RETRIEVAL_FETCH_K)
+                dense_docs = [d for d, _ in dense_scored]
+                dense_scores = {id(d): float(s) for d, s in dense_scored}
+                # 주의: 어떤 백엔드는 "코사인거리/거리" 등 낮을수록 유사함. 랭크 기반으로 치환해 안정화.
+                print(f"[Dense] fetched: {len(dense_docs)}")
+            except Exception as e:
+                print(f"[Dense] similarity_search_with_score 실패 → {e} → score 없이 fallback")
+                dense_docs = vectorstore_p.similarity_search(q, k=self.RETRIEVAL_FETCH_K)
+                dense_scores = {id(d): 1.0/(r+1) for r, d in enumerate(dense_docs)}  # 랭크 기반 가중치
+
+            # ---------- (2) Sparse 후보(BM25) 결합 ----------
+            sparse_docs = []
+            sparse_scores = {}  # id(doc) → score (rank 기반 또는 점수 정규화)
+
+            if self.bm25_retriever is not None:
+                try:
+                    sparse_docs = self.bm25_retriever.get_relevant_documents(q)[:self.RETRIEVAL_FETCH_K]
+                    for r, d in enumerate(sparse_docs):
+                        sparse_scores[id(d)] = 1.0/(r+1)  # 랭크 기반
+                    print(f"[BM25] fetched: {len(sparse_docs)}")
+                except Exception as e:
+                    print(f"[BM25] 실패 → {e}")
+
+            elif HAS_RANK_BM25 and dense_docs:
+                # 별도 인덱스가 없다면, dense 후보군 위에서만 BM25 근사 스코어 계산
+                try:
+                    def tok(s: str) -> List[str]:
+                        return re.findall(r"[가-힣A-Za-z0-9_]+", (s or "").lower())
+                    corpus_toks = [tok(d.page_content) for d in dense_docs]
+                    bm25 = BM25Okapi(corpus_toks)
+                    q_scores = bm25.get_scores(tok(q))
+                    # 점수 정규화 (0~1)
+                    if q_scores is not None and len(q_scores) == len(dense_docs):
+                        min_s, max_s = float(min(q_scores)), float(max(q_scores))
+                        rng = (max_s - min_s) or 1.0
+                        for d, s in zip(dense_docs, q_scores):
+                            sparse_scores[id(d)] = (float(s) - min_s) / rng
+                    print(f"[BM25-lite] computed over dense pool: {len(dense_docs)}")
+                except Exception as e:
+                    print(f"[BM25-lite] 실패 → {e}")
+
+            # ---------- (3) Dense + Sparse 앙상블 ----------
+            # 동일 문서가 양쪽에 섞여 들어올 수 있으므로 content+metadata 일부로 키를 만든다
+            def _safe_meta_str(md: Dict[str, Any]) -> str:
+                try:
+                    # numpy 타입 등은 str로 변환
+                    norm = {str(k): (v.item() if isinstance(v, (np.generic,)) else (str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v))
+                            for k, v in (md or {}).items()}
+                    return json.dumps(norm, ensure_ascii=False, sort_keys=True)
+                except Exception:
+                    try:
+                        return str({k: str(v) for k, v in (md or {}).items()})
+                    except Exception:
+                        return ""
+
+            def key_of(doc: Document) -> Tuple[str, str]:
+                return ( (doc.page_content or "")[:150], _safe_meta_str(doc.metadata)[:150] )
+
+            pool: Dict[Tuple[str,str], Dict[str, Any]] = {}
+            # dense 쪽부터 적재
+            for r, d in enumerate(dense_docs):
+                k = key_of(d)
+                pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
+                # 랭크 기반 가중치(안전)
+                wd = 1.0/(r+1)
+                # 점수 있으면 둘 중 큰 것을 사용
+                wd = max(wd, dense_scores.get(id(d), 0.0))
+                pool[k]["dense"] = max(pool[k]["dense"], wd)
+
+            # sparse 쪽 반영
+            for r, d in enumerate(sparse_docs):
+                k = key_of(d)
+                pool.setdefault(k, {"doc": d, "dense": 0.0, "sparse": 0.0})
+                ws = 1.0/(r+1)
+                ws = max(ws, sparse_scores.get(id(d), 0.0))
+                pool[k]["sparse"] = max(pool[k]["sparse"], ws)
+
+            # 가중합
+            alpha = self.HYBRID_ALPHA  # 0~1, 1이면 dense만
+            scored = []
+            for k, v in pool.items():
+                score = alpha * v["dense"] + (1.0 - alpha) * v["sparse"]
+                scored.append((v["doc"], score))
+
+            # 상위 K 추림
+            scored.sort(key=lambda x: x[1], reverse=True)
+            hybrid_top = [d for d, _ in scored[:self.HYBRID_TOPK]]
+            print(f"[Hybrid] pool={len(pool)} → top{self.HYBRID_TOPK} 선정")
+
+            # ---------- (4) Cross-Encoder rerank ----------
+            try:
+                if self.reranker is not None and len(hybrid_top) > 0:
+                    pairs = [[q, d.page_content] for d in hybrid_top]
+                    scores = self.reranker.predict(pairs)  # shape: (len(hybrid_top),)
+                    order = sorted(range(len(hybrid_top)), key=lambda i: float(scores[i]), reverse=True)
+                    reranked = [hybrid_top[i] for i in order[:self.RERANK_TOPK]]
+                    print(f"[Rerank] 최종 top{self.RERANK_TOPK} (CrossEncoder)")
+                else:
+                    reranked = hybrid_top[:self.RERANK_TOPK]
+                    print("[Rerank] 사용 안 함 → hybrid_top 그대로 사용")
+            except Exception as e:
+                print(f"[Rerank] 실패 → hybrid_top 그대로 사용: {e}")
+                reranked = hybrid_top[:self.RERANK_TOPK]
+
             if not results:
                 print("⚠️ MilvusDB에서 유사 문제를 찾을 수 없음")
                 state["problems_contexts"] = []
                 state["problems_contexts_text"] = ""
                 return state
 
-                
-            print(f"✅ MilvusDB에서 {len(results)}개의 유사 문제 발견")
+            # MilvusDB에서 유사 문제 검색
+            results = reranked
+            similar_questions = []
+            for i, doc in enumerate(results, start=1):
+                metadata = doc.metadata or {}
+                options = json.loads(metadata.get("options", "[]")) if isinstance(metadata.get("options"), str) else metadata.get("options", []) or []
+                answer = metadata.get("answer", "")
+                explanation = metadata.get("explanation", "")
+                subject = metadata.get("subject", "기타")
+
+                # 정답 번호 → 텍스트
+                answer_text = ""
+                try:
+                    answer_idx = int(answer) - 1
+                    if 0 <= answer_idx < len(options):
+                        answer_text = options[answer_idx]
+                except Exception:
+                    pass
+
+                formatted = f"""[유사문제 {i}]
+                    문제: {doc.page_content}
+                    보기:
+                    """ + "\n".join([f"{idx + 1}. {opt}" for idx, opt in enumerate(options)]) + f"""
+                    정답: {answer} ({answer_text})
+                    풀이: {explanation}
+                    과목: {subject}
+                    """
+                similar_questions.append(formatted)
             
-            # MilvusDB 결과를 Document 객체로 변환
-            from langchain.schema import Document
-            
-            problems_contexts = []
-            for result in results:
-                doc = Document(
-                    page_content=result.get("content", ""),
-                    metadata={
-                        "source": result.get("source", ""),
-                        "subject": result.get("subject", ""),
-                        "score": result.get("score", 0.0)
-                    }
-                )
-                problems_contexts.append(doc)
-            
-            # 컨텍스트 텍스트 생성
-            problems_contexts_text = "\n\n".join([
-                f"[문제 {i+1}] {doc.page_content}" 
-                for i, doc in enumerate(problems_contexts)
-            ])
-            
-            state["problems_contexts"] = problems_contexts
-            state["problems_contexts_text"] = problems_contexts_text
-            
-            print(f"✅ 유사 문제 {len(problems_contexts)}개 처리 완료")
-            
-        except Exception as e:
-            print(f"❌ MilvusDB 검색 실패: {e}")
-            state["problems_contexts"] = []
-            state["problems_contexts_text"] = ""
-            
-        print("🔍 [1단계] 유사 문제 검색 함수 종료")
-        return state
+            state["retrieved_docs"] = results
+            state["problems_contexts_text"] = "\n\n".join(similar_questions)
+        
+            print(f"유사 문제 {len(results)}개 (dense fetch={len(dense_docs)}, hybrid_pool={len(pool)})")
+            print("🔍 [1단계] 유사 문제 검색 함수 종료")
+            return state
 
 
 

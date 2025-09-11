@@ -56,7 +56,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # 경로 설정
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from SalesAgent import run
+from common.milvus_manager import MilvusDBManager
 
 def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
     """SalesAgent RAGAS 평가기 초기화"""
@@ -64,6 +66,21 @@ def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
     print(f"📁 CSV 파일 경로: {csv_path}")
     
     try:
+        # MilvusDB 관리자 초기화
+        print("🔗 MilvusDB 관리자 초기화 중...")
+        self.milvus_manager = MilvusDBManager()
+        
+        # MilvusDB 연결
+        try:
+            if not self.milvus_manager.connect():
+                print("⚠️ MilvusDB 연결 실패 - 일부 기능이 제한될 수 있습니다.")
+                self.milvus_manager = None  # 연결 실패 시 None으로 설정
+            else:
+                print("✅ MilvusDB 연결 성공")
+        except Exception as e:
+            print(f"❌ MilvusDB 연결 중 오류 발생: {e}")
+            self.milvus_manager = None  # 오류 발생 시 None으로 설정
+        
         # 공식 문서에 따라 모델 설정
         print("🤖 모델 설정 중...")
         self._setup_models()
@@ -76,6 +93,7 @@ def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
         
         self.evaluation_results = []
         print("🎯 평가기 초기화 완료!")
+        print(f"🔗 MilvusDB 연결 상태: {'✅ 연결됨' if self.milvus_manager and self.milvus_manager.is_connected else '❌ 연결 안됨'}")
         
     except Exception as e:
         print(f"❌ 평가기 초기화 실패: {e}")
@@ -186,9 +204,29 @@ def run_sales_agent_evaluation(self, question):
     print(f"🤖 SalesAgent 실행 시작: {question[:50]}...")
     
     try:
+        # MilvusDB 연결 정보 준비
+        milvus_data = {}
+        if self._is_milvus_connected():
+            milvus_data = {
+                "connection_status": True,
+                "host": self.milvus_manager.host,
+                "port": self.milvus_manager.port,
+                "embedding_model_name": self.milvus_manager.embedding_model_name
+            }
+            print("🔗 MilvusDB 연결 정보 주입됨")
+        else:
+            milvus_data = {
+                "connection_status": False,
+                "error": "MilvusDB 연결되지 않음"
+            }
+            print("⚠️ MilvusDB 연결 정보 없음")
+        
         # SalesAgent 실행 (동기 함수 호출)
         print("🔄 SalesAgent 실행 중...")
-        initial_state = {"query": question}
+        initial_state = {
+            "query": question,
+            "milvus_data": milvus_data  # MilvusDB 연결 정보 주입
+        }
         result_state = run(initial_state)
         print("✅ SalesAgent 실행 완료")
         
@@ -225,6 +263,10 @@ def run_sales_agent_evaluation(self, question):
             'context': "",
             'success': False
         }
+
+def _is_milvus_connected(self):
+    """MilvusDB 연결 상태 확인"""
+    return self.milvus_manager is not None and self.milvus_manager.is_connected
 
 def _format_context(self, context):
     """컨텍스트를 문자열로 포맷팅"""
@@ -642,6 +684,7 @@ if __name__ == "__main__":
         evaluator._load_csv_data = lambda: _load_csv_data(evaluator)
         evaluator.run_sales_agent_evaluation = lambda question: run_sales_agent_evaluation(evaluator, question)
         evaluator._format_context = lambda context: _format_context(evaluator, context)
+        evaluator._is_milvus_connected = lambda: _is_milvus_connected(evaluator)
         evaluator.evaluate_single_question = lambda test_case: evaluate_single_question(evaluator, test_case)
         evaluator._evaluate_single_ragas_simple = lambda question, answer, context, reference="": _evaluate_single_ragas_simple(evaluator, question, answer, context, reference)
         evaluator.run_full_evaluation = lambda batch_size=3: run_full_evaluation(evaluator, batch_size)

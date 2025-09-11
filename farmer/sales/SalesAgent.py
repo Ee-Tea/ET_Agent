@@ -1088,7 +1088,7 @@ def _get_sales_app():
 # 실행 함수
 def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수 (비동기)
+    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리

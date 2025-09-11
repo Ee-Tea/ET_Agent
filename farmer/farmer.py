@@ -23,6 +23,9 @@ load_dotenv()
 # 전역 인터럽트 플래그
 _interrupt_flag = threading.Event()
 
+# 전역 에이전트 함수 캐시 (지연 로딩용)
+_agent_functions_cache = {}
+
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
 def merge_dicts(left: dict, right: dict) -> dict:
     """딕셔너리 병합 함수 - LangGraph용"""
@@ -91,31 +94,62 @@ class Farmer:
     """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
     
     def __init__(self, user_id: str = "default_user", service: str = "farmer", chat_id: str = "default_chat"):
-        """Farmer 클래스 초기화"""
+        """Farmer 클래스 초기화 - 지연 로딩 최적화"""
         # 사용자 식별자 설정
         self.user_id = user_id
         self.service = service
         self.chat_id = chat_id
         
-        # LLM 설정
+        # LLM 설정 (필수 - 즉시 로딩)
         self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
         
-        # 메모리 시스템 초기화
+        # 메모리 시스템 초기화 (가벼운 작업)
         self._init_memory_system()
         
-        # 워크플로우 그래프 생성
-        self.graph = self.create_workflow()
+        # 워크플로우 그래프 생성 (지연 로딩으로 변경)
+        self._graph = None  # 지연 로딩용
         
-        # 병렬 처리용 스레드 풀
-        self.thread_pool = ThreadPoolExecutor(max_workers=4)
+        # 병렬 처리용 스레드 풀 (필요시에만 생성)
+        self._thread_pool = None
         
         # 시그널 핸들러 등록 (메인 스레드에서만)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGINT, signal_handler)
+        
+        print(f"✅ Farmer 초기화 완료 (지연 로딩 모드)")
     
     def _init_memory_system(self):
         """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
         print("📝 메모리 시스템: Main에서 중앙집중식 관리")
+    
+    @property
+    def graph(self):
+        """워크플로우 그래프 지연 로딩"""
+        if self._graph is None:
+            print("🔄 Farmer 워크플로우 그래프 생성 중...")
+            self._graph = self.create_workflow()
+            print("✅ Farmer 워크플로우 그래프 생성 완료")
+        return self._graph
+    
+    @property
+    def thread_pool(self):
+        """스레드 풀 지연 로딩"""
+        if self._thread_pool is None:
+            print("🔄 Farmer 스레드 풀 생성 중...")
+            self._thread_pool = ThreadPoolExecutor(max_workers=4)
+            print("✅ Farmer 스레드 풀 생성 완료")
+        return self._thread_pool
+    
+    def clear_cache(self):
+        """에이전트 함수 캐시 정리"""
+        global _agent_functions_cache
+        _agent_functions_cache.clear()
+        print("🧹 에이전트 함수 캐시 정리 완료")
+    
+    def get_loaded_agents(self):
+        """현재 로드된 에이전트 목록 반환"""
+        global _agent_functions_cache
+        return list(_agent_functions_cache.keys())
     
     def load_state(self, state: RouterState) -> RouterState:
         """그래프 시작 시 상태 초기화 - supervisor에서 query와 selected_crop만 받음"""
@@ -198,39 +232,42 @@ class Farmer:
         
         return state
     
-    def _load_agent_functions(self):
-        """에이전트 함수들을 로드"""
-        # 각 에이전트를 개별적으로 import하여 불필요한 초기화 방지
-        self.agent_functions = {}
-    
     def _get_agent_function(self, agent_name: str):
-        """에이전트 함수를 지연 로딩으로 가져오기"""
-        if not hasattr(self, 'agent_functions') or not self.agent_functions:
-            self._load_agent_functions()
+        """에이전트 함수를 지연 로딩으로 가져오기 (전역 캐시 사용)"""
+        global _agent_functions_cache
         
         # 해당 에이전트가 아직 로드되지 않은 경우에만 import
-        if agent_name not in self.agent_functions:
+        if agent_name not in _agent_functions_cache:
             print(f"🔄 {agent_name} 모듈 로딩 중...")
             
-            if agent_name == "작물추천_agent":
-                from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
-                self.agent_functions[agent_name] = crop_recommend_run
-            elif agent_name == "작물재배_agent":
-                from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
-                self.agent_functions[agent_name] = crop_cultivation_run
-            elif agent_name == "재해_agent":
-                from farmer.disaster.DisasterAgent_LLM import run as disaster_run
-                self.agent_functions[agent_name] = disaster_run
-            elif agent_name == "날씨_agent":
-                from farmer.weather.run_weather_agent_simple import run as weather_run
-                self.agent_functions[agent_name] = weather_run
-            elif agent_name == "판매처_agent":
-                from farmer.sales.SalesAgent import run as market_run
-                self.agent_functions[agent_name] = market_run
-            
-            print(f"✅ {agent_name} 모듈 로딩 완료")
+            try:
+                if agent_name == "작물추천_agent":
+                    from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
+                    _agent_functions_cache[agent_name] = crop_recommend_run
+                elif agent_name == "작물재배_agent":
+                    from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
+                    _agent_functions_cache[agent_name] = crop_cultivation_run
+                elif agent_name == "재해_agent":
+                    from farmer.disaster.DisasterAgent_LLM import run as disaster_run
+                    _agent_functions_cache[agent_name] = disaster_run
+                elif agent_name == "날씨_agent":
+                    from farmer.weather.run_weather_agent_simple import run as weather_run
+                    _agent_functions_cache[agent_name] = weather_run
+                elif agent_name == "판매처_agent":
+                    from farmer.sales.SalesAgent import run as market_run
+                    _agent_functions_cache[agent_name] = market_run
+                else:
+                    print(f"❌ 알 수 없는 에이전트: {agent_name}")
+                    return None
+                
+                print(f"✅ {agent_name} 모듈 로딩 완료")
+                
+            except Exception as e:
+                print(f"❌ {agent_name} 모듈 로딩 실패: {e}")
+                _agent_functions_cache[agent_name] = None
+                return None
         
-        return self.agent_functions.get(agent_name)
+        return _agent_functions_cache.get(agent_name)
     
     
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:

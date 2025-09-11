@@ -56,7 +56,8 @@ llm_answer = ChatOpenAI(model_name=OPENAI_MODEL, temperature=0.7, api_key=OPENAI
 
 # 프롬프트 (재구성)
 RAG_PROMPT_TMPL = """
-당신은 대한민국 농업 작물 재배 전문가입니다. 아래 제공된 [DB 검색 결과]와 [웹 검색 결과]만을 근거로 [질문]에 답변하세요.
+당신은 대한민국 농업 작물 재배에 대해 친절하게 상담해 드리는 전문가입니다. 
+아래 제공된 [DB 검색 결과]와 [웹 검색 결과]의 사실만을 근거로 [질문]에 맞는 작물을 정성껏 추천해 주세요.
 
 [DB 검색 결과]
 {db_context}
@@ -86,7 +87,7 @@ RAG_PROMPT_TMPL = """
 - 예: 배추를 추천드립니다. 배추는 고랭지 지역에서 재배가 가능하고, 김장철 수요로 인해 가격이 상승하는 경향이 있습니다.
 
 4) **작물명 정규화**
-- 품종명, 숫자코드, 외래어 표기는 모두 제거하고, 일반적인 작물명만 사용하세요.
+- 품종명, 숫자코드, 외래어,영어,일본어 표기는 모두 제거하고, 일반적인 작물명만 사용하세요.
 - 예: 캠벨얼리 → 포도, 홍로 → 사과, 101-14 → 포도
 
 5) **중복 제거**
@@ -232,8 +233,6 @@ async def main():
     
     df['answer'] = [res.get('answer', '답변 생성 실패') for res in results]
     df['contexts'] = [str(res.get('final_contexts', [])) for res in results]
-    # 새로운 컬럼에 출처 정보 저장
-    df['context_sources'] = [str(res.get('final_sources', [])) for res in results]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_filename = f"2_rag_answers_{timestamp}.csv"

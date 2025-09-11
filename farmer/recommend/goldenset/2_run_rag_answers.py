@@ -1,4 +1,4 @@
-# 2_run_rag_answers.py (v1.6: 문제 해결 및 프롬프트 재구성)
+# 2_run_rag_answers.py (v1.10: 들여쓰기 오류 수정 및 상세 출처 반영)
 
 import os
 import re
@@ -21,7 +21,7 @@ from sentence_transformers import CrossEncoder
 import langchain
 
 # ==================== 설정: 입력 파일 이름 ====================
-INPUT_CSV_FILENAME = "1_golden_set_20250910_175515.csv"
+INPUT_CSV_FILENAME = "1_golden_set_20250911_101128.csv"  #<-- 사용할 골든셋 CSV 파일 이름을 여기서 수정하세요.
 # ==========================================================
 
 # ==================== 설정 (공통) ====================
@@ -51,27 +51,67 @@ _vectorstore = None
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info(f"모델을 위한 장치로 '{device}'를 사용합니다.")
 embedding_model = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME, model_kwargs={"device": device})
-reranker = CrossEncoder(RERANKER_MODEL_NAME, device=device)
+# reranker = CrossEncoder(RERANKER_MODEL_NAME, device=device)
 llm_answer = ChatOpenAI(model_name=OPENAI_MODEL, temperature=0.7, api_key=OPENAI_API_KEY)
 
 # 프롬프트 (재구성)
-RAG_PROMPT_TMPL = """당신은 대한민국 농업 작물 재배 전문가입니다. 아래 제공된 [DB 검색 결과]와 [웹 검색 결과]를 종합하여 질문에 답변하세요.
-[DB 검색 결과]\n{db_context}\n\n[웹 검색 결과]\n{web_context}\n\n[질문]\n{question}\n\n---
+RAG_PROMPT_TMPL = """
+당신은 대한민국 농업 작물 재배에 대해 친절하게 상담해 드리는 전문가입니다. 
+아래 제공된 [DB 검색 결과]와 [웹 검색 결과]의 사실만을 근거로 [질문]에 맞는 작물을 정성껏 추천해 주세요.
+
+[DB 검색 결과]
+{db_context}
+
+[웹 검색 결과]
+{web_context}
+
+[질문]
+{question}
+
+---
 규칙 (반드시 엄수):
-1. **근거 기반 답변**: 답변의 모든 내용은 **제공된 [DB]와 [웹 검색 결과]의 사실만을 기반**으로 구성해야 합니다. 추측은 절대 사용하지 마세요. (할루시네이션 방지)
-2. **작물 추천 특화**: 질문에 관련된 작물 추천 정보만으로 답변을 구성하세요. 주제에서 벗어난 내용은 제외해야 합니다.
-3. **요약 및 정리**: 답변은 5~8 문장으로 간결하게 요약하고 정리하세요. (컨텍스트-답변 일치도 100% 목표)
-4. **인용 필수**: 답변에 사용된 모든 문장에는 근거가 된 정보의 라벨(`[C1]`, `[W1]` 등)을 반드시 표시하세요.
-5. **형식 준수**: 마크다운, 불릿포인트, 번호매기기 등 **특수 문자를 사용하지 않은**, 간결하고 자연스러운 존댓말 문장으로만 작성하세요.
-6. **중복 및 서론 제거**: 동일한 내용이 반복되지 않도록 주의하고, "제공된 정보에 따르면"과 같은 불필요한 서론은 제거하세요.
-7. **맞춤법 검사**: 모든 문장은 맞춤법에 맞게 작성되어야 합니다."""
+
+1) **출처 제한**
+- 답변은 반드시 [DB 검색 결과]와 [웹 검색 결과]에 포함된 사실만 사용하세요.
+- 컨텍스트에 없는 정보, 일반 지식, 추측은 절대 포함하지 마세요.
+
+2) **질문 집중**
+- 답변은 [질문]의 의도를 정확하게 충족해야 합니다.
+- 불필요한 서론, 결론, 잡설은 절대 포함하지 마세요.
+
+3) **작물 추천 형식**
+- 질문이 추천을 요구하면, 각 문장은 반드시 “<작물명>을/를 추천드립니다.”로 시작하고,
+  이어서 [컨텍스트]에서 확인된 이유를 한 문장으로 설명하세요.
+- 예: 포도를 추천드립니다. 포도는 다양한 품종과 용도로 재배할 수 있어 농가 소득 증대에 기여할 수 있습니다.
+- 예: 사과를 추천드립니다. 사과는 국내 소비가 꾸준하고, 가공품 수요도 높아 안정적인 판매가 가능합니다.
+- 예: 배추를 추천드립니다. 배추는 고랭지 지역에서 재배가 가능하고, 김장철 수요로 인해 가격이 상승하는 경향이 있습니다.
+
+4) **작물명 정규화**
+- 품종명, 숫자코드, 외래어,영어,일본어 표기는 모두 제거하고, 일반적인 작물명만 사용하세요.
+- 예: 캠벨얼리 → 포도, 홍로 → 사과, 101-14 → 포도
+
+5) **중복 제거**
+- 같은 작물이 여러 번 언급되면 한 번만 답변에 포함하세요.
+
+6) **형식 및 톤**
+- 전체 답변은 5~8 문장으로 작성하세요.
+- 불릿, 번호, 마크다운, 일본어, 영어, 기호는 절대 사용하지 마세요.
+- 모든 문장은 한국어 맞춤법에 맞는 자연스러운 존댓말로 작성하세요.
+
+"""
 
 rag_prompt = ChatPromptTemplate.from_template(RAG_PROMPT_TMPL)
 
 # ==================== RAG 파이프라인 (LangGraph) ====================
 class GraphState(TypedDict, total=False):
-    question: Optional[str]; db_context_str: Optional[str]; web_context_str: Optional[str]; answer: Optional[str]
-    retrieved_docs: Optional[List[str]]; web_search_docs: Optional[List[str]]; final_contexts: Optional[List[str]]
+    question: Optional[str]
+    db_context_str: Optional[str]
+    web_context_str: Optional[str]
+    answer: Optional[str]
+    retrieved_docs: Optional[List[str]]
+    web_search_docs: Optional[List[str]]
+    final_contexts: Optional[List[str]]
+    final_sources: Optional[List[str]]
 
 def ensure_milvus():
     global _vectorstore
@@ -87,27 +127,31 @@ def retrieve_from_milvus(query: str, top_k: int):
     if not _vectorstore: ensure_milvus()
     return _vectorstore.similarity_search_with_score(query, k=top_k)
 
-def rerank_documents(query: str, pairs: List[tuple]) -> List[tuple]:
-    if not pairs: return []
-    sentence_pairs = [(query, doc.page_content) for doc, score in pairs]
-    scores = reranker.predict(sentence_pairs)
-    scored_pairs = sorted(list(zip(scores, pairs)), key=lambda x: x[0], reverse=True)
-    return [pair for score, pair in scored_pairs]
+# def rerank_documents(query: str, pairs: List[tuple]) -> List[tuple]:
+#     if not pairs: return []
+#     sentence_pairs = [(query, doc.page_content) for doc, score in pairs]
+#     scores = reranker.predict(sentence_pairs)
+#     scored_pairs = sorted(list(zip(scores, pairs)), key=lambda x: x[0], reverse=True)
+#     return [pair for score, pair in scored_pairs]
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
     q = state.get("question", "")
     pairs = retrieve_from_milvus(q, top_k=TOPK_RETRIEVE)
     pairs = [(doc, score) for doc, score in pairs if len(doc.page_content.strip()) > 100]
-    reranked_pairs = rerank_documents(q, pairs)
-    final = reranked_pairs[:TOPK_USE]
+    # reranked_pairs = rerank_documents(q, pairs)
+    # final = reranked_pairs[:TOPK_USE]
+    final = pairs[:TOPK_USE]  # 재순위 없이 바로 상위 K개 사용
     contents = [doc.page_content for doc, _ in final]
+    # 문서 메타데이터에서 원본 파일명 추출
+    sources = [doc.metadata.get('source', 'unknown_pdf') for doc, _ in final]
+    
     labeled = [{"label": f"C{i+1}", "text": doc_content} for i, doc_content in enumerate(contents)]
     ctx_str = "\n\n".join([f"[{d['label']}] {d['text']}" for d in labeled]) if labeled else "내부 DB에서 관련 정보를 찾지 못했습니다."
-    return {"db_context_str": ctx_str, "retrieved_docs": contents}
+    return {"db_context_str": ctx_str, "retrieved_docs": contents, "final_sources": sources}
 
 def web_search_node(state: GraphState) -> Dict[str, Any]:
     if not TAVILY_API_KEY:
-        return {"web_context_str": "웹 검색 비활성화", "web_search_docs": []}
+        return {"web_context_str": "웹 검색 비활성화", "web_search_docs": [], "web_sources": []}
     q = state.get("question", "")
     try:
         client = TavilyClient(api_key=TAVILY_API_KEY)
@@ -115,7 +159,9 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         docs = [r["content"].strip() for r in res.get("results", []) if r.get("content")]
         labeled = [{"label": f"W{i+1}", "text": content} for i, content in enumerate(docs)]
         web_ctx = "\n\n".join([f"[{d['label']}] {d['text']}" for d in labeled]) if labeled else "웹에서 관련 정보를 찾지 못했습니다."
-        return {"web_context_str": web_ctx, "web_search_docs": docs}
+        # 웹 검색은 'web_search'로 출처 통일
+        sources = ['web_search'] * len(docs)
+        return {"web_context_str": web_ctx, "web_search_docs": docs, "web_sources": sources}
     except Exception as e:
         logger.error(f"웹 검색 실패: {e}")
         return {"web_context_str": "웹 검색 중 오류 발생", "web_search_docs": []}
@@ -123,7 +169,15 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
 def combine_context_node(state: GraphState) -> Dict[str, Any]:
     db_docs = state.get("retrieved_docs", [])
     web_docs = state.get("web_search_docs", [])
-    return {"final_contexts": db_docs + web_docs}
+    
+    db_sources = state.get("final_sources", [])
+    web_sources = state.get("web_sources", [])
+    
+    # 두 소스를 합치고, 웹 검색 노드에서 온 소스를 추가합니다.
+    final_sources = db_sources + web_sources
+    final_contexts = db_docs + web_docs
+    
+    return {"final_contexts": final_contexts, "final_sources": final_sources}
 
 def generate_draft_node(state: GraphState) -> Dict[str, Any]:
     msgs = rag_prompt.format_messages(question=state.get("question", ""), db_context=state.get("db_context_str", "정보 없음"), web_context=state.get("web_context_str", "정보 없음"))

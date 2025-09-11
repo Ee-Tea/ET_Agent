@@ -15,7 +15,7 @@ from langchain_openai import ChatOpenAI
 import ast
 
 # ==================== 설정: 입력 파일 이름 ====================
-INPUT_CSV_FILENAME = "2_rag_answers_20250910_190831.csv" # <-- 여기를 수정하세요
+INPUT_CSV_FILENAME = "2_rag_answers_20250911_110105.csv" # <-- 여기를 수정하세요
 # ==========================================================
 
 # ==================== 설정 (공통) ====================
@@ -98,8 +98,17 @@ def main():
     # PASS/FAIL 판단 기준 설정
     PASS_THRESHOLD = 0.7
 
+    # 각 질문에 대한 개별 결과를 리스트에 추가
     for _, row in df.iterrows():
         is_pass = (row['answer_relevancy'] >= PASS_THRESHOLD) and (row['context_precision'] >= PASS_THRESHOLD)
+        
+        # ✨ 개별 질문의 RAGAS 지표 평균 계산
+        individual_avg = (
+            row['faithfulness'] + 
+            row['answer_relevancy'] + 
+            row['context_recall'] + 
+            row['context_precision']
+        ) / 4
         
         item = {
             "question": row['question'],
@@ -108,12 +117,14 @@ def main():
                 "faithfulness": row['faithfulness'],
                 "answer_relevancy": row['answer_relevancy'],
                 "context_recall": row['context_recall'],
-                "context_precision": row['context_precision']
+                "context_precision": row['context_precision'],
+                "average": individual_avg  # ✨ 개별 평균 점수 추가
             },
             "pass_fail": "PASS" if is_pass else "FAIL"
         }
         json_output['questions'].append(item)
 
+    # 이 부분이 for 루프 밖으로 이동했습니다.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_filename = f"ragas_evaluation_{timestamp}.json"
     

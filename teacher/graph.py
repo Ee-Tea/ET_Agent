@@ -1,5 +1,5 @@
 import os
-from supervisor import MainOrchestrator
+from ..supervisor import MainOrchestrator
 
 # 오케스트레이터 & 그래프 컴파일
 def graph():

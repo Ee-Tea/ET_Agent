@@ -5,6 +5,7 @@
 from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from datetime import datetime
+from ..services.hybrid_session_service import HybridSessionService
 
 from ..models import (
     ChatRequest, ChatResponse, 
@@ -17,12 +18,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # 전역 변수 (실제로는 의존성 주입으로 처리해야 함)
 orchestrator = None
 teacher = None
+hybrid_session_service = None
 
-def set_services(orch, teach):
+def set_services(orch, teach, session_service=None):
     """서비스 인스턴스 설정"""
-    global orchestrator, teacher
+    global orchestrator, teacher, hybrid_session_service
     orchestrator = orch
     teacher = teach
+    hybrid_session_service = session_service
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -38,7 +41,7 @@ async def chat(request: ChatRequest):
             user_query=request.message,
             config={
                 "configurable": {
-                    "thread_id": f"teacher:{request.user_id}:{request.chat_id}",
+                    "thread_id": f"supervisor:{request.user_id}:{request.chat_id}"
                 }
             }
         )
@@ -156,7 +159,7 @@ async def chat_stream(request: ChatRequest):
                 user_query=request.message,
                 config={
                     "configurable": {
-                        "thread_id": f"teacher:{request.user_id}:{request.chat_id}",
+                        "thread_id": f"supervisor:{request.user_id}_{request.chat_id}",
                     }
                 }
             )
@@ -234,3 +237,57 @@ async def clear_session(request: ChatRequest):
         }
 
 
+@router.get("/sessions/{user_id}")
+async def get_user_sessions(user_id: str):
+    """사용자의 모든 채팅 세션 조회"""
+    global hybrid_session_service
+    
+    if not hybrid_session_service:
+        raise HTTPException(status_code=503, detail="Session service not initialized")
+    
+    sessions = await hybrid_session_service.get_user_sessions(user_id)
+    return {"sessions": sessions}
+
+@router.post("/sessions/{user_id}/{chat_id}/save")
+async def save_session(user_id: str, chat_id: str, session_data: dict):
+    """채팅 세션 저장"""
+    global hybrid_session_service
+    
+    if not hybrid_session_service:
+        raise HTTPException(status_code=503, detail="Session service not initialized")
+    
+    await hybrid_session_service.save_session_metadata(user_id, chat_id, session_data)
+    return {"status": "saved"}
+
+@router.post("/sessions/{user_id}/{chat_id}/start")
+async def start_session(user_id: str, chat_id: str, initial_data: dict = None):
+    """새 세션 시작"""
+    global hybrid_session_service
+    
+    if not hybrid_session_service:
+        raise HTTPException(status_code=503, detail="Session service not initialized")
+    
+    await hybrid_session_service.start_session(user_id, chat_id, initial_data)
+    return {"status": "started", "session_id": f"{user_id}:{chat_id}"}
+
+@router.get("/sessions/{user_id}/{chat_id}/messages")
+async def get_session_messages(user_id: str, chat_id: str, limit: int = 100):
+    """특정 세션의 메시지 조회"""
+    global hybrid_session_service
+    
+    if not hybrid_session_service:
+        raise HTTPException(status_code=503, detail="Session service not initialized")
+    
+    messages = await hybrid_session_service.get_session_messages(user_id, chat_id, limit)
+    return {"messages": messages}
+
+@router.post("/sessions/{user_id}/{chat_id}/archive")
+async def archive_session(user_id: str, chat_id: str):
+    """세션 아카이브 (Redis → PostgreSQL)"""
+    global hybrid_session_service
+    
+    if not hybrid_session_service:
+        raise HTTPException(status_code=503, detail="Session service not initialized")
+    
+    await hybrid_session_service.archive_session(user_id, chat_id)
+    return {"status": "archived", "session_id": f"{user_id}:{chat_id}"}

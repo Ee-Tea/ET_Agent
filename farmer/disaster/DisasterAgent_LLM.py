@@ -516,7 +516,7 @@ def build_graph():
     return app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
     OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
     

@@ -2,7 +2,6 @@
 헬스 체크 및 시스템 상태 API 라우터
 """
 
-from typing import Dict, Any
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
 import psutil

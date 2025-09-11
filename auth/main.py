@@ -3,22 +3,33 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 import os, json
 from .auth_routes import router as auth_router  # prefix="/auth"
+from .config import settings
 
 def _parse_allowed_origins() -> list[str]:
     raw = os.getenv("ALLOWED_ORIGINS", "")
     if not raw:
-        return [
+        defaults = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://172.29.208.1:3000",
         ]
+        # Ensure FRONTEND_BASE_URL is included
+        if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in defaults:
+            defaults.append(settings.FRONTEND_BASE_URL)
+        return defaults
     try:
         val = json.loads(raw)
         if isinstance(val, list):
-            return [str(v) for v in val]
+            origins = [str(v) for v in val]
+            if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in origins:
+                origins.append(settings.FRONTEND_BASE_URL)
+            return origins
     except Exception:
         pass
-    return [v.strip() for v in raw.split(",") if v.strip()]
+    origins = [v.strip() for v in raw.split(",") if v.strip()]
+    if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in origins:
+        origins.append(settings.FRONTEND_BASE_URL)
+    return origins
 
 app = FastAPI(title="Auth API")
 

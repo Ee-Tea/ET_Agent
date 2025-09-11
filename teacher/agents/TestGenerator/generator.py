@@ -325,7 +325,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     print(f"⚠️ MilvusDB에서 {subject_area} 과목 관련 문서를 찾지 못함")
             else:
                 print("⚠️ MilvusDB 연결 안됨 - 빈 문서로 진행")
-            
+
             print(f"[DEBUG] _retrieve_documents: found {len(documents)} documents")
             
             # Milvus 문서에는 source_file이 없을 수 있으므로 보완
@@ -909,7 +909,7 @@ class InfoProcessingExamAgent(BaseAgent):
 
         # 결과 합치기 노드 추가
         workflow.add_node("merge_results", self._merge_results)
-        
+
         workflow.set_entry_point("retrieve")
         workflow.add_edge("retrieve", "prepare_context")
         
@@ -1028,12 +1028,12 @@ class InfoProcessingExamAgent(BaseAgent):
             "documents": [],
             "context": "",
             "quiz_questions": [],
-            "difficulty": difficulty,
+                    "difficulty": difficulty,
             "error": "",
             "used_sources": [],
-            "generation_attempts": 0,
+                    "generation_attempts": 0,
             "target_quiz_count": target_count,
-            "subject_area": subject_area,
+                    "subject_area": subject_area,
             "validated_questions": [],
             "node_id": 1
         }
@@ -1077,12 +1077,13 @@ class InfoProcessingExamAgent(BaseAgent):
             }
             
         except Exception as e:
-            print(f"❌ 문제 생성 실패: {e}")
+            err = str(e)
+            print(f"❌ 문제 생성 실패: {err}")
             return {
                 "success": False,
                 "questions": [],  # 빈 리스트 반환
                 "status": "FAILED",
-                "error": str(e),
+                "error": err,
                 "result": {
                     "exam_title": f"{subject_area} {difficulty} 문제집",
                     "total_questions": 0,
@@ -1109,7 +1110,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     "model_info": OPENAI_LLM_MODEL,
                     "parallel_agents": 1
                 }
-            }
+        }
 
     # 3) 사용자 지정 병렬 실행로 5과목 동시 처리(최대 parallel_agents 동시)
     def _generate_full_exam(self, difficulty: str = "중급", parallel_agents: int = 2, milvus_data: Dict[str, Any] = None) -> Dict[str, Any]:

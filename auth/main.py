@@ -1,71 +1,33 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+# auth/main.py
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from contextlib import asynccontextmanager
+from .auth_routes import router as auth_router  # prefix="/auth"
 
-from .db import get_db, engine
-from .models.base import Base
-from .models.user import User, OAuthAccount
-from .auth_routes import router as auth_router
-from .config import settings
+FRONTEND_ORIGIN = "http://localhost:3000"  # 필요하면 .env로 관리
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan events"""
-    # Startup
-    print("🚀 Starting authentication service...")
-    
-    # Create database tables
-    Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created")
-    
-    yield
-    
-    # Shutdown
-    print("🛑 Shutting down authentication service...")
+app = FastAPI(title="Auth API")
 
-# Create FastAPI app
-app = FastAPI(
-    title="ET Agent Authentication API",
-    description="Authentication service for ET Agent with Google OAuth",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# Add CORS middleware
+# CORS는 반드시 최종 app 인스턴스에 1회만 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=[FRONTEND_ORIGIN],  # "*" 금지, 정확한 오리진만
+    allow_credentials=True,           # 쿠키 전달 허용
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include authentication routes
+# 라우터 등록 (CORS 전에/후에 어느쪽이든 OK, 중요한 건 app 재생성 금지)
 app.include_router(auth_router)
 
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "ET Agent Authentication API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "auth_endpoints": {
-            "google_auth": "/auth/google",
-            "google_callback": "/auth/google/callback",
-            "me": "/auth/me",
-            "refresh": "/auth/refresh",
-            "logout": "/auth/logout"
-        }
-    }
+# 헬스 체크
+@app.get("/auth/health")
+async def auth_health():
+    return {"status": "healthy", "service": "authentication"}
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "et-agent-auth"}
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+async def _chrome_probe():
+    return Response(status_code=204)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
+@app.get("/favicon.ico", include_in_schema=False)
+async def _favicon():
+    return Response(status_code=204)

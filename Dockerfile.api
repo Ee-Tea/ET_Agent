@@ -18,6 +18,7 @@ COPY common/ ./common/
 COPY teacher/ ./teacher/
 COPY farmer/ ./farmer/
 COPY api/ ./api/
+COPY supervisor.py ./
 # ---- End Injected ----
 
 RUN pip install uv && uv sync --frozen

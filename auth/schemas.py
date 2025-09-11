@@ -1,6 +1,14 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
+from typing import Literal
+
+class UserPublic(BaseModel):
+    id: str
+    name: str
+    email: EmailStr
+    picture: str | None = None
+    provider: Literal["google", "kakao", "naver"] = "google"
 
 # User schemas
 class UserBase(BaseModel):
@@ -50,7 +58,7 @@ class Token(BaseModel):
     expires_in: int
 
 class TokenData(BaseModel):
-    user_id: Optional[str] = None
+    user_id: str | None = None
 
 class GoogleUserInfo(BaseModel):
     id: str

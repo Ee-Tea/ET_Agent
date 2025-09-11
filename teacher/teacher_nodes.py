@@ -79,32 +79,43 @@ def get_user_answer(user_question: str) -> list:
     )
     
     result = response.choices[0].message.content.strip()
+    print(f"🔍 [get_user_answer] LLM 응답: {result}")
     
     # LLM 응답을 파싱하여 리스트로 변환
     try:
         # JSON 형태의 리스트 문자열을 파싱
         import json
         if result.startswith('[') and result.endswith(']'):
+            print(f"🔍 [get_user_answer] JSON 형태 감지, 파싱 시도: {result}")
             parsed_list = json.loads(result)
             if isinstance(parsed_list, list):
                 # ★ 항상 문자열로 정규화해서 반환
-                return [str(x).strip() for x in parsed_list]
+                result_list = [str(x).strip() for x in parsed_list]
+                print(f"🔍 [get_user_answer] JSON 파싱 성공: {result_list}")
+                return result_list
         
         # JSON 파싱이 실패한 경우, 정규표현식으로 숫자 추출
         import re
+        print(f"🔍 [get_user_answer] JSON 파싱 실패, 정규표현식으로 숫자 추출 시도")
         numbers = re.findall(r'\d+', result)
+        print(f"🔍 [get_user_answer] 정규표현식으로 추출한 숫자들: {numbers}")
         if numbers:
             # ★ 여기서도 문자열 보장
-            return [n.strip() for n in numbers]
+            result_list = [n.strip() for n in numbers]
+            print(f"🔍 [get_user_answer] 정규표현식 파싱 성공: {result_list}")
+            return result_list
         
         # LLM 응답이 없거나 숫자가 없는 경우, 원본 질문에서 직접 추출
-        print(f"🔍 LLM 응답에서 숫자를 찾지 못함, 원본 질문에서 직접 추출: {user_question}")
+        print(f"🔍 [get_user_answer] LLM 응답에서 숫자를 찾지 못함, 원본 질문에서 직접 추출: {user_question}")
         original_numbers = re.findall(r'\d+', user_question)
+        print(f"🔍 [get_user_answer] 원본 질문에서 추출한 숫자들: {original_numbers}")
         if original_numbers:
-            print(f"🔍 원본 질문에서 추출한 숫자들: {original_numbers}")
-            return [n.strip() for n in original_numbers]
+            result_list = [n.strip() for n in original_numbers]
+            print(f"🔍 [get_user_answer] 원본 질문 파싱 성공: {result_list}")
+            return result_list
         
         # 숫자도 없는 경우 빈 리스트 반환
+        print(f"🔍 [get_user_answer] 숫자를 찾지 못해 빈 리스트 반환")
         return []
         
     except Exception as e:

@@ -86,7 +86,7 @@ def get_current_user(
     if not token_data or not token_data.user_id:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials", headers={"WWW-Authenticate": "Bearer"})
 
-    user = db.query(UserModel).filter(UserModel.id == token_data.user_id).first()
+    user = db.query(UserModel).filter(UserModel.user_id == token_data.user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found", headers={"WWW-Authenticate": "Bearer"})
     return user
@@ -154,11 +154,11 @@ async def google_callback(
 @router.get("/me", response_model=UserPublic)
 async def get_current_user_info(current_user: UserModel = Depends(get_current_user)):
     return UserPublic(
-        id=str(current_user.id),
+        id=str(current_user.user_id),
         name=current_user.name,
         email=current_user.email,
         picture=getattr(current_user, "picture", None),
-        provider="google",  # 멀티 프로바이더면 DB에서 읽어 설정
+        provider=(current_user.provider or "google"),
     )
 
 @router.post("/refresh")
@@ -170,7 +170,7 @@ async def refresh_token(
     
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth_service.create_access_token(
-        data={"sub": current_user.id}, 
+        data={"sub": current_user.user_id}, 
         expires_delta=access_token_expires
     )
     

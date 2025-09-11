@@ -252,10 +252,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS 미들웨어 설정
+# CORS 미들웨어 설정 (credentials 사용 시 * 금지 → 환경변수 기반 화이트리스트)
+def _parse_allowed_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "")
+    if not raw:
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://172.29.208.1:3000",
+            "http://localhost",
+        ]
+    try:
+        import json
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [str(v) for v in val]
+    except Exception:
+        pass
+    # comma-separated
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
+    allow_origins=_parse_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

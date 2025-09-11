@@ -285,3 +285,57 @@ def extract_region_from_question(question: str) -> str:
 #         return now + timedelta(days=14)
 #     
 #     return now  # 기본값
+
+# =========[ 날짜 추출 관련 함수들 ]=========
+KST = ZoneInfo("Asia/Seoul")
+
+def normalize_spaces(s: str) -> str:
+    """문자열의 공백을 정규화"""
+    return re.sub(r'\s+', ' ', s.strip())
+
+def now_kst() -> datetime:
+    """현재 KST 시간 반환"""
+    return datetime.now(tz=KST)
+
+WEEKDAY_IDX = {"월":0,"화":1,"수":2,"목":3,"금":4,"토":5,"일":6}
+
+def REGION_extract_datetime_from_question(q: str) -> Optional[datetime]:
+    """질문에서 날짜 정보를 추출하여 datetime 객체로 반환"""
+    qn = normalize_spaces(q)
+    now = now_kst()
+    
+    if any(k in qn for k in ["오늘","현재","지금"]): 
+        return now
+    if "내일" in qn: 
+        return now + timedelta(days=1)
+    if "모레" in qn: 
+        return now + timedelta(days=2)
+    
+    # N일/주/달/년 뒤 패턴
+    m = re.search(r"(\d+)(일|주|달|년)(뒤|후)", qn)
+    if m:
+        num, unit = int(m.group(1)), m.group(2)
+        return (now + timedelta(days=num) if unit == "일" else
+                now + timedelta(weeks=num) if unit == "주" else
+                now + timedelta(days=30*num) if unit == "달" else
+                now + timedelta(days=365*num))
+    
+    # 다음주 패턴
+    if "다음주" in qn:
+        for k, idx in WEEKDAY_IDX.items():
+            if k in qn:
+                days_to_next_mon = ((7 - now.weekday()) % 7) or 7
+                return now + timedelta(days=days_to_next_mon + idx)
+        days_to_next_mon = ((7 - now.weekday()) % 7) or 7
+        return now + timedelta(days=days_to_next_mon)
+    
+    # M월D일 패턴
+    m2 = re.search(r"(\d{1,2})월(\d{1,2})일", qn)
+    if m2:
+        M, D = int(m2.group(1)), int(m2.group(2))
+        try: 
+            return datetime(now.year, M, D, tzinfo=KST)
+        except ValueError: 
+            return None
+    
+    return None

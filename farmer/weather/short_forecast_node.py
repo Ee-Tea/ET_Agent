@@ -87,16 +87,25 @@ def _format_short_land_record(raw: list) -> Dict[str, str]:
         "human": human
     }
 
-def fetch_short_land_records() -> List[Dict[str, str]]:
-    """KMA 단기육상예보 데이터 가져오기"""
+def fetch_short_land_records(question_date=None, target_region=None) -> List[Dict[str, str]]:
+    """KMA 단기육상예보 데이터 가져오기 (지역 필터링 적용)"""
     if not WHEATHER_API_KEY_HUB:
         print("❌ API 키(WHEATHER_API_KEY_HUB)가 없습니다.")
         return []
     
+    # 날짜 처리
+    if question_date:
+        tmfc = question_date.strftime("%Y%m%d%H")
+        print(f"   - 질문 날짜 사용: {tmfc}")
+    else:
+        now = datetime.now(tz=KST)
+        tmfc = now.strftime("%Y%m%d%H")
+        print(f"   - 현재 날짜 사용: {tmfc}")
+    
     BASE = "https://apihub.kma.go.kr/api/typ01/url/fct_afs_dl.php"
     params = {
         "reg": "",
-        "tmfc": "0",
+        "tmfc": tmfc,
         "disp": "1",
         "authKey": WHEATHER_API_KEY_HUB
     }
@@ -119,8 +128,29 @@ def fetch_short_land_records() -> List[Dict[str, str]]:
                 if len(raw_row) < 17:
                     continue
                 
-                docs.append(_format_short_land_record(raw_row))
+                formatted_record = _format_short_land_record(raw_row)
+                
+                # 지역 필터링 (API 호출 시점에서)
+                if target_region:
+                    try:
+                        j = json.loads(formatted_record["json"])
+                        region_name = j.get("region_name", "")
+                        
+                        # 서울의 경우 수도권 포함
+                        if target_region == "서울":
+                            if any(k in region_name for k in ["서울", "경기", "인천", "수도권"]):
+                                docs.append(formatted_record)
+                        else:
+                            if target_region in region_name:
+                                docs.append(formatted_record)
+                    except:
+                        # JSON 파싱 실패 시 제외
+                        continue
+                else:
+                    # 지역 지정 없으면 모든 데이터 포함
+                    docs.append(formatted_record)
             
+            print(f"   - API에서 {len(docs)}개 데이터 수집 (지역: {target_region or '전체'})")
             return docs
             
         except Exception as e:
@@ -143,8 +173,16 @@ class ShortForecastNode:
         print("🧩 노드: 단기예보 데이터 수집")
         
         try:
-            # 단기예보 데이터 가져오기
-            forecasts = fetch_short_land_records()
+            # 질문에서 추출한 날짜 정보 가져오기
+            question_date = state.get("question_date")
+            target_region = state.get("target_region", "서울")
+            
+            if question_date:
+                print(f"   - 질문 날짜: {question_date.strftime('%Y-%m-%d %H:%M')}")
+            print(f"   - 대상 지역: {target_region}")
+
+            # 단기예보 데이터 가져오기 (지역 필터링 적용)
+            forecasts = fetch_short_land_records(question_date, target_region)
             
             # 상태에 결과 저장
             if "short_forecast_data" not in state:

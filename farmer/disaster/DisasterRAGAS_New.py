@@ -54,7 +54,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from DisasterAgent_LLM import run
 
-def __init__(self, csv_path="./golden_dataset_open_multi.csv"):
+def __init__(self, csv_path="./golden_dataset_open_single.csv"):
     """DisasterAgent_LLM RAGAS 평가기 초기화"""
     print(f"🔧 DisasterRAGAS 평가기 초기화 시작...")
     print(f"📁 CSV 파일 경로: {csv_path}")

@@ -14,6 +14,7 @@ from typing import TypedDict, Optional, Any, Dict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+from tavily import TavilyClient
 
 # 프로젝트 루트를 sys.path에 추가
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +39,10 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
+
+# Tavily 웹검색 설정
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
 KST = ZoneInfo("Asia/Seoul")
 
 # 시/군/구 키워드 (필요하면 계속 추가)
@@ -102,6 +107,8 @@ class GraphState(TypedDict):
     target_region: Optional[str]
     processing_mode: Optional[str]
     context_ok: Optional[bool]
+    web_context: Optional[str]
+    question_date: Optional[datetime]
 
 def make_llm() -> ChatOpenAI:
     if not OPENAI_API_KEY:
@@ -117,6 +124,16 @@ SIMPLE_ANALYSIS_PROMPT = ChatPromptTemplate.from_template(
     """다음 질문을 분석해서 어떤 기상 데이터가 필요한지 판단하세요.
 
 질문: {question}
+
+날짜 정보 판단 기준:
+- "오늘", "내일", "모레", "현재", "지금" 등의 단어가 있으면 has_date_info: true
+- 구체적인 날짜(예: "9월 11일", "내일 오후")가 있으면 has_date_info: true
+- 날짜 관련 단어가 전혀 없으면 has_date_info: false
+
+지역 정보 판단 기준:
+- 구체적인 도시명(서울, 부산, 대구 등)이 있으면 has_region_info: true
+- "수도권", "경기" 등 지역명이 있으면 has_region_info: true
+- 지역 관련 단어가 전혀 없으면 has_region_info: false
 
 반드시 다음 JSON 형식으로만 답변하세요 (다른 텍스트 없이):
 {{
@@ -159,6 +176,7 @@ ANSWER_PROMPT = ChatPromptTemplate.from_template(
 - **중요**: 기상특보 데이터가 없으면 "기상특보 현황" 섹션을 아예 제외하세요
 - **중요**: 중기예보 데이터가 없으면 "중기예보" 섹션을 아예 제외하세요
 - **중요**: 단기예보 데이터가 없으면 "단기예보" 섹션을 아예 제외하세요
+- **웹검색 결과가 있으면**: 기상청 공식 데이터를 우선하되, 웹검색 결과의 최신 정보도 참고하여 답변하세요
 - 마크다운 문법을 사용하지 말고 일반 텍스트로 작성하세요
 - 답변 끝에 안내 문구는 추가하지 마세요
 - 날짜 계산 시 현재 날짜를 기준으로 정확히 계산하세요
@@ -217,6 +235,21 @@ def simple_analyze_question_node(state: GraphState) -> Dict[str, Any]:
         enhanced_question = f"{enhanced_question} 오늘".strip()
         has_date_info = True
         print("   - 날짜 정보 없음: '오늘' 주입")
+    
+    # 현재 시간 정보 추가
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    KST = ZoneInfo("Asia/Seoul")
+    now = datetime.now(tz=KST)
+    print(f"   - 현재 시간: {now.strftime('%Y-%m-%d %H:%M:%S KST')}")
+
+    # 날짜 추출 로직 추가
+    from farmer.weather.utils import REGION_extract_datetime_from_question
+    question_date = REGION_extract_datetime_from_question(enhanced_question)
+    if question_date:
+        print(f"   - 추출된 날짜: {question_date.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        print("   - 날짜 추출 실패")
 
     print(f"   - 최종 질문: {enhanced_question}")
     print(f"   - 타깃 지역(시): {target_region}")
@@ -225,6 +258,7 @@ def simple_analyze_question_node(state: GraphState) -> Dict[str, Any]:
     return {
         **state,
         "question": enhanced_question,
+        "question_date": question_date,
         "need_advisory": need_advisory,
         "need_short_forecast": need_short_forecast,
         "need_mid_forecast": need_mid_forecast,
@@ -333,12 +367,41 @@ def short_forecast_node_wrapper(state: GraphState) -> Dict[str, Any]:
             if any(x in n for x in ["서해5도","백령"]): return (3, n)
             return (4, n)
         filtered.sort(key=_rank)
+        
+        # 해당 날짜의 모든 데이터 사용 (시간 필터링 제거)
+        question_date = state.get("question_date")
+        if question_date:
+            target_date_str = question_date.strftime("%Y-%m-%d")
+            print(f"   - 대상 날짜: {target_date_str} (모든 시간대 포함)")
+            
+            # 날짜별로 필터링 (시간은 무시하고 날짜만 매칭)
+            date_filtered = []
+            for it in filtered:
+                try:
+                    j = json.loads(it["json"])
+                    effective_time = j.get("effective_time", "")
+                    if effective_time and "KST" in effective_time:
+                        # 날짜 추출 (예: "2025-09-11 12:00 KST"에서 2025-09-11 추출)
+                        date_part = effective_time.split(" ")[0]
+                        if date_part == target_date_str:
+                            date_filtered.append(it)
+                except:
+                    date_filtered.append(it)
+            
+            if date_filtered:
+                filtered = date_filtered  # 해당 날짜의 모든 데이터 사용
+                print(f"   - 날짜 필터링: {len(filtered)}개 ({target_date_str} 전체 시간대)")
 
-    print(f"   - {target_region} 지역 필터링: {len(filtered)}개 (전체: {len(raw)}개)")
+    print(f"   - 최종 데이터: {len(filtered)}개")
+    
     if len(filtered) == 0:
-        print("   - ⚠️ 필터링된 데이터가 없습니다. 원본 상위 3개 출력:")
-        for i, it in enumerate(raw[:3]):
-            print(f"     {i+1}: {it}")
+        print("   - ⚠️ 필터링된 데이터가 없습니다.")
+    else:
+        for i, it in enumerate(filtered[:3]):
+            try:
+                j = json.loads(it.get("json", "{}"))
+            except:
+                pass
 
     return {"short_forecast_data": filtered}
 
@@ -375,19 +438,43 @@ def mid_forecast_node_wrapper(state: GraphState) -> Dict[str, Any]:
     print(f"   - {target_region} 지역 필터링: {len(filtered)}개 (전체: {len(raw)}개)")
     return {"mid_forecast_data": filtered}
 
-# 5) 데이터 통합
+# 5) 병렬 실행 노드
+def parallel_execution_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 병렬 실행 시작")
+    na = state.get("need_advisory", False)
+    ns = state.get("need_short_forecast", False)
+    nm = state.get("need_mid_forecast", False)
+    
+    print(f"   - 기상특보: {'실행' if na else '스킵'}")
+    print(f"   - 단기예보: {'실행' if ns else '스킵'}")
+    print(f"   - 중기예보: {'실행' if nm else '스킵'}")
+    
+    return {**state}
+
+# 6) 데이터 통합
 def combine_data_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 데이터 통합")
+    
+    # 병렬 처리된 데이터들이 모두 준비되었는지 확인
+    advisory_data = state.get("advisory_data", [])
+    short_forecast_data = state.get("short_forecast_data", [])
+    mid_forecast_data = state.get("mid_forecast_data", [])
+    
+    print(f"   - 기상특보: {len(advisory_data)}개")
+    print(f"   - 단기예보: {len(short_forecast_data)}개") 
+    print(f"   - 중기예보: {len(mid_forecast_data)}개")
+    
     context = combine_weather_data(state)
     return {**state, "context": context}
 
-# 6) 컨텍스트 충분성 판단 (LLM 간단 체크)
-def assess_context_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 컨텍스트 충분성 판단")
+# 6) 컨텍스트 충분성 판단 및 라우팅
+def assess_and_route_context_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 컨텍스트 충분성 판단 및 라우팅")
     question = state.get("question", "")
     context = state.get("context", "")
 
     if not context or context == "NO_DATA_AVAILABLE":
+        print("   - ❌ 컨텍스트 없음")
         return {**state, "context_ok": False, "context": "NO_DATA_AVAILABLE"}
 
     prompt = ChatPromptTemplate.from_template(
@@ -395,6 +482,11 @@ def assess_context_node(state: GraphState) -> Dict[str, Any]:
 
 질문: {question}
 컨텍스트: {context}
+
+판단 기준:
+- 날씨 데이터가 있으면 context_ok: true
+- 지역과 날짜 정보가 명확하면 context_ok: true
+- 기온, 하늘상태, 강수확률 등이 있으면 context_ok: true
 
 JSON만:
 {{"context_ok": true/false, "reason": "한 줄 이유"}}
@@ -409,17 +501,82 @@ JSON만:
     )
 
     raw = chain.invoke({"question": question, "context": context})
+    
     try:
         data = json.loads(raw)
         ok = bool(data.get("context_ok", False))
-    except Exception:
+        reason = data.get("reason", "이유 없음")
+        print(f"   - 컨텍스트 충분성: {ok} ({reason})")
+    except Exception as e:
+        print(f"   - JSON 파싱 실패: {e}")
         ok = False
 
-    if not ok:
-        return {**state, "context_ok": False, "context": "NO_DATA_AVAILABLE"}
-    return {**state, "context_ok": True}
+    # 라우팅 결정
+    if ok:
+        print("   - ✅ 충분함 → 답변 생성으로 이동")
+    else:
+        print("   - ⚠️ 불충분함 → 웹검색으로 이동")
 
-# 7) 답변 생성
+    return {**state, "context_ok": ok}
+
+# 7) 컨텍스트 충분성 라우팅 함수
+def route_context_sufficiency(state: GraphState) -> str:
+    """컨텍스트 충분성에 따라 다음 노드를 결정"""
+    context_ok = state.get("context_ok", False)
+    return "combine_context" if context_ok else "web_search"
+
+# 8) 웹검색 노드
+def web_search_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 웹검색")
+    question = state.get("question", "")
+    target_region = state.get("target_region", "서울")
+    question_date = state.get("question_date")
+    
+    # 날짜 정보 추가
+    date_str = ""
+    if question_date:
+        date_str = question_date.strftime("%Y년 %m월 %d일")
+    
+    # 웹검색 쿼리 구성
+    search_query = f"{target_region} {date_str} 날씨 기상예보"
+    
+    try:
+        print(f"   - 웹검색 쿼리: {search_query}")
+        tavily = TavilyClient(api_key=TAVILY_API_KEY)
+        results = tavily.search(query=search_query, max_results=TAVILY_MAX_RESULTS)
+        
+        if not results or not results.get("results"):
+            print("   - ⚠️ 웹검색 결과가 없습니다.")
+            return {**state, "web_context": "[웹검색 결과 없음]"}
+        
+        web_context = "\n\n".join([
+            f"- 출처: {res['url']}\n 내용: {res['content']}" 
+            for res in results['results']
+        ]) or "검색 결과를 찾지 못했습니다."
+        
+        print(f"   - ✅ 웹검색 완료: {len(results['results'])}개 결과")
+        return {**state, "web_context": web_context}
+        
+    except Exception as e:
+        print(f"   - ❌ 웹검색 중 오류 발생: {e}")
+        return {**state, "web_context": f"[웹검색 실패: {e}]"}
+
+# 9) 컨텍스트 결합 노드
+def combine_context_node(state: GraphState) -> Dict[str, Any]:
+    print("🧩 노드: 컨텍스트 결합")
+    context = state.get("context", "")
+    web_context = state.get("web_context", "")
+    
+    if web_context and web_context not in ["[웹검색 결과 없음]", ""]:
+        print("   - 기상 데이터와 웹검색 결과를 결합합니다.")
+        final_context = f"[기상청 공식 데이터]\n{context}\n\n[웹검색 결과]\n{web_context}"
+    else:
+        print("   - 기상청 공식 데이터만 사용합니다.")
+        final_context = context
+    
+    return {**state, "context": final_context}
+
+# 10) 답변 생성
 def generate_answer_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 답변 생성")
 
@@ -456,11 +613,14 @@ def build_simple_graph():
     g = StateGraph(GraphState)
 
     g.add_node("analyze_question", simple_analyze_question_node)
+    g.add_node("parallel_execution", parallel_execution_node)
     g.add_node("advisory", advisory_node_wrapper)
     g.add_node("short_forecast", short_forecast_node_wrapper)
     g.add_node("mid_forecast", mid_forecast_node_wrapper)
     g.add_node("combine_data", combine_data_node)
-    g.add_node("assess_context", assess_context_node)
+    g.add_node("assess_and_route_context", assess_and_route_context_node)
+    g.add_node("web_search", web_search_node)
+    g.add_node("combine_context", combine_context_node)
     g.add_node("generate_answer", generate_answer_node)
 
     g.set_entry_point("analyze_question")
@@ -470,45 +630,61 @@ def build_simple_graph():
         ns = state.get("need_short_forecast", False)
         nm = state.get("need_mid_forecast", False)
         needed = sum([1 if na else 0, 1 if ns else 0, 1 if nm else 0])
+        
         if needed == 0:
             return "combine_data"
-        if needed == 1:
+        elif needed == 1:
+            # 단일 에이전트로 직접 라우팅
             if na: return "advisory"
             if ns: return "short_forecast"
             if nm: return "mid_forecast"
-        # 2개 이상 필요한 경우: 순차 연결
-        return "advisory"
+        else:
+            # 2개 이상 필요한 경우 병렬 실행
+            return "parallel_execution"
 
     g.add_conditional_edges(
         "analyze_question",
         route_after_analysis,
         {
             "advisory": "advisory",
-            "short_forecast": "short_forecast",
+            "short_forecast": "short_forecast", 
             "mid_forecast": "mid_forecast",
+            "parallel_execution": "parallel_execution",
             "combine_data": "combine_data",
         }
     )
 
-    # 순차 연결 (간단화)
-    g.add_edge("advisory", "short_forecast")
-    g.add_edge("short_forecast", "mid_forecast")
+    # 병렬 실행 노드에서 각 데이터 수집 노드로 분기
+    g.add_edge("parallel_execution", "advisory")
+    g.add_edge("parallel_execution", "short_forecast")
+    g.add_edge("parallel_execution", "mid_forecast")
+
+    # 모든 데이터 수집 노드(단일/병렬)가 완료되면 데이터 통합으로 수렴
+    g.add_edge("advisory", "combine_data")
+    g.add_edge("short_forecast", "combine_data")
     g.add_edge("mid_forecast", "combine_data")
 
-    g.add_edge("combine_data", "assess_context")
-    g.add_edge("assess_context", "generate_answer")
+    g.add_edge("combine_data", "assess_and_route_context")
+    
+    # 컨텍스트 충분성에 따라 분기
+    g.add_conditional_edges(
+        "assess_and_route_context",
+        route_context_sufficiency,
+        {"combine_context": "combine_context", "web_search": "web_search"}
+    )
+    
+    g.add_edge("web_search", "combine_context")
+    g.add_edge("combine_context", "generate_answer")
     g.add_edge("generate_answer", END)
 
     app = g.compile()
-
-    # try:
-    #     graph_image_path = "agent_workflow_simple.png"
-    #     with open(graph_image_path, "wb") as f:
-    #         f.write(app.get_graph().draw_mermaid_png())
-    #     print(f"\n단순화된 LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    # except Exception as e:
-    #     print(f"그래프 시각화 중 오류: {e}")
-
+    try:
+        graph_image_path = "agent_workflow_simple.png"
+        with open(graph_image_path, "wb") as f:
+            f.write(app.get_graph().draw_mermaid_png())
+        print(f"\n단순화된 LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    except Exception as e:
+        print(f"그래프 시각화 중 오류: {e}")
     return app
 
 # OchestratorTest.py 호환 함수

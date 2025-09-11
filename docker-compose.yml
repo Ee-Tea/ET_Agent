@@ -65,7 +65,7 @@ services:
             session_id TEXT,
             title TEXT,
             session_data JSONB,
-            metadata JSONB,
+            metadata JSONB
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW(),
             is_active BOOLEAN DEFAULT TRUE,
@@ -148,8 +148,7 @@ services:
     env_file:
     - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
-      PYTHONPATH: /deps/LLM-T
+      PYTHONPATH: /app
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/auth/health', timeout=2).read(); print('ok')\""]
       interval: 10s
@@ -157,6 +156,10 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    volumes:
+    - ./auth:/app/auth
+    - ./alembic:/app/alembic
+    - ./alembic.ini:/app/alembic.ini
 
   langgraph-api:
     build:
@@ -176,12 +179,13 @@ services:
     environment:
       REDIS_URI: redis://redis:6379/0
       LANGSMITH_API_KEY=REDACTED}
-      POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
       RUN_IN_CONTAINER: '1'
       REDIS_DEBUG: 'false'
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+      DATABASE_URL: postgresql+psycopg://appuser:apppw@langgraph-postgres:5432/appdb
+      POSTGRES_URI: postgres://appuser:apppw@langgraph-postgres:5432/appdb
+
     volumes:
     - ./:/deps/LLM-T:rw
 

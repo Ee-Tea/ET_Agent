@@ -183,8 +183,8 @@ services:
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
       RUN_IN_CONTAINER: '1'
       REDIS_DEBUG: 'false'
-      DATABASE_URL: postgresql+psycopg://appuser:apppw@langgraph-postgres:5432/appdb
-      POSTGRES_URI: postgres://appuser:apppw@langgraph-postgres:5432/appdb
+      # DATABASE_URL: postgresq://postgres:postgres@langgraph-postgres:5432/postgres
+      DATABASE_URI: postgresql://postgres:postgres@langgraph-postgres:5432/postgres
 
     volumes:
     - ./:/deps/LLM-T:rw
@@ -202,7 +202,7 @@ services:
     - REDIS_HOST=redis
     - REDIS_PORT=6379
     - REDIS_URL=redis://redis:6379
-    - DATABASE_URL=postgresql://postgres:postgres@langgraph-postgres:5432/postgres
+    - DATABASE_URI= postgresql://postgres:postgres@langgraph-postgres:5432/postgres
     - OPENAI_API_KEY=REDACTED}
     - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
     - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}

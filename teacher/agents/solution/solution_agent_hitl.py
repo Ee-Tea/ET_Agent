@@ -741,7 +741,7 @@ class SolutionAgent(BaseAgent):
         state["concept_contexts_text"] = "\n\n".join(chunks)
         print(f"📚 개념 컨텍스트 {len(cleaned_docs)}개 수집")
         return state
-
+    
     
     def _retrieve_parallel(self, state: SolutionState) -> SolutionState:
         # state를 복사해서 각 작업이 독립적으로 수정하도록 함

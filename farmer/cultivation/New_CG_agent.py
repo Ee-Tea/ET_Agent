@@ -262,6 +262,9 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
             }
         
         query = state["query"]
+        # query가 리스트인 경우 첫 번째 요소 사용
+        if isinstance(query, list) and len(query) > 0:
+            query = query[0]
         milvus_data = state.get("milvus_data", {})
         milvus_context = state.get("milvus_context", "")
         

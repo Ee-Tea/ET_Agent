@@ -26,20 +26,34 @@ _interrupt_flag = threading.Event()
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
 def merge_dicts(left: dict, right: dict) -> dict:
     """딕셔너리 병합 함수 - LangGraph용"""
+    # 타입 검증 및 안전한 처리
+    if not isinstance(left, dict):
+        left = {} if left is None else {}
+    if not isinstance(right, dict):
+        right = {} if right is None else {}
+    
     if not left:
         return right or {}
     if not right:
         return left or {}
+    
     merged = left.copy()
     merged.update(right)
     return merged
 
 def merge_lists_unique(left: list, right: list) -> list:
     """리스트 병합 함수 - 중복 제거 - LangGraph용"""
+    # 타입 검증 및 안전한 처리
+    if not isinstance(left, list):
+        left = [] if left is None else []
+    if not isinstance(right, list):
+        right = [] if right is None else []
+    
     if not left:
         return right or []
     if not right:
         return left or []
+    
     # 순서를 유지하면서 중복 제거
     seen = set()
     result = []
@@ -916,10 +930,12 @@ class Farmer:
         summary_prompt = (
             """
             아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 정보는 하나도 빼지 말고 출력해줘.
+            "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답해.
             **이나 ##같은 마크다운 형식은 제외해줘.
             사용자에게 최대한 자세하고 상세하게 한국어로 알려주세요.
             작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent 순으로 자연스럽게 연결해서 답변해줘. **없는 내용은 생략**
             내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답해줘.
+            사용자는 농작물을 키우는 입장이야. 농작물의 직매장 등을 찾는다면 판매하려 한다는 것을 알아둬.
             마지막에는 사용자에게 다른 질문을 유도하는 문장을 넣어줘.
             \n\n"""
             f"{merged_output}\n\n"

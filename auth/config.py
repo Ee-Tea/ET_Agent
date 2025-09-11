@@ -8,6 +8,13 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str
     GOOGLE_REDIRECT_URI: str
+    NAVER_CLIENT_ID: str | None = None
+    NAVER_CLIENT_SECRET: str | None = None
+    NAVER_REDIRECT_URI: str | None = None
+    # Kakao OAuth Settings
+    KAKAO_CLIENT_ID: str | None = None
+    KAKAO_CLIENT_SECRET: str | None = None
+    KAKAO_REDIRECT_URI: str | None = None
     FRONTEND_BASE_URL: str
     
     # JWT Settings
@@ -16,7 +23,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
     # CORS Settings
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000"]
+    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000", "http://172.29.208.1:3000"]
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -365,7 +365,7 @@ async def chat(request: ChatRequest):
         try:
             # 동적 import로 순환 의존 회피
             from supervisor import MainOrchestrator
-            local_orchestrator = MainOrchestrator(request.user_id, request.chat_id)
+            local_orchestrator = MainOrchestrator(request.user_id, request.chat_id, hybrid_session_service)
             response_text = local_orchestrator.process_query(request.message)
         except ImportError as e:
             raise HTTPException(status_code=500, detail=f"MainOrchestrator import failed: {e}")

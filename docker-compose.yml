@@ -65,7 +65,7 @@ services:
             session_id TEXT,
             title TEXT,
             session_data JSONB,
-            metadata JSONB
+            metadata JSONB,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW(),
             is_active BOOLEAN DEFAULT TRUE,
@@ -202,7 +202,7 @@ services:
     - REDIS_HOST=redis
     - REDIS_PORT=6379
     - REDIS_URL=redis://redis:6379
-    - DATABASE_URI= postgresql://postgres:postgres@langgraph-postgres:5432/postgres
+    - DATABASE_URI=postgresql://postgres:postgres@langgraph-postgres:5432/postgres
     - OPENAI_API_KEY=REDACTED}
     - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
     - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
@@ -238,8 +238,11 @@ services:
     - 80:80
     - 443:443
     volumes:
-    - ./nginx.conf:/etc/nginx/nginx.conf
-    - ./ssl:/etc/nginx/ssl
+    - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    # 인증서/키 저장소 (letsencrypt)
+    - ./certbot/conf:/etc/letsencrypt
+    # http-01 챌린지 webroot
+    - ./certbot/www:/var/www/certbot
     depends_on:
     - bff-api
     restart: unless-stopped

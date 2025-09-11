@@ -234,7 +234,19 @@ def build_query_graph():
 
     return query_builder.compile()
 
-# --- 7. OchestratorTest.py와 호환되는 run 함수 ---
+# --- 7. 지연 로딩을 위한 전역 변수 ---
+_rag_app = None
+
+def _get_rag_app():
+    """RAG 애플리케이션을 지연 로딩으로 가져오기"""
+    global _rag_app
+    if _rag_app is None:
+        print("🌱 작물재배_agent 모듈 로딩 중...")
+        _rag_app = build_query_graph()
+        print("✅ 작물재배_agent 모듈 로딩 완료")
+    return _rag_app
+
+# --- 8. OchestratorTest.py와 호환되는 run 함수 ---
 def run(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     OchestratorTest.py에서 호출되는 메인 실행 함수 (비동기)
@@ -272,8 +284,8 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
         print(f"질문: {query}")
         print(f"MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
-        # RAG 애플리케이션 빌드
-        rag_app = build_query_graph()
+        # RAG 애플리케이션을 지연 로딩으로 가져오기
+        rag_app = _get_rag_app()
         
         # LangGraph가 자동으로 재시도 및 fallback 처리
         print("답변 생성 중...")

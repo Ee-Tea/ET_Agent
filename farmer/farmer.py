@@ -103,9 +103,6 @@ class Farmer:
         # 메모리 시스템 초기화
         self._init_memory_system()
         
-        # 에이전트 함수들 로드
-        self._load_agent_functions()
-        
         # 워크플로우 그래프 생성
         self.graph = self.create_workflow()
         
@@ -203,60 +200,38 @@ class Farmer:
     
     def _load_agent_functions(self):
         """에이전트 함수들을 로드"""
-        from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
-        from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
-        from farmer.disaster.DisasterAgent_LLM import run as disaster_run
-        from farmer.weather.run_weather_agent_simple import run as weather_run
-        from farmer.sales.SalesAgent import run as market_run
-        
-        self.agent_functions = {
-            "작물추천_agent": crop_recommend_run,
-            "작물재배_agent": crop_cultivation_run,
-            "재해_agent": disaster_run,
-            "날씨_agent": weather_run,
-            "판매처_agent": market_run
-        }
+        # 각 에이전트를 개별적으로 import하여 불필요한 초기화 방지
+        self.agent_functions = {}
     
-    def _retrieve_milvus_context(self, state: RouterState, query: str) -> str:
-        """MilvusDB에서 관련 컨텍스트 검색"""
-        milvus_data = state.get("milvus_data", {})
+    def _get_agent_function(self, agent_name: str):
+        """에이전트 함수를 지연 로딩으로 가져오기"""
+        if not hasattr(self, 'agent_functions') or not self.agent_functions:
+            self._load_agent_functions()
         
-        if not milvus_data.get("connection_status", False):
-            print("⚠️ MilvusDB 연결 안됨 - 컨텍스트 없이 진행")
-            return ""
+        # 해당 에이전트가 아직 로드되지 않은 경우에만 import
+        if agent_name not in self.agent_functions:
+            print(f"🔄 {agent_name} 모듈 로딩 중...")
+            
+            if agent_name == "작물추천_agent":
+                from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
+                self.agent_functions[agent_name] = crop_recommend_run
+            elif agent_name == "작물재배_agent":
+                from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
+                self.agent_functions[agent_name] = crop_cultivation_run
+            elif agent_name == "재해_agent":
+                from farmer.disaster.DisasterAgent_LLM import run as disaster_run
+                self.agent_functions[agent_name] = disaster_run
+            elif agent_name == "날씨_agent":
+                from farmer.weather.run_weather_agent_simple import run as weather_run
+                self.agent_functions[agent_name] = weather_run
+            elif agent_name == "판매처_agent":
+                from farmer.sales.SalesAgent import run as market_run
+                self.agent_functions[agent_name] = market_run
+            
+            print(f"✅ {agent_name} 모듈 로딩 완료")
         
-        try:
-            # Farmer 관련 컬렉션들에서 검색
-            collections = [
-                ("crop_info", 3),
-                ("crop_grow", 3),
-                ("agri_disaster_docs", 2),
-                ("market_price_docs", 2)
-            ]
-            
-            all_documents = []
-            for collection_name, k in collections:
-                documents = search_milvus_documents(
-                    milvus_data=milvus_data,
-                    collection_name=collection_name,
-                    query=query,
-                    k=k
-                )
-                all_documents.extend(documents)
-                print(f"✅ {collection_name}: {len(documents)}개 문서")
-            
-            # 컨텍스트 생성
-            if all_documents:
-                context = create_context_from_documents(all_documents, max_length=2000)
-                print(f"✅ MilvusDB 통합 컨텍스트 생성: {len(context)}자")
-                return context
-            else:
-                print("⚠️ MilvusDB에서 관련 문서를 찾지 못함")
-                return ""
-                
-        except Exception as e:
-            print(f"❌ MilvusDB 검색 실패: {e}")
-            return ""
+        return self.agent_functions.get(agent_name)
+    
     
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
         """
@@ -466,12 +441,6 @@ class Farmer:
         state.setdefault("session", {})
         state["session"]["new_question"] = True
         
-        # MilvusDB 컨텍스트 검색
-        milvus_context = self._retrieve_milvus_context(state, user_input)
-        if milvus_context:
-            state["milvus_context"] = milvus_context
-            print(f"✅ MilvusDB 컨텍스트 추가: {len(milvus_context)}자")
-        
         # 질문에서 작물명 추출
         extracted_crop = self.extract_crop_from_question(user_input)
         
@@ -611,12 +580,11 @@ class Farmer:
         # 작물추천 에이전트 실행
         print("🚀 작물추천_agent 실행 시작")
         try:
-            agent_func = self.agent_functions.get("작물추천_agent")
+            agent_func = self._get_agent_function("작물추천_agent")
             if agent_func:
                 agent_state = {
                     "query": question_part,
                     "milvus_data": state.get("milvus_data", {}),
-                    "milvus_context": state.get("milvus_context", "")
                 }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
@@ -628,7 +596,7 @@ class Farmer:
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
         # 작물추천 결과에서 하나의 작물 선택
-        selected_crop = self.extract_crop_from_question(user_input, answer)
+        selected_crop = self.extract_crop_from_question(question_part, answer)
         
         state["crop_info"] = [answer]
         # 기존 selected_crop을 완전히 클리어하고 새 값으로 대체
@@ -676,12 +644,11 @@ class Farmer:
 
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("작물재배_agent")
+            agent_func = self._get_agent_function("작물재배_agent")
             if agent_func:
                 agent_state = {
                     "query": question_part,
                     "milvus_data": state.get("milvus_data", {}),
-                    "milvus_context": state.get("milvus_context", "")
                 }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
@@ -724,12 +691,11 @@ class Farmer:
         
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("재해_agent")
+            agent_func = self._get_agent_function("재해_agent")
             if agent_func:
                 agent_state = {
                     "query": question_part,
                     "milvus_data": state.get("milvus_data", {}),
-                    "milvus_context": state.get("milvus_context", "")
                 }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
@@ -772,12 +738,11 @@ class Farmer:
         
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("판매처_agent")
+            agent_func = self._get_agent_function("판매처_agent")
             if agent_func:
                 agent_state = {
                     "query": question_part,
                     "milvus_data": state.get("milvus_data", {}),
-                    "milvus_context": state.get("milvus_context", "")
                 }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
@@ -817,12 +782,11 @@ class Farmer:
         
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("날씨_agent")
+            agent_func = self._get_agent_function("날씨_agent")
             if agent_func:
                 agent_state = {
                     "query": question_part,
                     "milvus_data": state.get("milvus_data", {}),
-                    "milvus_context": state.get("milvus_context", "")
                 }
                 agent_result = agent_func(agent_state)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
@@ -920,11 +884,11 @@ class Farmer:
         print("\n[🤖 LLM 요약 시작...]")
         summary_prompt = (
             """
-            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 정보는 하나도 빼지 말고 출력해줘.
+            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 **정보는 하나도 변경하지도, 빼먹지도 말고 출력**해줘.
             "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답해.
             **이나 ##같은 마크다운 형식은 제외해줘.
             사용자에게 최대한 자세하고 상세하게 한국어로 알려주세요.
-            작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent 순으로 자연스럽게 연결해서 답변해줘. **없는 내용은 생략**
+            작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent, 날씨_agent 순으로 자연스럽게 연결해서 답변해줘. **없는 내용은 생략**
             내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답해줘.
             사용자는 농작물을 키우는 입장이야. 농작물의 직매장 등을 찾는다면 판매하려 한다는 것을 알아둬.
             마지막에는 사용자에게 다른 질문을 유도하는 문장을 넣어줘.

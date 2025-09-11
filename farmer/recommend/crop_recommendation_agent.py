@@ -270,6 +270,18 @@ def build_graph():  # LangGraph 그래프를 구축하는 함수입니다.
     agent_app = g.compile()  # 그래프를 컴파일하여 실행 가능한 객체로 만듭니다.
     return agent_app  # 컴파일된 객체를 반환합니다.
 
+# 지연 로딩을 위한 전역 변수
+_crop_recommend_app = None
+
+def _get_crop_recommend_app():
+    """작물추천 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _crop_recommend_app
+    if _crop_recommend_app is None:
+        print("🌾 작물추천_agent 모듈 로딩 중...")
+        _crop_recommend_app = build_graph()
+        print("✅ 작물추천_agent 모듈 로딩 완료")
+    return _crop_recommend_app
+
 def run(state: dict) -> dict:  # 에이전트를 실행하는 함수입니다.
     try:
         query = state.get("query", "")  # 상태에서 쿼리를 가져옵니다.
@@ -281,8 +293,8 @@ def run(state: dict) -> dict:  # 에이전트를 실행하는 함수입니다.
         print(f"[작물추천_agent] 질문 처리 시작: {query}")  # 질문 처리 시작을 알립니다.
         print(f"[작물추천_agent] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
 
-        # 그래프를 빌드하고 실행
-        app = build_graph()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_crop_recommend_app()
         final_state = app.invoke({
             "question": query,
             "milvus_data": milvus_data,

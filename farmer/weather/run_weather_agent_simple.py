@@ -511,6 +511,18 @@ def build_simple_graph():
 
     return app
 
+# 지연 로딩을 위한 전역 변수
+_weather_app = None
+
+def _get_weather_app():
+    """날씨 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _weather_app
+    if _weather_app is None:
+        print("🌤️ 날씨_agent 모듈 로딩 중...")
+        _weather_app = build_simple_graph()
+        print("✅ 날씨_agent 모듈 로딩 완료")
+    return _weather_app
+
 # OchestratorTest.py 호환 함수
 def run(state: dict) -> dict:
     try:
@@ -519,7 +531,7 @@ def run(state: dict) -> dict:
             return {"agent_answer": "질문이 제공되지 않았습니다. 날씨 관련 질문을 해주세요."}
 
         print(f"[날씨_agent_simple] 질문 처리 시작: {query}")
-        app = build_simple_graph()
+        app = _get_weather_app()
         result = app.invoke({"question": query})
         answer = result.get("answer", "답변을 생성할 수 없습니다.")
         print(f"[날씨_agent_simple] 답변 생성 완료: {len(answer)}자")

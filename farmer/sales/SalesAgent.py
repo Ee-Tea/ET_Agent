@@ -1073,6 +1073,18 @@ graph.add_edge("output", END)
 
 graph.set_entry_point("input")
 
+# 지연 로딩을 위한 전역 변수
+_sales_app = None
+
+def _get_sales_app():
+    """판매처 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _sales_app
+    if _sales_app is None:
+        print("💰 판매처_agent 모듈 로딩 중...")
+        _sales_app = graph.compile()
+        print("✅ 판매처_agent 모듈 로딩 완료")
+    return _sales_app
+
 # 실행 함수
 def run(state: dict) -> dict:
     """
@@ -1100,8 +1112,8 @@ def run(state: dict) -> dict:
         print(f"[판매처_agent] 질문 처리 시작: {query}")
         print(f"[판매처_agent] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
-        # 그래프 컴파일 및 실행
-        app = graph.compile()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_sales_app()
         result_state = app.invoke(state)
         
         # 답변 및 컨텍스트 추출

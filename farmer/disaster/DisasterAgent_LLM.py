@@ -521,6 +521,18 @@ def build_graph():
         print(f"그래프 시각화 중 오류: {e}")
     return app
 
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_disaster_app = None
+
+def _get_disaster_app():
+    """재해대응 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _disaster_app
+    if _disaster_app is None:
+        print("⚠️ 재해_agent 모듈 로딩 중...")
+        _disaster_app = build_graph()
+        print("✅ 재해_agent 모듈 로딩 완료")
+    return _disaster_app
+
 # =========[ OchestratorTest.py 호환 함수 ]=========
 def run(state: dict) -> dict:
     """
@@ -555,8 +567,8 @@ def run(state: dict) -> dict:
         else:
             print(f"[재해_agent_LLM] ⚠️ MilvusDB 연결 안됨 - 제한된 기능으로 진행")
         
-        # 그래프 빌드 및 실행
-        app = build_graph()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_disaster_app()
         
         # 그래프 실행을 위한 초기 상태 구성
         initial_state = {

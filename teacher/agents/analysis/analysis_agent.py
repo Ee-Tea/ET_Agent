@@ -87,37 +87,21 @@ class AnalysisAgent(BaseAgent):
     
     def _create_graph(self) -> StateGraph:
         """분석 그래프 구성
-        - 단일 노드(generate_feedback)로 구성
+        - 채점은 제거하고 분석만 담당
         - entry → generate_feedback → END
         """
         # 상태 정의에 기반한 그래프 생성
         workflow = StateGraph(AnalysisState)
         
-        # 노드 추가 - analyze_mistakes 제거하고 직접 generate_feedback으로 연결
-        workflow.add_node("grade_answers", self._grade_answers)
+        # 노드 추가 - 채점 로직 제거하고 분석만 담당
         workflow.add_node("generate_feedback", self._generate_feedback)
         
-        # 엣지 수정 - grade_answers에서 바로 generate_feedback으로 연결
-        workflow.set_entry_point("grade_answers")
-        workflow.add_edge("grade_answers", "generate_feedback")
+        # 엣지 설정 - 바로 generate_feedback으로 연결
+        workflow.set_entry_point("generate_feedback")
         workflow.add_edge("generate_feedback", END)
         
         return workflow.compile()
     
-    def _grade_answers(self, state: AnalysisState) -> AnalysisState:
-        """사용자 답안과 정답을 비교하여 채점"""
-        user_answers = state["user_answer"]
-        solution_answers = state["solution_answer"]
-        
-        # 정답과 사용자 답안을 비교하여 채점 (정답: 1, 오답: 0)
-        grade_result = [1 if ua == sa else 0 for ua, sa in zip(user_answers, solution_answers)]
-        state["grade_result"] = grade_result
-        
-        # 메시지 기록 추가
-        state["messages"].append(
-            AIMessage(content="채점이 완료되었습니다.")
-        )
-        return state
     
     
     def _generate_feedback(self, state: AnalysisState) -> AnalysisState:
@@ -250,8 +234,8 @@ subject 는 각 문항의 과목명(문자열)입니다.
     "action_plan": {{
       "title": "맞춤 학습 계획",
       "short_term_goal": "1~2주 내 실행 목표",
-      "long_term_goal": "장기적 성장 목표",
-      "recommended_strategies": ["구체적 전략 1", "구체적 전략 2"],
+      "long_term_goal": "장기적 성장 목표: 3주차 ~ 8주차 목표를 주차별로 구체적이고 자세한 내용으로로 정리해서 알려주기",
+      "recommended_strategies": ["구체적 전략 1", "구체적 전략 2","구체적 전략 3"], 자세하고 구체적인 전략 제시,
       "recommended_resources": ["자료/강의 (선택)"]
     }},
     "final_message": "격려 메시지"
@@ -271,16 +255,23 @@ subject 는 각 문항의 과목명(문자열)입니다.
 
                 feedback_content = completion.choices[0].message.content
                 print(f"✅ [AnalysisAgent] LLM 응답 완료: {len(feedback_content)}자")
+                print(f"🔍 [AnalysisAgent] LLM 응답 내용: {feedback_content[:200]}...")
                 
                 try:
                     parsed_feedback = json.loads(feedback_content)
                     print(f"✅ [AnalysisAgent] JSON 파싱 성공")
+                    print(f"🔍 [AnalysisAgent] 파싱된 키들: {list(parsed_feedback.keys())}")
                 except json.JSONDecodeError as e:
                     print(f"⚠️ [AnalysisAgent] JSON 파싱 실패: {e}")
+                    print(f"🔍 [AnalysisAgent] 원본 응답: {feedback_content}")
                     parsed_feedback = {"detailed_analysis": [], "overall_assessment": {}}
                     
                 state["detailed_analysis"] = parsed_feedback.get("detailed_analysis", [])
                 state["overall_assessment"] = parsed_feedback.get("overall_assessment", {})
+                
+                print(f"🔍 [AnalysisAgent] 최종 결과:")
+                print(f"  - detailed_analysis: {len(state['detailed_analysis'])}개")
+                print(f"  - overall_assessment: {state['overall_assessment']}")
                 
             except Exception as e:
                 print(f"❌ [AnalysisAgent] LLM 호출 실패: {e}")
@@ -354,8 +345,8 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
     def invoke(self, input_data: Dict) -> AnalysisResult:
         """메인 실행
         1) 입력 검증: 필수 필드 유무/길이 일치 확인
-        2) 상태 구성: grade_result는 ScoreEngine의 results([0,1]) 사용
-        3) 그래프 실행: generate_feedback
+        2) 상태 구성: grade_result는 ScoreEngine의 results([0,1])를 직접 받음
+        3) 그래프 실행: generate_feedback (채점 로직 제거)
         4) 반환: analysis만 포함한 최소 스키마
         """
         try:
@@ -364,15 +355,15 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
             print(f"  - 입력 데이터 타입: {type(input_data)}")
             
             # 각 필드별 상세 로깅
-            for field in ["problem", "problem_types", "user_answer", "solution_answer", "solution", "results"]:
+            for field in ["problem", "problem_types", "user_answer", "solution_answer", "solution", "grade_result"]:
                 value = input_data.get(field)
                 if value is not None:
                     print(f"  - {field}: {type(value)} = {len(value) if isinstance(value, (list, dict)) else value}")
                 else:
                     print(f"  - {field}: None (누락)")
             
-            # 입력 데이터 검증
-            required_fields = ["problem", "problem_types", "user_answer", "solution_answer", "results"]
+            # 입력 데이터 검증 (grade_result는 ScoreEngine에서 받은 채점 결과)
+            required_fields = ["problem", "problem_types", "user_answer", "solution_answer", "grade_result"]
             missing_fields = [field for field in required_fields if field not in input_data]
             if missing_fields:
                 print(f"❌ [AnalysisAgent] 필수 필드 누락: {missing_fields}")
@@ -387,7 +378,7 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
 
             print(f"✅ [AnalysisAgent] 입력 데이터 검증 통과")
             
-            # 초기 상태 설정
+            # 초기 상태 설정 (grade_result는 ScoreEngine에서 받은 채점 결과 사용)
             initial_state = AnalysisState(
                 messages=[HumanMessage(content="분석을 시작합니다.")],
                 problem=input_data.get("problem", []),
@@ -395,7 +386,7 @@ items 배열의 문항 단위 데이터를 활용하여 과목 기반 강점을 
                 user_answer=input_data.get("user_answer", []),
                 solution_answer=input_data.get("solution_answer", []),
                 solution=input_data.get("solution", []),  # 선택적 필드
-                grade_result=input_data.get("results", []),
+                grade_result=input_data.get("grade_result", []),  # ScoreEngine에서 받은 채점 결과
                 detailed_analysis=[],
                 overall_assessment={},
             )

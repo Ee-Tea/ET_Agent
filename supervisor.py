@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from api.services.hybrid_session_service import HybridSessionService
 from common.short_term.redis_memory import RedisLangGraphMemory
 from common.milvus_manager import MilvusDBManager
 from teacher.teacher import Teacher, TeacherState
@@ -51,6 +52,18 @@ class MainOrchestrator:
         self.user_id = user_id
         self.chat_id = chat_id
         self.session_key = f"{user_id}_{chat_id}"
+        self.hybrid_session_service = HybridSessionService(
+            os.getenv("REDIS_URL", "redis://localhost:6380"),
+            os.getenv("DATABASE_URL")
+        )
+        
+        # 하이브리드 세션 서비스 초기화
+        import asyncio
+        try:
+            asyncio.run(self.hybrid_session_service.init_postgres())
+        except Exception as e:
+            print(f"⚠️ 하이브리드 세션 서비스 초기화 실패: {e}")
+            self.hybrid_session_service = None
         
         # LLM 초기화
         self.llm = ChatOpenAI(
@@ -79,6 +92,42 @@ class MainOrchestrator:
         
         print(f"✅ MainOrchestrator 초기화 완료 (session: {self.session_key})")
         print(f"🔗 MilvusDB 연결 상태: {'✅ 연결됨' if self.milvus_manager.is_connected else '❌ 연결 안됨'}")
+
+    async def initialize(self):
+        """초기화 - 테이블 생성 및 연결 풀 설정"""
+        await self.hybrid_session_service.init_postgres()
+    
+    
+    async def save_session(self, state: MainState):
+        """세션 데이터 저장"""
+        if self.hybrid_session_service:
+            try:
+                # 연결 풀 상태 확인/재초기화 (루프 불일치 포함)
+                import asyncio
+                current_loop = asyncio.get_running_loop()
+                pool = getattr(self.hybrid_session_service, "pool", None)
+                pool_closed = getattr(pool, "_closed", False) if pool is not None else True
+                pool_loop = getattr(pool, "_loop", None) if pool is not None else None
+                loop_mismatch = pool is not None and pool_loop is not None and pool_loop is not current_loop
+                if pool is None or pool_closed or loop_mismatch:
+                    # 가능하면 기존 풀 정리 후, 현재 루프에서 재초기화
+                    try:
+                        if pool and hasattr(pool, "close"):
+                            await pool.close()
+                    except Exception:
+                        pass
+                    await self.hybrid_session_service.init_postgres()
+                # JSON-세이프/문자열 스냅샷만 저장
+                snapshot = self._build_session_snapshot(state)
+                await self.hybrid_session_service.save_session_metadata(
+                    self.user_id,
+                    self.chat_id,
+                    snapshot
+                )
+            except Exception as e:
+                print(f"⚠️ 세션 상태 저장 실패: {e}")
+        else:
+            print("⚠️ 하이브리드 세션 서비스가 초기화되지 않음")
     
     def load_recent_questions(self, limit: int = 10) -> List[Dict[str, Any]]:
         """최근 생성된 문제들을 불러오기 (added_count 사용)"""
@@ -214,10 +263,8 @@ class MainOrchestrator:
         workflow.add_edge("handle_inconsistency", "save_memory")
         workflow.add_edge("finalize_response", END)
 
-        db_url = os.getenv("DATABASE_URL")
-        checkpointer = PostgresSaver.from_conn_string(db_url) if db_url else MemorySaver()
 
-        return workflow.compile(checkpointer=checkpointer)
+        return workflow.compile(checkpointer=MemorySaver())
     
     def visualize_graph(self, output_path: str = "supervisor_graph.png"):
         """그래프 시각화"""
@@ -331,10 +378,13 @@ class MainOrchestrator:
           * 정답 확인 및 해설 제공
           * 오답 분석 및 학습 포인트 제시
           * 단계별 문제 풀이 과정 안내
-        - **채점 기능**: 자동 채점 및 성적 관리
+        - **채점 기능**: 자동 채점 및 성적 관리 - 답만 숫자로 입력해도 채점 가능
           * 객관식 문제 정답 여부 판단
           * 점수 계산 및 성적 통계
           * 학습 진도 추적
+          * 오답 분석 및 학습 포인트 제시
+          * **답안 제출**: "답은 1,2,3", "정답은 1,1,1", "1,1,1,1,1" 등의 답안 형식
+          * **채점 요청**: "채점해줘", "채점해주세요", "맞았나?", "맞나?", "점수는?"
         - **학습 지원**: IT 지식 및 개념 설명
           * IT 용어 사전 및 개념 설명
           * 학습 자료 제공 및 추천
@@ -353,7 +403,7 @@ class MainOrchestrator:
           * 병해충 진단 및 방제 방법
           * 자연재해 예방 및 대응 전략
           * 예방적 관리 방법
-        - **기상 정보**: 기상 데이터 기반 농업 관리
+        - **기상/날씨 정보**: 기상 데이터 기반 농업 관리
           * 온도, 습도, 강수량, 일조량 분석
           * 기상 예보 기반 재배 계획 수립
           * 이상 기상 대응 방안
@@ -545,7 +595,14 @@ class MainOrchestrator:
             }
             
             # Farmer 그래프 실행
-            result = self.farmer.invoke(farmer_state)
+            config = {
+                "configurable": {
+                    "thread_id": f"farmer:{self.user_id}:{self.chat_id}",
+                    "checkpoint_ns": "farmer",
+                    "checkpoint_id": f"farmer_{self.session_key}"
+                }
+            }
+            result = self.farmer.invoke(farmer_state, config)
             
             state["farmer_result"] = result
             print("🌾 Farmer 실행 완료")
@@ -590,9 +647,10 @@ class MainOrchestrator:
             # Teacher 그래프 실행 (config 추가)
             config = {
                 "configurable": {
-                    "thread_id": f"{self.user_id}_{self.chat_id}",
+                    "thread_id": f"teacher:{self.user_id}:{self.chat_id}",  # 수정
                     "checkpoint_ns": "teacher",
-                    "checkpoint_id": f"teacher_{self.session_key}"
+                    "checkpoint_id": f"teacher_{self.session_key}",
+                    "recursion_limit": 40
                 }
             }
             result = self.teacher.graph.invoke(teacher_state, config)
@@ -654,6 +712,15 @@ class MainOrchestrator:
             
         except Exception as e:
             print(f"❌ 메모리 저장 실패: {e}")
+
+    
+        try:
+            # 세션 상태 저장
+            import asyncio
+            asyncio.run(self.save_session(state))
+            print("💾 세션 상태 저장 완료")
+        except Exception as e:
+            print(f"❌ 세션 상태 저장 실패: {e}")
         
         return state
     
@@ -690,6 +757,28 @@ class MainOrchestrator:
         """메인 쿼리 처리 - LangGraph 워크플로우 실행"""
         print(f"\n📝 사용자 질문: {user_query}")
         
+        # 사용자 메시지를 즉시 DB에 기록
+        # 주의: FastAPI 이벤트 루프 내부에서는 호출측(api/main.py)에서 await로 저장합니다.
+        # 여기서는 CLI 등 동기 컨텍스트에서만 best-effort로 처리합니다.
+        try:
+            if self.hybrid_session_service:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    # 이미 루프가 돌고 있으면 호출측에서 처리해야 하므로 skip
+                except RuntimeError:
+                    # 루프 없음(동기 환경): 직접 실행
+                    asyncio.run(
+                        self.hybrid_session_service.add_chat_message(
+                            self.user_id,
+                            self.chat_id,
+                            "user",
+                            user_query
+                        )
+                    )
+        except Exception as e:
+            print(f"⚠️ 사용자 메시지 저장 실패: {e}")
+
         # 특별 명령어 처리
         if user_query.lower() == "clear":
             self.clear_session()
@@ -717,15 +806,31 @@ class MainOrchestrator:
         try:
             config = {
                 "configurable": {
-                    "thread_id": self.session_key,
+                    "thread_id": f"supervisor:{self.user_id}:{self.chat_id}",
                     "checkpoint_ns": "supervisor",
-                    "checkpoint_id": f"supervisor_{self.session_key}"
+                    "checkpoint_id": f"supervisor_{self.session_key}",
+                    "recursion_limit": 60
                 }
             }
             
             # 그래프 실행
             final_state = self.graph.invoke(initial_state, config)
-            
+
+            # 에이전트 응답을 DB에 기록
+            try:
+                if self.hybrid_session_service:
+                    import asyncio
+                    asyncio.run(
+                        self.hybrid_session_service.add_chat_message(
+                            self.user_id,
+                            self.chat_id,
+                            "assistant",
+                            str(final_state.get("final_response", ""))
+                        )
+                    )
+            except Exception as e:
+                print(f"⚠️ 에이전트 메시지 저장 실패: {e}")
+
             return final_state["final_response"]
             
         except Exception as e:
@@ -741,6 +846,36 @@ class MainOrchestrator:
             return "score"
         else:
             return "generate"
+
+    def _build_session_snapshot(self, state: MainState) -> Dict[str, str]:
+        """세션 저장용 스냅샷을 문자열로만 구성하여 반환"""
+        try:
+            final_response = state.get("final_response", "")
+        except Exception:
+            final_response = ""
+        try:
+            classified_service = state.get("classified_service", "")
+        except Exception:
+            classified_service = ""
+        try:
+            is_relevant = state.get("is_relevant", "")
+        except Exception:
+            is_relevant = ""
+        try:
+            service_consistent = state.get("service_consistent", "")
+        except Exception:
+            service_consistent = ""
+
+        return {
+            "session_id": f"{self.user_id}:{self.chat_id}",
+            "user_id": str(self.user_id),
+            "chat_id": str(self.chat_id),
+            "user_query": str(state.get("user_query", "")),
+            "classified_service": str(classified_service),
+            "is_relevant": str(is_relevant),
+            "service_consistent": str(service_consistent),
+            "final_response": str(final_response)
+        }
     
     def _format_teacher_response(self, teacher_result: Dict) -> str:
         """Teacher 응답 포맷팅"""

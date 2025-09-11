@@ -213,16 +213,6 @@ def build_query_graph():
 
     return query_builder.compile()
 
-def run_agent(question: str) -> Dict[str, Any]:
-    """
-    주어진 질문을 사용하여 챗봇 에이전트를 실행하고 최종 상태를 반환합니다.
-    """
-    rag_app = build_query_graph()
-    initial_state = {"question": question}
-    final_state = rag_app.invoke(initial_state)
-    return final_state
-
-
 # --- 7. 메인 실행 로직 ---
 if __name__ == "__main__":
     print("🌱 농작물 챗봇 에이전트 시작...")

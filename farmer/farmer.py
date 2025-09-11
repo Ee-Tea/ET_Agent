@@ -12,34 +12,51 @@ import operator
 from langsmith import traceable
 from dotenv import load_dotenv
 import os, sys
-import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import traceback
 import signal
+from common.milvus_helpers import search_milvus_documents, search_milvus_documents_by_subject, get_milvus_retriever, create_context_from_documents
 load_dotenv()
 
 # 전역 인터럽트 플래그
 _interrupt_flag = threading.Event()
 
+# 전역 에이전트 함수 캐시 (지연 로딩용)
+_agent_functions_cache = {}
+
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
 def merge_dicts(left: dict, right: dict) -> dict:
     """딕셔너리 병합 함수 - LangGraph용"""
+    # 타입 검증 및 안전한 처리
+    if not isinstance(left, dict):
+        left = {} if left is None else {}
+    if not isinstance(right, dict):
+        right = {} if right is None else {}
+    
     if not left:
         return right or {}
     if not right:
         return left or {}
+    
     merged = left.copy()
     merged.update(right)
     return merged
 
 def merge_lists_unique(left: list, right: list) -> list:
     """리스트 병합 함수 - 중복 제거 - LangGraph용"""
+    # 타입 검증 및 안전한 처리
+    if not isinstance(left, list):
+        left = [] if left is None else []
+    if not isinstance(right, list):
+        right = [] if right is None else []
+    
     if not left:
         return right or []
     if not right:
         return left or []
+    
     # 순서를 유지하면서 중복 제거
     seen = set()
     result = []
@@ -64,6 +81,8 @@ class RouterState(dict):
     routing: Annotated[Dict[str, any], merge_dicts] = None
     error_info: Annotated[Dict[str, str], merge_dicts] = None
     crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = None
+    milvus_context: Annotated[str, merge_dicts] = None
+    milvus_data: Annotated[Dict[str, any], merge_dicts] = None
 
 def signal_handler(signum, frame):
     """키보드 인터럽트 시그널 핸들러"""
@@ -75,46 +94,76 @@ class Farmer:
     """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
     
     def __init__(self, user_id: str = "default_user", service: str = "farmer", chat_id: str = "default_chat"):
-        """Farmer 클래스 초기화"""
+        """Farmer 클래스 초기화 - 지연 로딩 최적화"""
         # 사용자 식별자 설정
         self.user_id = user_id
         self.service = service
         self.chat_id = chat_id
         
-        # LLM 설정
+        # LLM 설정 (필수 - 즉시 로딩)
         self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
         
-        # 메모리 시스템 초기화
+        # 메모리 시스템 초기화 (가벼운 작업)
         self._init_memory_system()
         
-        # 에이전트 함수들 로드
-        self._load_agent_functions()
+        # 워크플로우 그래프 생성 (지연 로딩으로 변경)
+        self._graph = None  # 지연 로딩용
         
-        # 워크플로우 그래프 생성
-        self.graph = self.create_workflow()
-        
-        # 병렬 처리용 스레드 풀
-        self.thread_pool = ThreadPoolExecutor(max_workers=4)
+        # 병렬 처리용 스레드 풀 (필요시에만 생성)
+        self._thread_pool = None
         
         # 시그널 핸들러 등록 (메인 스레드에서만)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGINT, signal_handler)
+        
+        print(f"✅ Farmer 초기화 완료 (지연 로딩 모드)")
     
     def _init_memory_system(self):
         """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
         print("📝 메모리 시스템: Main에서 중앙집중식 관리")
     
+    @property
+    def graph(self):
+        """워크플로우 그래프 지연 로딩"""
+        if self._graph is None:
+            print("🔄 Farmer 워크플로우 그래프 생성 중...")
+            self._graph = self.create_workflow()
+            print("✅ Farmer 워크플로우 그래프 생성 완료")
+        return self._graph
+    
+    @property
+    def thread_pool(self):
+        """스레드 풀 지연 로딩"""
+        if self._thread_pool is None:
+            print("🔄 Farmer 스레드 풀 생성 중...")
+            self._thread_pool = ThreadPoolExecutor(max_workers=4)
+            print("✅ Farmer 스레드 풀 생성 완료")
+        return self._thread_pool
+    
+    def clear_cache(self):
+        """에이전트 함수 캐시 정리"""
+        global _agent_functions_cache
+        _agent_functions_cache.clear()
+        print("🧹 에이전트 함수 캐시 정리 완료")
+    
+    def get_loaded_agents(self):
+        """현재 로드된 에이전트 목록 반환"""
+        global _agent_functions_cache
+        return list(_agent_functions_cache.keys())
+    
     def load_state(self, state: RouterState) -> RouterState:
         """그래프 시작 시 상태 초기화 - supervisor에서 query와 selected_crop만 받음"""
         print(f"📋 상태 로딩 시작...")
         
-        # supervisor에서 전달받은 상태들 백업 (query, selected_crop만)
+        # supervisor에서 전달받은 상태들 백업 (query, selected_crop, milvus_data)
         received_query = state.get("query", [])
         received_selected_crop = state.get("selected_crop", [])
+        received_milvus_data = state.get("milvus_data", {})
         
         print(f"📥 Supervisor에서 받은 상태들:")
         print(f"  - query: {received_query}")
         print(f"  - selected_crop: {received_selected_crop}")
+        print(f"  - milvus_data: {'연결됨' if received_milvus_data.get('connection_status') else '연결 안됨'}")
         
         # 기본 상태 설정
         state["session"] = {"loaded": True, "new_question": True}
@@ -128,6 +177,7 @@ class Farmer:
         state["error_info"] = {}
         state["crop_recommendation_failed"] = []
         state["artifacts"] = {}
+        state["milvus_context"] = ""
         
         # supervisor에서 받은 상태들 복원
         if received_query:
@@ -140,9 +190,15 @@ class Farmer:
         else:
             state["selected_crop"] = []
         
+        if received_milvus_data:
+            state["milvus_data"] = received_milvus_data
+        else:
+            state["milvus_data"] = {}
+        
         print(f"✅ 상태 로딩 완료:")
         print(f"  - query: {state['query']}")
         print(f"  - selected_crop: {state['selected_crop']}")
+        print(f"  - milvus_data: {'연결됨' if state['milvus_data'].get('connection_status') else '연결 안됨'}")
         
         return state
     
@@ -176,21 +232,43 @@ class Farmer:
         
         return state
     
-    def _load_agent_functions(self):
-        """에이전트 함수들을 로드"""
-        from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
-        from farmer.cultivation.CG_agent_edit import run as crop_cultivation_run
-        from farmer.disaster.DisasterAgent import run as disaster_run
-        from farmer.WeatherAgent import run as weather_run
-        from farmer.sales.SalesAgent import run as market_run
+    def _get_agent_function(self, agent_name: str):
+        """에이전트 함수를 지연 로딩으로 가져오기 (전역 캐시 사용)"""
+        global _agent_functions_cache
         
-        self.agent_functions = {
-            "작물추천_agent": crop_recommend_run,
-            "작물재배_agent": crop_cultivation_run,
-            "재해_agent": disaster_run,
-            "날씨_agent": weather_run,
-            "판매처_agent": market_run
-        }
+        # 해당 에이전트가 아직 로드되지 않은 경우에만 import
+        if agent_name not in _agent_functions_cache:
+            print(f"🔄 {agent_name} 모듈 로딩 중...")
+            
+            try:
+                if agent_name == "작물추천_agent":
+                    from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
+                    _agent_functions_cache[agent_name] = crop_recommend_run
+                elif agent_name == "작물재배_agent":
+                    from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
+                    _agent_functions_cache[agent_name] = crop_cultivation_run
+                elif agent_name == "재해_agent":
+                    from farmer.disaster.DisasterAgent_LLM import run as disaster_run
+                    _agent_functions_cache[agent_name] = disaster_run
+                elif agent_name == "날씨_agent":
+                    from farmer.weather.run_weather_agent_simple import run as weather_run
+                    _agent_functions_cache[agent_name] = weather_run
+                elif agent_name == "판매처_agent":
+                    from farmer.sales.SalesAgent import run as market_run
+                    _agent_functions_cache[agent_name] = market_run
+                else:
+                    print(f"❌ 알 수 없는 에이전트: {agent_name}")
+                    return None
+                
+                print(f"✅ {agent_name} 모듈 로딩 완료")
+                
+            except Exception as e:
+                print(f"❌ {agent_name} 모듈 로딩 실패: {e}")
+                _agent_functions_cache[agent_name] = None
+                return None
+        
+        return _agent_functions_cache.get(agent_name)
+    
     
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
         """
@@ -225,6 +303,12 @@ class Farmer:
                 router_state["selected_crop"] = [state.get("selected_crop")] if isinstance(state.get("selected_crop"), str) else state.get("selected_crop", [])
             else:
                 router_state["selected_crop"] = []
+            
+            # MilvusDB 연결 정보 전달
+            if state.get("milvus_data"):
+                router_state["milvus_data"] = state.get("milvus_data")
+            else:
+                router_state["milvus_data"] = {}
             
             print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
             
@@ -273,7 +357,7 @@ class Farmer:
             "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
         ),
         "판매처_agent": (
-            "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 실시간 시세, 최근 가격 변동을 안내합니다."
+            "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
         )
     }
@@ -374,46 +458,6 @@ class Farmer:
                 "execution_order": ["작물추천_agent"]
             }
 
-    def select_single_crop_from_recommendations(self, crop_recommendations):
-        """
-        작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
-        """
-        print("\n=== 작물 추출 과정 시작 ===")
-        
-        selection_prompt = f"""
-        다음은 작물추천 에이전트가 추천한 작물들입니다. 
-        사용자의 질문과 상황을 고려하여 상세 분석할 작물 하나를 선택해주세요.
-        
-        [추천 작물 목록]
-        {crop_recommendations}
-        
-        [요구사항]
-        - 작물명만 작성 (예: 무, 토마토, 고추, 오이)
-        - 설명이나 문장은 절대 포함하지 말 것
-        - 한 단어로 된 작물명만
-        - 작물을 찾을 수 없으면 "없음"이라고만 답변
-        - 작물 추천 결과에 있는 맨 처음 작물을 선택해줘
-        
-        상세 분석할 작물: """
-        
-        try:
-            print("[1단계] LLM에게 작물 추출 요청...")
-            selected_crop = self.llm.invoke(selection_prompt).content.strip() 
-
-            # "없음"이거나 빈 문자열인 경우 공백 반환
-            if selected_crop in ["없음", "", "None", "null"]:
-                print(f"[⚠️ 작물을 찾을 수 없음 - 공백 반환]")
-                return ""
-            
-            # 간단한 정리만 수행 (clean_crop_name 함수 사용 안함)
-            cleaned_crop = selected_crop.split('\n')[0].split('.')[0].split(',')[0].strip()
-            
-            print(f"[✅ 최종 추출된 작물] {cleaned_crop}")
-            return cleaned_crop
-            
-        except Exception as e:
-            print(f"[❌ LLM 호출 오류 - 공백 반환] {e}")
-            return ""
 
     @traceable(name="node_input")
     def node_input(self, state: RouterState) -> RouterState:
@@ -454,29 +498,60 @@ class Farmer:
         
         return state
     
-    def extract_crop_from_question(self, question: str) -> str:
-        """질문에서 작물명을 추출하는 LLM 함수"""
+    def extract_crop_from_question(self, question: str, crop_recommendations: str = None) -> str:
+        """
+        질문에서 작물명을 추출하거나 작물추천 결과에서 작물을 선택하는 통합 함수
+        
+        Args:
+            question: 사용자 질문
+            crop_recommendations: 작물추천 결과 (선택사항)
+        
+        Returns:
+            추출된 작물명
+        """
         print(f"🤖 LLM으로 작물명 추출 중...")
         
-        extraction_prompt = f"""
-        사용자의 질문에서 구체적인 작물명을 추출해주세요.
-        
-        [추출 규칙]
-        1. 구체적인 작물명만 추출 (예: 토마토, 상추, 무, 배추, 고구마, 감자 등)
-        2. 일반적인 용어는 제외 (예: 작물, 채소, 농작물, 식물 등)
-        3. 작물명이 없으면 "없음"만 답변
-        4. 작물명만 한 단어로 답변 (설명이나 문장 금지)
-        
-        [예시]
-        - "토마토 키우는 방법 알려줘" → "토마토"
-        - "알배기배추 가격이 궁금해" → "알배기배추"
-        - "감자랑 고구마 중에 뭐가 좋을까?" → "감자"
-        - "어떤 작물을 심을까요?" → "없음"
-        - "농작물 재배 방법" → "없음"
-        
-        질문: "{question}"
-        
-        추출된 작물명:"""
+        if crop_recommendations:
+            # 작물추천 결과에서 작물 선택
+            extraction_prompt = f"""
+            다음은 작물추천 에이전트가 추천한 작물들입니다. 
+            사용자의 질문과 상황을 고려하여 상세 분석할 작물 하나를 선택해주세요.
+            
+            [사용자 질문]
+            {question}
+            
+            [추천 작물 목록]
+            {crop_recommendations}
+            
+            [요구사항]
+            - 작물명만 작성 (예: 무, 토마토, 고추, 오이)
+            - 설명이나 문장은 절대 포함하지 말 것
+            - 한 단어로 된 작물명만
+            - 작물을 찾을 수 없으면 "없음"이라고만 답변
+            - 작물 추천 결과에 있는 맨 처음 작물을 선택해줘
+            
+            상세 분석할 작물: """
+        else:
+            # 질문에서 직접 작물명 추출
+            extraction_prompt = f"""
+            사용자의 질문에서 구체적인 작물명을 추출해주세요.
+            
+            [추출 규칙]
+            1. 구체적인 작물명만 추출 (예: 토마토, 상추, 무, 배추, 고구마, 감자 등)
+            2. 일반적인 용어는 제외 (예: 작물, 채소, 농작물, 식물 등)
+            3. 작물명이 없으면 "없음"만 답변
+            4. 작물명만 한 단어로 답변 (설명이나 문장 금지)
+            
+            [예시]
+            - "토마토 키우는 방법 알려줘" → "토마토"
+            - "알배기배추 가격이 궁금해" → "알배기배추"
+            - "감자랑 고구마 중에 뭐가 좋을까?" → "감자"
+            - "어떤 작물을 심을까요?" → "없음"
+            - "농작물 재배 방법" → "없음"
+            
+            질문: "{question}"
+            
+            추출된 작물명:"""
         
         try:
             result = self.llm.invoke(extraction_prompt)
@@ -542,19 +617,13 @@ class Farmer:
         # 작물추천 에이전트 실행
         print("🚀 작물추천_agent 실행 시작")
         try:
-            agent_func = self.agent_functions.get("작물추천_agent")
+            agent_func = self._get_agent_function("작물추천_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                }
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "작물추천_agent 실행 함수가 연결되어 있지 않습니다."
@@ -564,10 +633,12 @@ class Farmer:
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
         # 작물추천 결과에서 하나의 작물 선택
-        selected_crop = self.select_single_crop_from_recommendations(answer)
+        selected_crop = self.extract_crop_from_question(question_part, answer)
         
         state["crop_info"] = [answer]
-        state["selected_crop"] = [selected_crop]  # 선택된 단일 작물 저장
+        # 기존 selected_crop을 완전히 클리어하고 새 값으로 대체
+        state["selected_crop"].clear()  # 기존 리스트 완전 클리어
+        state["selected_crop"].append(selected_crop)  # 새 값만 추가
         
         # 작물 추출 실패 시 fallback 플래그 설정
         if not selected_crop or selected_crop.strip() == "":
@@ -610,19 +681,13 @@ class Farmer:
 
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("작물재배_agent")
+            agent_func = self._get_agent_function("작물재배_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                }
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "작물재배_agent 실행 함수가 연결되어 있지 않습니다."
@@ -663,19 +728,13 @@ class Farmer:
         
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("재해_agent")
+            agent_func = self._get_agent_function("재해_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                }
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "재해_agent 실행 함수가 연결되어 있지 않습니다."
@@ -716,19 +775,13 @@ class Farmer:
         
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("판매처_agent")
+            agent_func = self._get_agent_function("판매처_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                }
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "판매처_agent 실행 함수가 연결되어 있지 않습니다."
@@ -766,19 +819,13 @@ class Farmer:
         
         # 에이전트 실행
         try:
-            agent_func = self.agent_functions.get("날씨_agent")
+            agent_func = self._get_agent_function("날씨_agent")
             if agent_func:
-                agent_state = {"query": question_part}
+                agent_state = {
+                    "query": question_part,
+                    "milvus_data": state.get("milvus_data", {}),
+                }
                 agent_result = agent_func(agent_state)
-                # 비동기 함수인 경우 await 처리
-                if asyncio.iscoroutine(agent_result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        agent_result = loop.run_until_complete(agent_result)
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
                 answer = agent_result.get("agent_answer", "답변 생성 실패")
             else:
                 answer = "날씨_agent 실행 함수가 연결되어 있지 않습니다."
@@ -836,12 +883,7 @@ class Farmer:
             agent = selected_agents[0]
             if agent in agent_results:
                 result = agent_results[agent]
-                # coroutine 객체인지 확인
-                if asyncio.iscoroutine(result):
-                    print(f"[⚠️ {agent} 결과가 coroutine입니다. 기본 메시지로 대체합니다.")
-                    output = f"{agent} 실행이 완료되었습니다."
-                else:
-                    output = str(result)
+                output = str(result)
                 print(f"[✅ 단일 에이전트 응답 완료] {agent}")
             else:
                 output = f"{agent} 실행 결과를 찾을 수 없습니다."
@@ -860,25 +902,11 @@ class Farmer:
             # 다른 에이전트들의 답변 표시
             for agent, answer in agent_results.items():
                 if agent != "작물추천_agent":  # 이미 표시됨
-                    # coroutine 객체인지 확인
-                    if asyncio.iscoroutine(answer):
-                        print(f"[⚠️ {agent} 결과가 coroutine입니다. 기본 메시지로 대체합니다.")
-                        answer = f"{agent} 실행이 완료되었습니다."
                     # 에이전트 결과 추가
                     output += f"[{agent} 결과]\n{str(answer)}\n"
-            
-            # 다른 작물 정보 안내 추가
-            if state.get("crop_info") and state.get("selected_crop"):
-                output += f"\n[추가 정보 안내]\n"
-                output += f"다른 추천 작물에 대한 상세 정보가 궁금하시다면, "
-                output += f"'{state['selected_crop'][0] if state['selected_crop'] else ''} 대신 [작물명]에 대해 알려주세요'와 같이 질문해주세요.\n"
         
-        # coroutine 객체인지 확인하고 안전하게 처리
-        if asyncio.iscoroutine(output):
-            print("[⚠️ output이 coroutine입니다. 기본 메시지로 대체합니다.")
-            merged_output = "에이전트 실행이 완료되었습니다."
-        else:
-            merged_output = str(output).strip()
+        # 최종 출력 처리
+        merged_output = str(output).strip()
         
         # 에이전트가 하나뿐인 경우 LLM 요약 생략
         if len(selected_agents) == 1:
@@ -893,11 +921,13 @@ class Farmer:
         print("\n[🤖 LLM 요약 시작...]")
         summary_prompt = (
             """
-            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 정보는 하나도 빼지 말고 출력해줘.
+            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 **정보는 하나도 변경하지도, 빼먹지도 말고 출력**해줘.
+            "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답해.
             **이나 ##같은 마크다운 형식은 제외해줘.
             사용자에게 최대한 자세하고 상세하게 한국어로 알려주세요.
-            작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent 순으로 자연스럽게 연결해서 답변해줘. **없는 내용은 생략**
+            작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent, 날씨_agent 순으로 자연스럽게 연결해서 답변해줘. **없는 내용은 생략**
             내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답해줘.
+            사용자는 농작물을 키우는 입장이야. 농작물의 직매장 등을 찾는다면 판매하려 한다는 것을 알아둬.
             마지막에는 사용자에게 다른 질문을 유도하는 문장을 넣어줘.
             \n\n"""
             f"{merged_output}\n\n"
@@ -1025,8 +1055,6 @@ class Farmer:
         #     print(f"그래프 시각화 중 오류 발생: {e}")
         return workflow.compile()
 
-
-    
     def run_standalone(self):
         """독립 실행용 함수 (기존 방식과 호환)"""
         while True:
@@ -1042,6 +1070,3 @@ class Farmer:
                 print(f"\n오류가 발생했습니다: {e}")
                 traceback.print_exc()
                 continue
-
-if __name__ == "__main__":
-    run_orchestrator_langgraph()

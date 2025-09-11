@@ -41,6 +41,7 @@ if not OPENAI_API_KEY:
     sys.exit(1)
 
 PDF_DIR = "./farmer/disaster/pdfs"
+SINGLE_PDF_PATH = "./farmer/disaster/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
 IMAGE_DIR = ""
 TARGET_QUESTIONS = 50   # 🔥 생성할 질문 수
 CHUNK_SIZE = 900
@@ -149,28 +150,47 @@ def load_documents(pdf_dir: str, image_dir: str = "") -> list[Document]:
     print(f"📚 총 {len(all_docs)}개 Document 생성")
     return all_docs
 
+# ===================== 페르소나 정의 =====================
+def get_personas(mode: str) -> list[Persona]:
+    """모드에 따라 다른 페르소나 반환"""
+    if mode == "multi_pdf":
+        # 여러 PDF용 페르소나 (종합적 관점)
+        return [
+            Persona(
+                name="ComprehensiveFarmer",
+                role_description=(
+                    "나는 한국의 농업에 종사하는 농부다. "
+                    "특히 기후 변화와 자연재해(태풍, 폭우, 가뭄, 한파, 폭염 등)로 인한 작물 피해에 큰 관심이 있다. "
+                    "과거의 재해 사례, 정부와 지자체의 대응 매뉴얼, 농촌진흥청 자료 등을 참고하여 알려줘라"
+                    "또한, 내가 농사를 짓는 지역(강원도, 전라도 등)에 맞는 특화된 피해 사례를 찾고 싶어 한다. "
+                    "가능하다면, 표에 정리된 피해 통계나 과거 사례 데이터를 근거로 설명해주길 기대한다. "
+                    "특정 문서 한두 개에만 집중하지 말고, 가능한 다양한 문서를 근거로 질문-정답을 구성해라."
+                )
+            )
+        ]
+    else:  # single_pdf
+        # 단일 PDF용 페르소나 (기상재해 대응기술 가이드북 특화)
+        return [
+            Persona(
+                name="WeatherDisasterFarmer",
+                role_description=(
+                    "나는 한국의 농업에 종사하는 농부로, 2025년 기상재해 대응기술 가이드북을 집중적으로 학습하고 있다. "
+                    "이 가이드북에 나와있는 20가지 주요 작물의 기상재해 대응 기술에 대해 깊이 알고 싶어한다. "
+                    "특히 태풍, 폭우, 가뭄, 한파, 폭염, 서리 등 각종 기상재해에 대한 구체적인 대응 방법과 "
+                    "작물별 특성에 맞는 재해 예방 및 복구 기술에 대해 질문한다. "
+                    "가이드북에 제시된 단계별 대응 매뉴얼, 시기별 관리 방법, 피해 정도별 조치사항 등을 "
+                    "실제 농장 상황에 적용할 수 있도록 구체적이고 실용적인 정보를 원한다. "
+                    "질문과 정답은 반드시 이 가이드북의 내용을 기반으로 하되, 실제 농업 현장에서 바로 적용 가능한 수준의 구체적인 답변을 요구한다."
+                )
+            )
+        ]
+
 # ===================== 골든셋 생성 =====================
-def generate_golden_set(documents: list[Document]):
+def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
     generator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini"))
     generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")
 
-    personas = [
-        Persona(
-            name="Farmer",
-            role_description=(
-                "나는 한국의 농업에 종사하는 농부다. "
-                "특히 기후 변화와 자연재해(태풍, 폭우, 가뭄, 한파, 폭염 등)로 인한 작물 피해에 큰 관심이 있다. "
-                "과거의 재해 사례, 정부와 지자체의 대응 매뉴얼, 농촌진흥청 자료 등을 참고하여 "
-                "내 작물을 어떻게 보호하고 피해를 최소화할 수 있을지 알고 싶다. "
-                "나는 작물별 재해 대응법(예: 벼 침수 피해, 사과 서리 피해, 고추 폭염 피해)이나 "
-                "재해 발생 전·후 단계별로 해야 할 조치(사전 예방, 발생 직후 대응, 사후 복구)에 대해 구체적으로 질문한다. "
-                "또한, 내가 농사를 짓는 지역(강원도, 전라도 등)에 맞는 특화된 대응 방법을 찾고 싶어 한다. "
-                "가능하다면, 표에 정리된 피해 통계나 과거 사례 데이터를 근거로 설명해주길 기대한다. "
-                "질문과 정답을 생성할 때는 반드시 여러 PDF 문서를 골고루 참고해서 만들어라. "
-                "특정 문서 한두 개에만 집중하지 말고, 가능한 다양한 문서를 근거로 질문-정답을 구성해라."
-            )
-        )
-    ]
+    personas = get_personas(mode)
     transforms = [HeadlineSplitter(), NERExtractor()]
 
     generator = TestsetGenerator(
@@ -206,17 +226,59 @@ def generate_golden_set(documents: list[Document]):
         })
 
     # 저장
+    suffix = "_multi" if mode == "multi_pdf" else "_single"
+    csv_file = f"golden_dataset_open{suffix}.csv"
+    jsonl_file = f"golden_dataset_open{suffix}.jsonl"
+    
     df = pd.DataFrame(results)
-    df.to_csv("golden_dataset_open.csv", index=False, encoding="utf-8-sig")
-    with open("golden_dataset_open.jsonl", "w", encoding="utf-8") as f:
+    df.to_csv(csv_file, index=False, encoding="utf-8-sig")
+    with open(jsonl_file, "w", encoding="utf-8") as f:
         for row in results:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"\n✅ golden_dataset_open.csv / .jsonl 저장 완료")
+    print(f"\n✅ {csv_file} / {jsonl_file} 저장 완료")
     print(f"📊 생성된 골든셋 개수: {len(results)}")
+
+# ===================== 단일 PDF 처리 =====================
+def process_single_pdf_file(pdf_path: str) -> list[Document]:
+    """단일 PDF 파일 처리"""
+    print(f"📄 단일 PDF 처리: {pdf_path}")
+    docs = process_single_pdf(pdf_path)
+    print(f"📚 {len(docs)}개 Document 생성")
+    return docs
 
 # ===================== 실행 =====================
 if __name__ == "__main__":
-    docs = load_documents(PDF_DIR, IMAGE_DIR)
-    if docs:
-        generate_golden_set(docs)
+    print("=" * 50)
+    print("🔧 RAGAS 골든셋 생성기")
+    print("=" * 50)
+    print("0: 전체 PDFs 처리 (disaster/pdfs 폴더)")
+    print("1: 단일 PDF 처리 (기상재해 대응기술 가이드북)")
+    print("=" * 50)
+    
+    while True:
+        try:
+            mode_input = input("모드를 선택하세요 (0 또는 1): ").strip()
+            if mode_input == "0":
+                print("\n📁 전체 PDFs 처리 모드")
+                docs = load_documents(PDF_DIR, IMAGE_DIR)
+                if docs:
+                    generate_golden_set(docs, "multi_pdf")
+                break
+            elif mode_input == "1":
+                print("\n📄 단일 PDF 처리 모드")
+                if os.path.exists(SINGLE_PDF_PATH):
+                    docs = process_single_pdf_file(SINGLE_PDF_PATH)
+                    if docs:
+                        generate_golden_set(docs, "single_pdf")
+                else:
+                    print(f"❌ 파일을 찾을 수 없습니다: {SINGLE_PDF_PATH}")
+                break
+            else:
+                print("❌ 0 또는 1을 입력해주세요.")
+        except KeyboardInterrupt:
+            print("\n\n👋 프로그램을 종료합니다.")
+            break
+        except Exception as e:
+            print(f"❌ 오류 발생: {e}")
+            break

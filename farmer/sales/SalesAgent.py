@@ -24,12 +24,12 @@ from typing import Dict, Any, List, Optional, TypedDict
 from tavily import TavilyClient
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
-import asyncio
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from common.milvus_helpers import search_milvus_documents, create_context_from_documents
 
 # 임베딩 모델
-embedder = SentenceTransformer("BAAI/bge-m3")
+embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
 
 # 환경 변수 로드
 load_dotenv()
@@ -57,6 +57,8 @@ class GraphState(TypedDict):
     missing_info_types: List[str]
     used_web_search: bool
     validation_details: Optional[dict]
+    milvus_data: Optional[Dict[str, Any]]
+    milvus_context: Optional[str]
 
 # 키워드 추출
 def extract_keywords(query):
@@ -114,12 +116,12 @@ def classify_question_simple(query: str) -> str:
 1. "시세" - 가격, 시세, 얼마, 값, 원 등 가격 정보만 요구하는 경우
 2. "판매처" - 파는 곳, 판매점, 직매장, 시장, 어디, 판매처 등 판매 장소만 요구하는 경우  
 3. "시세+판매처" - 가격과 판매처 정보를 모두 요구하는 경우
-4. "정보 부족" - 구체적인 작물명이 없는데 시세를 요구한 경우 혹은 구체적인 지역명이 없는데 판매처를 요구한 경우
+4. "정보부족" - 구체적인 작물명이 없는데 시세를 요구한 경우 혹은 구체적인 지역명이 없는데 판매처를 요구한 경우
 
 **분류 기준 예시:**
 - "시세"와 "판매처" 키워드가 함께 있으면 → "시세+판매처"
-- "농작물"과 "시세" 키워드가 함께 있을 때는 작물명의 유무에 따라 → "시세" or "정보 부족"
-- "농작물"과 "판매처" 키워드가 함께 있을 때는 지역명의 유무에 따라 → "판매처" or "정보 부족"
+- "농작물"과 "시세" 키워드가 함께 있을 때는 작물명의 유무에 따라 → "시세" or "정보부족"
+- "농작물"과 "판매처" 키워드가 함께 있을 때는 지역명의 유무에 따라 → "판매처" or "정보부족"
 - 구체적인 작물명과 "팔고 싶어", "판매" 등 팔고 싶은 의도가 있으면('지역명'에서 '작물명' 팔고 싶어) → "시세+판매처"
 - 가격 관련 키워드만 있으면 → "시세"
 - 판매처 관련 키워드만 있으면 → "판매처"
@@ -127,7 +129,7 @@ def classify_question_simple(query: str) -> str:
 
 질문: {query}
 
-분류 결과 (반드시 위 4가지 중 하나만 출력):
+분류 결과 (반드시 위 4가지 중 하나만 출력, 따옴표나 마침표 없이):
 """)
     
     try:
@@ -136,14 +138,19 @@ def classify_question_simple(query: str) -> str:
         
         # 분류 실행
         result = chain.invoke({"query": query})
+        print(f"🔍 LLM 원본 응답: '{result}'")
         
-        # 결과 정리
+        # 결과 정리 - 더 강력한 정리 로직
         classification = result.strip()
         
+        # 추가 정리: 따옴표, 마침표, 공백 제거
+        classification = classification.replace('"', '').replace("'", '').replace('.', '').replace(' ', '')
+        print(f"🔍 정리된 분류: '{classification}'")
+        
         # 유효한 분류인지 확인
-        valid_classifications = ["시세", "판매처", "시세+판매처", "정보 부족"]
+        valid_classifications = ["시세", "판매처", "시세+판매처", "정보부족"]
         if classification not in valid_classifications:
-            print(f"⚠️ LLM 분류 결과가 유효하지 않음: {classification}, 기본값 사용")
+            print(f"⚠️ LLM 분류 결과가 유효하지 않음: '{result.strip()}' -> '{classification}', 기본값 사용")
             return "시세+판매처"
         
         return classification
@@ -159,6 +166,7 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
     """질문 분류에 따라 적절한 도구를 선택하여 정보를 수집합니다."""
     query = state["query"]
     classification = state.get("question_classification", "시세+판매처")
+    milvus_data = state.get("milvus_data", {})
     
     print(f"🛠️ 정보 수집 중...")
     
@@ -174,10 +182,10 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
         results["판매처"] = ["해당 지역에 위치한 판매점 정보가 없습니다."]
     elif classification == "판매처":
         results["실시간시세"] = ["해당 작물에 대한 정보는 현재 없습니다."]
-        results["판매처"] = execute_milvus_search(query)
+        results["판매처"] = execute_milvus_search(query, milvus_data)
     elif classification == "시세+판매처":
         results["실시간시세"] = fetch_api_data(query)[:1]
-        results["판매처"] = execute_milvus_search(query)
+        results["판매처"] = execute_milvus_search(query, milvus_data)
 
     state["context"] = results
     
@@ -306,25 +314,48 @@ def fetch_api_data(query=None):
 # ===============================
 # 정보 수집 - milvus 검색 함수
 # ===============================
-def execute_milvus_search(query: str) -> list[str]:
-    """Milvus 검색을 실행하는 공통 함수"""
+def execute_milvus_search(query: str, milvus_data: Dict[str, Any] = None) -> list[str]:
+    """Milvus 검색을 실행하는 공통 함수 (common.milvus_helpers 사용)"""
     try:
-        connections.connect("default", host=milvus_host, port=milvus_port)
+        # milvus_data가 제공되지 않으면 기존 방식 사용
+        if not milvus_data or not milvus_data.get("connection_status", False):
+            print("⚠️ MilvusDB 연결 정보 없음 - 기존 방식 사용")
+            connections.connect("default", host=milvus_host, port=milvus_port)
 
-        if not utility.has_collection(collection_name):
-            print(f"❌ Milvus 컬렉션 '{collection_name}'을 찾을 수 없습니다.")
+            if not utility.has_collection(collection_name):
+                print(f"❌ Milvus 컬렉션 '{collection_name}'을 찾을 수 없습니다.")
+                connections.disconnect("default")
+                return ["판매점 정보를 찾을 수 없습니다."]
+
+            collection = Collection(collection_name)
+            collection.load()
+            print(f"✅ Milvus 컬렉션 '{collection_name}' 로드 완료")
+
+            results = search_market_docs(query, collection, top_k=3)
             connections.disconnect("default")
+            return results
+        
+        # common.milvus_helpers 사용
+        documents = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=collection_name,
+            query=query,
+            k=3
+        )
+        
+        if not documents:
             return ["판매점 정보를 찾을 수 없습니다."]
-
-        collection = Collection(collection_name)
-        collection.load()
-        print(f"✅ Milvus 컬렉션 '{collection_name}' 로드 완료")
-
-        results = search_market_docs(query, collection, top_k=3)
-        connections.disconnect("default")
-        return results 
+        
+        # 문서를 문자열 리스트로 변환
+        results = []
+        for doc in documents:
+            results.append(doc.page_content)
+        
+        print(f"✅ MilvusDB 검색 완료: {len(documents)}개 문서")
+        return results
+        
     except Exception as e:
-        print(f"❌ Milvus 연결 오류: {e}")
+        print(f"❌ Milvus 검색 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
 
 # CSV 파일 임베딩 및 Milvus에 저장 함수
@@ -513,6 +544,7 @@ def make_system_instruction(classification="시세+판매처"):
     [지시]
     - [참고 정보]의 가격과 단위를 정확히 사용
     - 없는 정보는 없다고 안내
+    - **이나 ##같은 마크다운 형식은 제외
     - 순서: {template['order']}
     [출처 규칙] 
     - `[실시간시세 정보 (API)]`에서 가져온 정보의 출처는 'https://www.kamis.or.kr/customer/main/main.do'을 명시
@@ -1041,14 +1073,28 @@ graph.add_edge("output", END)
 
 graph.set_entry_point("input")
 
+# 지연 로딩을 위한 전역 변수
+_sales_app = None
+
+def _get_sales_app():
+    """판매처 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _sales_app
+    if _sales_app is None:
+        print("💰 판매처_agent 모듈 로딩 중...")
+        _sales_app = graph.compile()
+        print("✅ 판매처_agent 모듈 로딩 완료")
+    return _sales_app
+
 # 실행 함수
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수 (비동기)
+    OchestratorTest.py에서 호출되는 판매처 에이전트 실행 함수
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
                - query: 사용자 질문 (필수)
+               - milvus_data: MilvusDB 연결 정보 (선택)
+               - milvus_context: 기존 Milvus 컨텍스트 (선택)
     
     Returns:
         dict: 실행 결과
@@ -1057,21 +1103,29 @@ async def run(state: dict) -> dict:
     try:
         # 질문 추출
         query = state.get("query", "")
+        milvus_data = state.get("milvus_data", {})
+        milvus_context = state.get("milvus_context", "")
+        
         if not query:
             return {"agent_answer": "질문이 제공되지 않았습니다. 판매처 관련 질문을 해주세요."}
         
         print(f"[판매처_agent] 질문 처리 시작: {query}")
+        print(f"[판매처_agent] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
-        # 그래프 컴파일 및 실행
-        app = graph.compile()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_sales_app()
         result_state = app.invoke(state)
         
-        # 답변 추출
+        # 답변 및 컨텍스트 추출
         answer = result_state.get("final_answer", "답변을 생성할 수 없습니다.")
+        context = result_state.get("context", {})
         
         print(f"[판매처_agent] 답변 생성 완료: {len(answer)}자")
         
-        return {"agent_answer": answer}
+        return {
+            "agent_answer": answer,
+            "context": context
+        }
         
     except Exception as e:
         error_msg = f"판매처 에이전트 실행 중 오류가 발생했습니다: {e}"

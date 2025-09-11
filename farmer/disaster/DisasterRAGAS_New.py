@@ -17,8 +17,6 @@ from dotenv import load_dotenv
 # LangChain 관련
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
-
 
 # RAGAS 관련
 def evaluate_with_ragas(dataset, metrics):
@@ -39,7 +37,6 @@ from ragas.metrics import (
     LLMContextRecall
 )
 
-
 # RAGAS 래퍼 & 데이터 스키마
 def get_ragas_wrappers():
     from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
@@ -49,38 +46,20 @@ def get_ragas_wrappers():
 # HuggingFace 관련
 from datasets import Dataset
 
-
 # 환경 변수 로드
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # 경로 설정
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from SalesAgent import run
-from common.milvus_manager import MilvusDBManager
+from DisasterAgent_LLM import run
 
-def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
-    """SalesAgent RAGAS 평가기 초기화"""
-    print(f"🔧 SalesRAGAS 평가기 초기화 시작...")
+def __init__(self, csv_path="./golden_dataset_open_multi.csv"):
+    """DisasterAgent_LLM RAGAS 평가기 초기화"""
+    print(f"🔧 DisasterRAGAS 평가기 초기화 시작...")
     print(f"📁 CSV 파일 경로: {csv_path}")
     
     try:
-        # MilvusDB 관리자 초기화
-        print("🔗 MilvusDB 관리자 초기화 중...")
-        self.milvus_manager = MilvusDBManager()
-        
-        # MilvusDB 연결
-        try:
-            if not self.milvus_manager.connect():
-                print("⚠️ MilvusDB 연결 실패 - 일부 기능이 제한될 수 있습니다.")
-                self.milvus_manager = None  # 연결 실패 시 None으로 설정
-            else:
-                print("✅ MilvusDB 연결 성공")
-        except Exception as e:
-            print(f"❌ MilvusDB 연결 중 오류 발생: {e}")
-            self.milvus_manager = None  # 오류 발생 시 None으로 설정
-        
         # 공식 문서에 따라 모델 설정
         print("🤖 모델 설정 중...")
         self._setup_models()
@@ -93,7 +72,6 @@ def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
         
         self.evaluation_results = []
         print("🎯 평가기 초기화 완료!")
-        print(f"🔗 MilvusDB 연결 상태: {'✅ 연결됨' if self.milvus_manager and self.milvus_manager.is_connected else '❌ 연결 안됨'}")
         
     except Exception as e:
         print(f"❌ 평가기 초기화 실패: {e}")
@@ -112,7 +90,7 @@ def _setup_models(self):
         raise
 
     try:
-        # LLM 설정 (기본 설정으로 복원)
+        # LLM 설정
         print("🤖 OpenAI LLM 설정 중...")
         self.llm = ChatOpenAI(
             model_name="gpt-4o-mini", 
@@ -125,12 +103,13 @@ def _setup_models(self):
         self.evaluator_llm = LangchainLLMWrapper(self.llm)
         print("✅ LLM 래퍼 설정 완료")
         
-        # 임베딩 모델 설정
+        # 임베딩 모델 설정 (한국어 특화)
         print("🔤 임베딩 모델 설정 중...")
         self.embeddings = LangchainEmbeddingsWrapper(
             HuggingFaceEmbeddings(
-                model_name="BAAI/bge-m3",
-                model_kwargs={'device': 'cpu'}  # GPU가 있으면 'cuda'로 변경
+                model_name="jhgan/ko-sroberta-multitask",
+                model_kwargs={'device': 'cpu'},  # GPU가 있으면 'cuda'로 변경
+                encode_kwargs={'normalize_embeddings': True}
             )
         )
         print("✅ 임베딩 모델 설정 완료")
@@ -156,7 +135,7 @@ def _create_test_questions(self):
         return []
 
 def _load_csv_data(self):
-    """CSV 파일에서 user_input과 reference 컬럼을 읽어옵니다."""
+    """CSV 파일에서 question, ground_truth, contexts 컬럼을 읽어옵니다."""
     print(f"📖 CSV 파일 읽기 시작: {self.csv_path}")
     
     try:
@@ -169,7 +148,7 @@ def _load_csv_data(self):
         print(f"📋 CSV 컬럼들: {list(df.columns)}")
         
         # 필요한 컬럼 확인
-        required_columns = ['user_input', 'reference']
+        required_columns = ['question', 'ground_truth', 'contexts']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
@@ -183,12 +162,24 @@ def _load_csv_data(self):
         print("🔄 데이터 추출 중...")
         test_cases = []
         for i, (_, row) in enumerate(df.iterrows()):
+            # contexts가 문자열로 저장된 리스트인 경우 파싱
+            contexts_str = str(row['contexts']).strip()
+            if contexts_str.startswith('[') and contexts_str.endswith(']'):
+                try:
+                    import ast
+                    contexts = ast.literal_eval(contexts_str)
+                except:
+                    contexts = [contexts_str]
+            else:
+                contexts = [contexts_str]
+            
             test_cases.append({
-                'question': str(row['user_input']).strip(),
-                'reference': str(row['reference']).strip()
+                'question': str(row['question']).strip(),
+                'reference': str(row['ground_truth']).strip(),
+                'contexts': contexts
             })
             if i < 3:  # 처음 3개만 출력
-                print(f"  📝 질문 {i+1}: {str(row['user_input']).strip()[:50]}...")
+                print(f"  📝 질문 {i+1}: {str(row['question']).strip()[:50]}...")
         
         print(f"✅ CSV 데이터 로드 완료: {len(test_cases)}개 질문")
         return test_cases
@@ -199,55 +190,75 @@ def _load_csv_data(self):
         traceback.print_exc()
         return []
 
-def run_sales_agent_evaluation(self, question):
-    """SalesAgent를 실행하여 답변과 컨텍스트 수집"""
-    print(f"🤖 SalesAgent 실행 시작: {question[:50]}...")
+def _extract_context_from_graph_state(self, result_state):
+    """DisasterAgent 그래프 상태에서 컨텍스트 정보 추출"""
+    context_parts = []
+    
+    # DB 컨텍스트 추출
+    db_context = result_state.get('db_context', '')
+    if db_context and db_context.strip() and "관련 문서를 찾을 수 없습니다" not in db_context:
+        context_parts.append(f"DB 검색 결과: {db_context[:500]}...")
+    
+    # 웹 컨텍스트 추출
+    web_context = result_state.get('web_context', '')
+    if web_context and web_context.strip() and "[웹 검색 결과 없음]" not in web_context:
+        context_parts.append(f"웹 검색 결과: {web_context[:500]}...")
+    
+    # 최종 컨텍스트 추출
+    final_context = result_state.get('context', '')
+    if final_context and final_context.strip():
+        context_parts.append(f"최종 컨텍스트: {final_context[:500]}...")
+    
+    # 검색된 문서 정보 추출
+    retrieved_docs = result_state.get('retrieved_docs', [])
+    if retrieved_docs:
+        doc_info = []
+        for i, doc in enumerate(retrieved_docs[:5], 1):  # 최대 5개 문서만
+            meta = getattr(doc, "metadata", {})
+            fname = meta.get("file_name") or meta.get("source") or f"문서{i}"
+            page = meta.get("page")
+            doc_type = meta.get("type") or "text"
+            doc_info.append(f"[문서{i}][{doc_type}][{fname}{f' p.{page}' if page else ''}]")
+        
+        if doc_info:
+            context_parts.append(f"검색된 문서: {' | '.join(doc_info)}")
+    
+    # 컨텍스트를 더 명확하게 구조화 (RAGAS 점수 향상)
+    if context_parts:
+        return "농업재해 정보:\n" + "\n".join(context_parts)
+    else:
+        return ""
+
+def run_disaster_agent_evaluation(self, question):
+    """DisasterAgent_LLM을 실행하여 답변과 컨텍스트 수집"""
+    print(f"🤖 DisasterAgent_LLM 실행 시작: {question[:50]}...")
     
     try:
-        # MilvusDB 연결 정보 준비
-        milvus_data = {}
-        if self._is_milvus_connected():
-            milvus_data = {
-                "connection_status": True,
-                "host": self.milvus_manager.host,
-                "port": self.milvus_manager.port,
-                "embedding_model_name": self.milvus_manager.embedding_model_name
-            }
-            print("🔗 MilvusDB 연결 정보 주입됨")
-        else:
-            milvus_data = {
-                "connection_status": False,
-                "error": "MilvusDB 연결되지 않음"
-            }
-            print("⚠️ MilvusDB 연결 정보 없음")
+        # DisasterAgent_LLM 실행 (비동기 함수를 동기적으로 실행)
+        print("🔄 DisasterAgent_LLM 실행 중...")
+        initial_state = {"query": question}
         
-        # SalesAgent 실행 (동기 함수 호출)
-        print("🔄 SalesAgent 실행 중...")
-        initial_state = {
-            "query": question,
-            "milvus_data": milvus_data  # MilvusDB 연결 정보 주입
-        }
-        result_state = run(initial_state)
-        print("✅ SalesAgent 실행 완료")
+        # 비동기 함수를 동기적으로 실행
+        import asyncio
+        result_state = asyncio.run(run(initial_state))
+        print("✅ DisasterAgent_LLM 실행 완료")
         
         # 결과 추출
         print("📊 결과 추출 중...")
         answer = result_state.get('agent_answer', '')
-        context = result_state.get('context', {})
         
         print(f"📝 답변 길이: {len(answer)}자")
-        print(f"💬 SalesAgent 응답: {answer}")
+        print(f"💬 DisasterAgent_LLM 응답: {answer}")
         
-        # 컨텍스트를 문자열로 변환
-        print("🔧 컨텍스트 포맷팅 중...")
-        context_str = self._format_context(context)
+        # 컨텍스트 정보 추출 (DisasterAgent_LLM의 그래프 상태에서)
+        context_str = self._extract_context_from_graph_state(result_state)
         print(f"📄 컨텍스트 길이: {len(context_str)}자")
         if context_str:
             print(f"📋 컨텍스트 내용: {context_str[:200]}...")
         else:
             print("⚠️ 컨텍스트가 비어있음")
         
-        print("✅ SalesAgent 평가 완료")
+        print("✅ DisasterAgent_LLM 평가 완료")
         return {
             'answer': answer,
             'context': context_str,
@@ -255,7 +266,7 @@ def run_sales_agent_evaluation(self, question):
         }
         
     except Exception as e:
-        print(f"❌ SalesAgent 실행 실패: {e}")
+        print(f"❌ DisasterAgent_LLM 실행 실패: {e}")
         import traceback
         traceback.print_exc()
         return {
@@ -264,85 +275,30 @@ def run_sales_agent_evaluation(self, question):
             'success': False
         }
 
-def _is_milvus_connected(self):
-    """MilvusDB 연결 상태 확인"""
-    return self.milvus_manager is not None and self.milvus_manager.is_connected
-
-def _format_context(self, context):
-    """컨텍스트를 문자열로 포맷팅"""
-    if not context:
-        return ""
-    
-    formatted_parts = []
-    
-    # 시세 정보를 더 상세하게 포맷팅
-    if '실시간시세' in context:
-        prices = context['실시간시세']
-        if prices and len(prices) > 0:
-            # 의미 있는 가격 정보만 필터링
-            valid_prices = []
-            for price in prices:
-                if isinstance(price, str) and price.strip():
-                    # "정보가 없습니다" 같은 키워드가 포함되지 않은 경우만 추가
-                    if not any(keyword in price for keyword in ['해당 작물에 대한 정보는 현재 없습니다.']):
-                        valid_prices.append(price)
-            
-            # 유효한 가격 정보가 있는 경우만 추가
-            if valid_prices:
-                formatted_parts.append(f"시세 정보: {' | '.join(valid_prices)}")
-    
-    # 판매처 정보를 더 상세하게 포맷팅
-    if '판매처' in context:
-        vendors = context['판매처']
-        if vendors and len(vendors) > 0:
-            # 의미 있는 판매처 정보만 필터링
-            valid_vendors = []
-            for vendor in vendors:
-                if isinstance(vendor, str) and vendor.strip():
-                    # "정보가 없습니다" 같은 키워드가 포함되지 않은 경우만 추가
-                    if not any(keyword in vendor for keyword in ['해당 지역에 위치한 판매점 정보가 없습니다.']):
-                        valid_vendors.append(vendor)
-            
-            # 유효한 판매처 정보가 있는 경우만 추가
-            if valid_vendors:
-                formatted_parts.append(f"판매처 정보: {' | '.join(valid_vendors)}")
-    
-    # 웹검색 결과를 더 상세하게 포맷팅
-    if '웹검색' in context:
-        web_results = context['웹검색']
-        if web_results:
-            formatted_parts.append(f"웹 검색 결과: {' | '.join(map(str, web_results))}")
-    
-    # 추가 정보가 없으면 빈 문자열 반환
-    if not formatted_parts:
-        return ""
-    
-    # 컨텍스트를 더 명확하게 구조화 (RAGAS 점수 향상)
-    if formatted_parts:
-        return "농작물 시세 및 판매처 정보:\n" + "\n".join(formatted_parts)
-    else:
-        return ""
-
 def evaluate_single_question(self, test_case):
     """단일 질문에 대한 평가 실행 (개별 RAGAS 평가 포함) - 동기"""
     
     question = test_case['question']
     reference = test_case.get('reference', '')
+    contexts = test_case.get('contexts', [])
     
     print(f"\n📝 질문 평가 시작: {question[:50]}...")
     
-    # SalesAgent 실행
-    agent_result = self.run_sales_agent_evaluation(question)
+    # DisasterAgent_LLM 실행
+    agent_result = self.run_disaster_agent_evaluation(question)
     
     if not agent_result['success']:
-        print(f"❌ SalesAgent 실행 실패")
+        print(f"❌ DisasterAgent_LLM 실행 실패")
         return None
+    
+    # 컨텍스트가 제공된 경우 사용, 그렇지 않으면 빈 문자열
+    context_for_ragas = agent_result['context'] if agent_result['context'] else ""
     
     # 개별 RAGAS 평가 실행 (동기)
     individual_ragas_score = self._evaluate_single_ragas_simple(
         question,
         agent_result['answer'],
-        agent_result['context'],
+        context_for_ragas,
         reference
     )
     
@@ -351,7 +307,7 @@ def evaluate_single_question(self, test_case):
         'question': question,
         'reference': reference,
         'answer': agent_result['answer'],
-        'context': agent_result['context'],
+        'context': context_for_ragas,
         'individual_ragas_score': individual_ragas_score,
         'timestamp': datetime.now().isoformat()
     }
@@ -368,7 +324,7 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
     print(f"📄 참조 길이: {len(reference)}자")
     
     try:
-        # 🚀 WeatherAgent 방식: 4개 RAGAS 평가 모두 병렬 처리
+        # 4개 RAGAS 평가 모두 순차 처리
         def evaluate_context_precision():
             try:
                 print("🔍 Context Precision 평가 중...")
@@ -482,7 +438,7 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
             metric_name, score = result
             scores[metric_name] = score
         
-        print("   - ✅ 4개 병렬 평가 완료!")
+        print("   - ✅ 4개 순차 평가 완료!")
         return scores
         
     except Exception as e:
@@ -490,7 +446,7 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
         traceback.print_exc()
         return None
 
-def run_full_evaluation(self, batch_size=3):
+def run_full_evaluation(self, batch_size=3, max_questions=None):
     """전체 테스트 케이스에 대한 평가 실행 (개별 RAGAS 포함) - 동기"""
     
     print(f"\n🚀 전체 평가 시작!")
@@ -501,10 +457,17 @@ def run_full_evaluation(self, batch_size=3):
         print("❌ 평가할 질문이 없습니다.")
         return []
     
+    # 테스트할 질문 수 제한 (개발/테스트용)
+    questions_to_test = self.test_questions
+    if max_questions and max_questions < len(self.test_questions):
+        questions_to_test = self.test_questions[:max_questions]
+        print(f"🔧 테스트 질문 수를 {max_questions}개로 제한합니다.")
+    
     # 각 질문에 대해 평가 실행
-    for i, test_case in enumerate(self.test_questions, 1):
+    for i, test_case in enumerate(questions_to_test, 1):
         print(f"\n{'='*60}")
-        print(f"📝 질문 {i}/{len(self.test_questions)} 평가 시작")
+        print(f"📝 질문 {i}/{len(questions_to_test)} 평가 시작")
+        print(f"📊 진행률: {i/len(questions_to_test)*100:.1f}%")
         print(f"{'='*60}")
         
         try:
@@ -512,18 +475,31 @@ def run_full_evaluation(self, batch_size=3):
             if result:
                 self.evaluation_results.append(result)
                 print(f"✅ 질문 {i} 평가 완료")
+                
+                # 현재까지의 성공률 표시
+                success_rate = len(self.evaluation_results) / i * 100
+                print(f"📈 현재 성공률: {success_rate:.1f}% ({len(self.evaluation_results)}/{i})")
             else:
                 print(f"❌ 질문 {i} 평가 실패")
+        except KeyboardInterrupt:
+            print(f"\n⚠️ 사용자에 의해 중단되었습니다.")
+            print(f"📊 중단 시점: {i-1}/{len(questions_to_test)} 완료")
+            break
         except Exception as e:
             print(f"❌ 질문 {i} 평가 중 오류 발생: {e}")
             import traceback
             traceback.print_exc()
+            # 오류가 발생해도 다음 질문으로 계속 진행
+            continue
         
-        # 대기 시간 제거 (동기 처리로 변경했으므로 불필요)
+        # 각 질문 사이에 대기 (API 제한 방지)
+        if i < len(questions_to_test):  # 마지막 질문이 아닌 경우에만 대기
+            print(f"⏳ 다음 질문까지 2초 대기...")
+            time.sleep(2)
     
     print(f"\n🎉 전체 평가 완료!")
     print(f"📊 성공한 평가: {len(self.evaluation_results)}개")
-    print(f"📊 실패한 평가: {len(self.test_questions) - len(self.evaluation_results)}개")
+    print(f"📊 실패한 평가: {len(questions_to_test) - len(self.evaluation_results)}개")
     return self.evaluation_results
 
 def create_ragas_dataset(self):
@@ -580,10 +556,10 @@ def save_results(self, output_path=None):
     
     if not output_path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # ./farmer/sales/data 디렉토리에 저장
-        data_dir = "./farmer/sales/data"
+        # ./farmer/disaster/data 디렉토리에 저장
+        data_dir = "./farmer/disaster/data"
         os.makedirs(data_dir, exist_ok=True)  # 디렉토리가 없으면 생성
-        output_path = os.path.join(data_dir, f"ragas_evaluation_results_{timestamp}.json")
+        output_path = os.path.join(data_dir, f"disaster_ragas_evaluation_results_{timestamp}.json")
     
     # 평균 점수 계산
     context_precision_scores = []
@@ -641,7 +617,7 @@ def print_summary(self):
         return
     
     print("\n" + "="*60)
-    print("📊 RAGAS 평가 결과 요약")
+    print("📊 DisasterAgent_LLM RAGAS 평가 결과 요약")
     print("="*60)
     
     # 전체 통계
@@ -671,7 +647,7 @@ def print_summary(self):
 
 # 테스트 실행 코드
 if __name__ == "__main__":
-    print("🧪 SalesRAGAS 테스트 실행 시작")
+    print("🧪 DisasterRAGAS 테스트 실행 시작")
     print("="*60)
     
     try:
@@ -682,12 +658,11 @@ if __name__ == "__main__":
         evaluator._setup_models = lambda: _setup_models(evaluator)
         evaluator._create_test_questions = lambda: _create_test_questions(evaluator)
         evaluator._load_csv_data = lambda: _load_csv_data(evaluator)
-        evaluator.run_sales_agent_evaluation = lambda question: run_sales_agent_evaluation(evaluator, question)
-        evaluator._format_context = lambda context: _format_context(evaluator, context)
-        evaluator._is_milvus_connected = lambda: _is_milvus_connected(evaluator)
+        evaluator.run_disaster_agent_evaluation = lambda question: run_disaster_agent_evaluation(evaluator, question)
+        evaluator._extract_context_from_graph_state = lambda result_state: _extract_context_from_graph_state(evaluator, result_state)
         evaluator.evaluate_single_question = lambda test_case: evaluate_single_question(evaluator, test_case)
         evaluator._evaluate_single_ragas_simple = lambda question, answer, context, reference="": _evaluate_single_ragas_simple(evaluator, question, answer, context, reference)
-        evaluator.run_full_evaluation = lambda batch_size=3: run_full_evaluation(evaluator, batch_size)
+        evaluator.run_full_evaluation = lambda batch_size=3, max_questions=None: run_full_evaluation(evaluator, batch_size, max_questions)
         evaluator.create_ragas_dataset = lambda: create_ragas_dataset(evaluator)
         evaluator.run_ragas_evaluation = lambda: run_ragas_evaluation(evaluator)
         evaluator.save_results = lambda output_path=None: save_results(evaluator, output_path)
@@ -695,8 +670,8 @@ if __name__ == "__main__":
         
         __init__(evaluator)
         
-        # 동기 평가 실행
-        results = run_full_evaluation(evaluator)
+        # 동기 평가 실행 (전체 50개 질문)
+        results = run_full_evaluation(evaluator, max_questions=50)
         
         if results:
             print_summary(evaluator)

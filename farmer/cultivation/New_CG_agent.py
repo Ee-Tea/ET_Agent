@@ -11,6 +11,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_community.tools.tavily_search import TavilySearchResults
+from common.milvus_helpers import search_milvus_documents, create_context_from_documents
 
 # --- 1. 환경 설정 ---
 load_dotenv()
@@ -95,53 +96,73 @@ class GraphState(TypedDict):
     web_sources: Optional[List[Dict[str, Any]]]
     db_sources: Optional[List[Dict[str, Any]]]
     is_sufficient: Optional[str]
+    milvus_data: Optional[Dict[str, Any]]
+    milvus_context: Optional[str]
 
-# --- 4. 커스텀 검색 함수 (두 컬렉션에서 합쳐서 상위 2개만 추출) ---
-def retrieve_top_k_from_collections(question: str, k: int = 3) -> Dict[str, Any]:
-    embeddings = HuggingFaceEmbeddings(model_name="jhgan/ko-sroberta-multitask")
-
-    vectorstore_info = LangChainMilvus(
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME_INFO,
-        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-        consistency_level="Bounded"
-    )
-    vectorstore_grow = LangChainMilvus(
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME_GROW,
-        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-        consistency_level="Bounded"
-    )
-
-    # 각 컬렉션에서 넉넉히 k=5개 검색
-    docs_info = vectorstore_info.similarity_search_with_score(question, k=5)
-    docs_grow = vectorstore_grow.similarity_search_with_score(question, k=5)
-
-    # 두 컬렉션 합치고 점수순 정렬 (낮을수록 유사)
-    all_docs = docs_info + docs_grow
-    all_docs_sorted = sorted(all_docs, key=lambda x: x[1])
-    top_k_docs = all_docs_sorted[:k]
-
-    context = "\n\n".join([doc[0].page_content for doc in top_k_docs])
-    db_sources = [
-        {"source": doc[0].metadata.get("source"),
-         "page": doc[0].metadata.get("page"),
-         "content": doc[0].page_content}
-        for doc in top_k_docs
-    ]
-
-    print(f"🔍 최종 상위 {k}개 검색 완료.")
-    return {"context": context, "db_sources": db_sources}
+# --- 4. MilvusDB 검색 함수 (common.milvus_helpers 사용) ---
+def retrieve_top_k_from_collections(question: str, milvus_data: Dict[str, Any], k: int = 3) -> Dict[str, Any]:
+    """MilvusDB에서 작물 정보와 재배 정보 검색"""
+    
+    if not milvus_data.get("connection_status", False):
+        print("⚠️ MilvusDB 연결 안됨 - 빈 컨텍스트 반환")
+        return {"context": "", "db_sources": []}
+    
+    try:
+        # 작물 정보 컬렉션에서 검색
+        crop_info_docs = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=COLLECTION_NAME_INFO,
+            query=question,
+            k=k
+        )
+        
+        # 작물 재배 정보 컬렉션에서 검색
+        crop_grow_docs = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=COLLECTION_NAME_GROW,
+            query=question,
+            k=k
+        )
+        
+        # 두 컬렉션 결과 합치기
+        all_docs = crop_info_docs + crop_grow_docs
+        
+        # 컨텍스트 생성
+        context = create_context_from_documents(all_docs, max_length=2000)
+        
+        # 소스 정보 생성
+        db_sources = []
+        for doc in all_docs:
+            db_sources.append({
+                "source": doc.metadata.get("source", "unknown"),
+                "page": doc.metadata.get("page", 0),
+                "content": doc.page_content
+            })
+        
+        print(f"✅ MilvusDB 검색 완료: {len(all_docs)}개 문서")
+        return {"context": context, "db_sources": db_sources}
+        
+    except Exception as e:
+        print(f"❌ MilvusDB 검색 실패: {e}")
+        return {"context": "", "db_sources": []}
 
 # --- 5. LangGraph 노드 함수 정의 ---
 def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any]:
     print("\n---노드: DB 검색 실행---")
     question = state["question"]
+    milvus_data = state.get("milvus_data", {})
 
-    retrieval_result = retrieve_top_k_from_collections(question, k=3)
+    # MilvusDB에서 검색
+    retrieval_result = retrieve_top_k_from_collections(question, milvus_data, k=3)
     db_context = retrieval_result["context"]
     db_sources = retrieval_result["db_sources"]
     print("✅ DB 검색 완료.")
+
+    # 기존 Milvus 컨텍스트가 있으면 추가
+    existing_milvus_context = state.get("milvus_context", "")
+    if existing_milvus_context and db_context:
+        db_context = f"{existing_milvus_context}\n\n{db_context}"
+        print("✅ 기존 Milvus 컨텍스트와 결합")
 
     is_sufficient = "no"
     if db_context.strip():
@@ -213,17 +234,97 @@ def build_query_graph():
 
     return query_builder.compile()
 
-def run_agent(question: str) -> Dict[str, Any]:
-    """
-    주어진 질문을 사용하여 챗봇 에이전트를 실행하고 최종 상태를 반환합니다.
-    """
-    rag_app = build_query_graph()
-    initial_state = {"question": question}
-    final_state = rag_app.invoke(initial_state)
-    return final_state
+# --- 7. 지연 로딩을 위한 전역 변수 ---
+_rag_app = None
 
+def _get_rag_app():
+    """RAG 애플리케이션을 지연 로딩으로 가져오기"""
+    global _rag_app
+    if _rag_app is None:
+        print("🌱 작물재배_agent 모듈 로딩 중...")
+        _rag_app = build_query_graph()
+        print("✅ 작물재배_agent 모듈 로딩 완료")
+    return _rag_app
 
-# --- 7. 메인 실행 로직 ---
+# --- 8. OchestratorTest.py와 호환되는 run 함수 ---
+def run(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    OchestratorTest.py에서 호출되는 메인 실행 함수 (비동기)
+    
+    Args:
+        state: OchestratorTest.py에서 전달받은 상태 딕셔너리
+               - query: 사용자 질문 (필수)
+               - milvus_data: MilvusDB 연결 정보 (선택)
+               - milvus_context: 기존 Milvus 컨텍스트 (선택)
+               - 기타 필요한 상태 정보들
+    
+    Returns:
+        dict: 실행 결과
+            - agent_answer: 최종 응답
+            - status: 실행 상태
+            - error: 오류 정보 (있는 경우)
+    """
+    try:
+        # 입력 검증
+        if not state or not state.get("query"):
+            return {
+                "agent_answer": "질문이 제공되지 않았습니다.",
+                "status": "error",
+                "error": "query 필드가 없습니다."
+            }
+        
+        query = state["query"]
+        # query가 리스트인 경우 첫 번째 요소 사용
+        if isinstance(query, list) and len(query) > 0:
+            query = query[0]
+        milvus_data = state.get("milvus_data", {})
+        milvus_context = state.get("milvus_context", "")
+        
+        print(f"\n=== 🌱 작물재배_agent 실행 시작 ===")
+        print(f"질문: {query}")
+        print(f"MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
+        
+        # RAG 애플리케이션을 지연 로딩으로 가져오기
+        rag_app = _get_rag_app()
+        
+        # LangGraph가 자동으로 재시도 및 fallback 처리
+        print("답변 생성 중...")
+        try:
+            current_state = {
+                "question": query, 
+                "milvus_data": milvus_data,
+                "milvus_context": milvus_context,
+                "web_search_count": 0
+            }
+            final_state = rag_app.invoke(current_state)
+            
+            # 최종 답변 추출
+            final_response = final_state.get('answer', '답변을 생성할 수 없습니다.')
+            print("✅ 답변 생성 완료")
+            
+            return {
+                "agent_answer": final_response,
+                "status": "success",
+                "error": None
+            }
+                        
+        except Exception as e:
+            print(f"❌ 답변 생성 중 오류: {e}")
+            return {
+                "agent_answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {e}",
+                "status": "error",
+                "error": str(e)
+            }
+            
+    except Exception as e:
+        print(f"❌ 작물재배_agent 실행 중 치명적 오류: {e}")
+        return {
+            "agent_answer": f"작물재배_agent 실행 중 오류가 발생했습니다: {e}",
+            "status": "error",
+            "error": str(e)
+        }
+
+# --- 8. 메인 실행 로직 ---
 if __name__ == "__main__":
     print("🌱 농작물 챗봇 에이전트 시작...")
     print("--------------------------------------------------")

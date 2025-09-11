@@ -498,13 +498,13 @@ def build_graph():
     # 필요 시 추후 복구 가능
 
     app = g.compile()
-    try:
-        graph_image_path = "agent_workflow_openai.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_openai.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
     return app
 
 # =========[ 지연 로딩을 위한 전역 변수 ]=========
@@ -552,7 +552,11 @@ async def run(state: dict) -> dict:
         
         print(f"[재해_agent_LLM] 답변 생성 완료: {len(answer)}자")
         
-        return {"agent_answer": answer}
+        # 전체 그래프 상태를 반환 (RAGAS 평가를 위해)
+        return {
+            "agent_answer": answer,
+            **result  # 그래프의 모든 상태 정보 포함
+        }
         
     except Exception as e:
         error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"

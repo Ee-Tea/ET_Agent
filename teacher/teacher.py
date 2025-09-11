@@ -90,6 +90,7 @@ class TeacherState(TypedDict):
     artifacts: NotRequired[dict]          # 파일/중간 산출물 메타
     routing: NotRequired[dict]            # 의존성-복귀 플래그
     llm_response: NotRequired[str]        # LLM이 생성한 사용자 친화적 답변
+    milvus_data: NotRequired[dict]        # MilvusDB에서 주입된 데이터
 
 
 # ========== Orchestrator ==========
@@ -1234,7 +1235,8 @@ class Teacher:
                 "subject_area": agent_input.get("subject_area", ""),
                 "target_count": agent_input.get("target_count", 10),
                 "difficulty": agent_input.get("difficulty", "중급"),
-                "save_to_file": agent_input.get("save_to_file", False)
+                "save_to_file": agent_input.get("save_to_file", False),
+                "milvus_data": state.get("milvus_data", {})
             })
             
             if agent_result:
@@ -1468,9 +1470,9 @@ class Teacher:
             except Exception:
                 pass
             decided = pending
-        # 기본 intent가 generate일 때는 폼 흐름을 선호
+        # 기본 intent가 generate일 때는 PDF 흐름을 선호
         if decided not in ("pdf", "form"):
-            decided = "form"
+            decided = "pdf"
             new_state["routing"]["output_mode"] = decided
         if decided in ("pdf", "form"):
             print(f"✅ 결정된 출력 방식: {decided}")

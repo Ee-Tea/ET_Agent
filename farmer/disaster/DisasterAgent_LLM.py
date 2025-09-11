@@ -7,6 +7,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # =========[ 벡터스토어 / 임베딩 관련 Import (맨 위) ]=========
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
+from common.milvus_helpers import search_milvus_documents, create_context_from_documents
 
 # =========[ 표준/외부 라이브러리 ]=========
 import os
@@ -111,6 +112,8 @@ class GraphState(TypedDict):
     retrieved_docs: Optional[List[Document]]
     is_retrieval_sufficient: bool
     temporal: Optional[Dict[str, Any]]
+    milvus_data: Optional[Dict[str, Any]]
+    milvus_context: Optional[str]
 
 def make_llm() -> ChatOpenAI:
     if not OPENAI_API_KEY:
@@ -257,19 +260,14 @@ _vectorstore = None
 
 # =========[ LangGraph 노드 ]=========
 def load_store_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 벡터스토어 연결 (LangChain-Milvus)")
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL_NAME,
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    vectorstore = Milvus(
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME,
-        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-    )
-    # Milvus 객체를 상태에 저장하지 않고 전역 변수로 관리
-    global _vectorstore
-    _vectorstore = vectorstore
+    print("🧩 노드: MilvusDB 연결 확인")
+    milvus_data = state.get("milvus_data", {})
+    
+    if milvus_data.get("connection_status", False):
+        print("   - ✅ MilvusDB 연결됨")
+    else:
+        print("   - ⚠️ MilvusDB 연결 안됨")
+    
     return {**state}
 
 def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
@@ -282,7 +280,7 @@ def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "question": q_raw, "temporal": temporal, "question_resolved": q_resolved}
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 검색 (메타데이터 필터링 활용)")
+    print("🧩 노드: 검색 (MilvusDB 통합)")
     q = state.get("question_resolved", state.get("question", ""))
     vectorstore = _vectorstore
 
@@ -508,32 +506,42 @@ def build_graph():
     return app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
     OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
                - query: 사용자 질문 (필수)
+               - milvus_data: MilvusDB 연결 정보 (선택)
+               - milvus_context: 기존 Milvus 컨텍스트 (선택)
     
     Returns:
         dict: 실행 결과
-            - pred_answer: 최종 답변
+            - agent_answer: 최종 답변
             - source: "disaster_agent"
     """
     try:
         # 질문 추출
         query = state.get("query", "")
+        milvus_data = state.get("milvus_data", {})
+        milvus_context = state.get("milvus_context", "")
+        
         if not query:
             return {"agent_answer": "질문이 제공되지 않았습니다. 재해 관련 질문을 해주세요."}
         
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
+        print(f"[재해_agent_LLM] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
         # 그래프 빌드 및 실행
         app = build_graph()
         
         # 그래프 실행
-        result = app.invoke({"question": query})
+        result = app.invoke({
+            "question": query,
+            "milvus_data": milvus_data,
+            "milvus_context": milvus_context
+        })
         
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")

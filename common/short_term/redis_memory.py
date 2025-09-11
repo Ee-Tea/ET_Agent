@@ -54,15 +54,15 @@ class RedisLangGraphMemory:
         self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         
         # 문제 중심 스키마를 위한 네임스페이스
-        self.question_ns = f"{user_id}:{service}:{chat_id}:questions"
+        self.question_ns = f"{user_id}:{chat_id}:questions"
         
         # LangGraph checkpointer를 위한 버전 관리
-        self._version_key = f"{self.user_id}:{self.service}:{self.chat_id}:version"
+        self._version_key = f"{self.user_id}:{self.chat_id}:version"
 
     # ==================== 기존 LangGraph 메모리 기능 ====================
     
     def _k(self, suffix: str) -> str:
-        return f"{self.user_id}:{self.service}:{self.chat_id}:{suffix}"
+        return f"{self.user_id}:{self.chat_id}:{suffix}"
     
     # ---------- LangGraph Checkpointer 인터페이스 ----------
     def get_next_version(self, thread_id: str, checkpoint_id: str) -> str:
@@ -108,7 +108,7 @@ class RedisLangGraphMemory:
     def list_keys(self, prefix: str = "") -> List[str]:
         """LangGraph checkpointer가 요구하는 list_keys 메서드"""
         try:
-            pattern = f"{self.user_id}:{self.service}:{self.chat_id}:{prefix}*" if prefix else f"{self.user_id}:{self.service}:{self.chat_id}:*"
+            pattern = f"{self.user_id}:{self.chat_id}:{prefix}*" if prefix else f"{self.user_id}:{self.chat_id}:*"
             keys = []
             for key in self.redis.scan_iter(match=pattern):
                 keys.append(key)
@@ -864,21 +864,15 @@ class RedisLangGraphMemory:
             print(f"❌ 채팅 히스토리 조회 실패: {e}")
             return []
     
-    def clear_short_term_memory(self, service: Optional[str] = None) -> None:
-        """숏텀 메모리 삭제 (특정 서비스 또는 전체)"""
+    def clear_short_term_memory(self) -> None:
+        """숏텀 메모리 삭제"""
         try:
-            if service:
-                # 특정 서비스만 삭제
-                key = f"short_term:{self.user_id}:{self.chat_id}:{service}"
-                self.redis.delete(key)
-                print(f"🗑️ {service} 서비스 숏텀 메모리 삭제 완료")
-            else:
-                # 전체 숏텀 메모리 삭제
-                pattern = f"short_term:{self.user_id}:{self.chat_id}:*"
-                keys = self.redis.keys(pattern)
-                if keys:
-                    self.redis.delete(*keys)
-                    print(f"🗑️ 전체 숏텀 메모리 삭제 완료: {len(keys)}개 키")
+            # 전체 숏텀 메모리 삭제
+            pattern = f"short_term:{self.user_id}:{self.chat_id}:*"
+            keys = self.redis.keys(pattern)
+            if keys:
+                self.redis.delete(*keys)
+                print(f"🗑️ 전체 숏텀 메모리 삭제 완료: {len(keys)}개 키")
         except Exception as e:
             print(f"❌ 숏텀 메모리 삭제 실패: {e}")
     
@@ -898,7 +892,6 @@ class RedisLangGraphMemory:
             # 4. 서비스 락 삭제 (패턴 매칭으로 모든 락 키 찾기)
             lock_patterns = [
                 f"lock:{self.user_id}:{self.chat_id}:*",
-                f"service_lock:{self.user_id}:{self.chat_id}:*",
                 f"*:lock:{self.user_id}:{self.chat_id}",
             ]
             
@@ -925,28 +918,8 @@ class RedisLangGraphMemory:
         """숏텀 메모리 통계 조회"""
         try:
             stats = {
-                "teacher": {},
-                "farmer": {},
                 "chat_history": {}
             }
-            
-            # Teacher 데이터
-            teacher_data = self.load_service_short_term_data("teacher")
-            if teacher_data:
-                stats["teacher"] = {
-                    "questions_count": len(teacher_data.get("questions", [])),
-                    "added_count": teacher_data.get("added_count", 0),
-                    "timestamp": teacher_data.get("timestamp", 0)
-                }
-            
-            # Farmer 데이터
-            farmer_data = self.load_service_short_term_data("farmer")
-            if farmer_data:
-                stats["farmer"] = {
-                    "has_selected_crop": bool(farmer_data.get("selected_crop")),
-                    "has_crop_info": bool(farmer_data.get("crop_info")),
-                    "timestamp": farmer_data.get("timestamp", 0)
-                }
             
             # 채팅 히스토리
             chat_history = self.get_chat_history(limit=100)

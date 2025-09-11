@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ===== 설정 =====
-PDF_DIR = os.getenv("PDF_DIR", "./pdfs")
+PDF_DIR = os.getenv("PDF_DIR", "./farmer/disaster/pdfs")
 IMAGE_DIR = os.getenv("IMAGE_DIR", "").strip()
 
 # ✅ 임베딩 모델 변경

@@ -498,14 +498,26 @@ def build_graph():
     # 필요 시 추후 복구 가능
 
     app = g.compile()
-    try:
-        graph_image_path = "agent_workflow_openai.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_openai.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
     return app
+
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_disaster_app = None
+
+def _get_disaster_app():
+    """재해대응 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _disaster_app
+    if _disaster_app is None:
+        print("⚠️ 재해_agent 모듈 로딩 중...")
+        _disaster_app = build_graph()
+        print("✅ 재해_agent 모듈 로딩 완료")
+    return _disaster_app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========
 async def run(state: dict) -> dict:
@@ -529,8 +541,8 @@ async def run(state: dict) -> dict:
         
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
         
-        # 그래프 빌드 및 실행
-        app = build_graph()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_disaster_app()
         
         # 그래프 실행
         result = app.invoke({"question": query})
@@ -540,7 +552,11 @@ async def run(state: dict) -> dict:
         
         print(f"[재해_agent_LLM] 답변 생성 완료: {len(answer)}자")
         
-        return {"agent_answer": answer}
+        # 전체 그래프 상태를 반환 (RAGAS 평가를 위해)
+        return {
+            "agent_answer": answer,
+            **result  # 그래프의 모든 상태 정보 포함
+        }
         
     except Exception as e:
         error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"

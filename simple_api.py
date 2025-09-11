@@ -14,6 +14,8 @@ from typing import Optional, Dict, Any
 import uvicorn
 import glob
 
+from auth.auth_routes import router as auth_router
+
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
@@ -41,13 +43,22 @@ app = FastAPI(
 )
 
 # CORS 미들웨어 설정
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+  CORSMiddleware,
+  allow_origins=["http://localhost:3000"],
+  allow_credentials=True,
+  allow_methods=["*"],
+  allow_headers=["*"],
 )
+
+app.include_router(auth_router)
 
 # ET-Agent 초기화 함수
 def initialize_et_agent():

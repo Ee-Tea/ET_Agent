@@ -6,3 +6,10 @@ sqlalchemy
 psycopg[binary]
 passlib[bcrypt]
 python-jose[cryptography]
+pydantic_settings
+datetime
+typing
+httpx
+jose
+uuid
+email-validator 

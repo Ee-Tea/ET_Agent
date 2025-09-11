@@ -1,65 +1,25 @@
 import os
+import json
+import re
 import glob
-from typing import List, Dict, Any, TypedDict
-from abc import ABC, abstractmethod
-# from langchain_community.document_loaders import PyPDFLoader   # FAISS 경로 제거: 미사용
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-# from langchain_community.vectorstores import FAISS             # FAISS 제거
+import time
+from typing import List, Dict, Any, TypedDict, Annotated
+from collections import Counter
+from pathlib import Path
+from datetime import datetime
+
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langgraph.graph import StateGraph, END
-import json
-import re
-from collections import Counter
-import time
-from datetime import datetime
-from pathlib import Path
-
-# .env 파일 로드를 위한 임포트
-from dotenv import load_dotenv
-import sys
-import os
-
-# 상대 임포트 대신 절대 경로로 임포트
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from base_agent import BaseAgent
-
-# OpenAI 관련 임포트
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# 🔁 Milvus 관련 임포트
-from langchain_milvus import Milvus
-from pymilvus import connections, utility, Collection, DataType
+from common.milvus_helpers import search_milvus_documents_by_subject, create_context_from_documents
+from ..base_agent import BaseAgent
 
-from datasets import Dataset
-# milvus_store 유틸 불러오기 (패키지 구조에 따라 상대/절대 임포트 호환)
-try:
-    from .milvus_store import load_questions_from_json
-except ImportError:
-    from milvus_store import load_questions_from_json
+# MilvusDB 관련 임포트는 common.milvus_helpers에서 처리
 
-def evaluate_with_ragas(dataset, metrics):
-    from ragas import evaluate  # <- 여기로 이동
-    return evaluate(dataset, metrics=metrics)
-
-def get_ragas_metrics():
-    # metrics도 내부에서 import
-    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
-    return faithfulness, answer_relevancy, context_precision, context_recall
-
-RAGAS_AVAILABLE = False
-
-def get_llm_factory():
-    global RAGAS_AVAILABLE
-    try:
-        from ragas.llms import llm_factory
-        RAGAS_AVAILABLE = True
-        return llm_factory
-    except ImportError:
-        RAGAS_AVAILABLE = False
-        print("⚠️ RAGAS가 설치되지 않았습니다. 품질 검증 기능이 비활성화됩니다.")
-        return None
+# RAGAS 관련 코드 제거 (LLM 기반 검증 사용)
 
 # LLM 모델 설정을 환경변수에서 가져오기
 OPENAI_LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "moonshotai/kimi-k2-instruct")
@@ -68,21 +28,12 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 
-# 🔍 RAGAS 품질 검증 설정
-# 환경 변수 설정 예시:
-# RAGAS_ENABLED=true                    # RAGAS 활성화 (true/false)
-# RAGAS_QUALITY_THRESHOLD=0.7          # 품질 임계값 (0.0 ~ 1.0)
-# RAGAS_MAX_ATTEMPTS=3                 # 최대 재시도 횟수
-# OPENAI_API_KEY=your_api_key_here    # OpenAI API 키 (RAGAS 검증용)
-RAGAS_QUALITY_THRESHOLD = float(os.getenv("RAGAS_QUALITY_THRESHOLD", "0.5"))  # 0.7에서 0.5로 낮춤
-RAGAS_MAX_ATTEMPTS = int(os.getenv("RAGAS_MAX_ATTEMPTS", "3"))
-RAGAS_ENABLED = os.getenv("RAGAS_ENABLED", "true").lower() == "true"
-
 # .env 파일 로드
+from dotenv import load_dotenv
 load_dotenv()
 
-class GraphState(TypedDict):
-    """그래프 상태 정의"""
+class SubjectState(TypedDict):
+    """과목별 독립적인 상태 정의"""
     query: str
     documents: List[Document]
     context: str
@@ -93,8 +44,23 @@ class GraphState(TypedDict):
     generation_attempts: int
     target_quiz_count: int
     subject_area: str
-    validated_questions: List[Dict[str, Any]]  # 문제에 답 해설까지 한 번에 나옴, 보기는 1. 2. 3. 4. 으로 번호가 붙음, 문제에는 번호 안 붙음
-    ragas_score: float  # 🔍 RAGAS 품질 점수 추가
+    validated_questions: List[Dict[str, Any]]
+    node_id: int
+
+class GraphState(TypedDict):
+    """전체 그래프 상태 (과목별 결과 수집)"""
+    # 과목별 독립적인 상태들
+    소프트웨어설계: SubjectState
+    소프트웨어개발: SubjectState
+    데이터베이스구축: SubjectState
+    프로그래밍언어활용: SubjectState
+    정보시스템구축관리: SubjectState
+    
+    # 전체 결과
+    all_questions: List[Dict[str, Any]]
+    total_questions: int
+    generation_summary: Dict[str, Any]
+    failed_subjects: List[Dict[str, Any]]
 
 
 class InfoProcessingExamAgent(BaseAgent):
@@ -154,19 +120,9 @@ class InfoProcessingExamAgent(BaseAgent):
 
         self.embeddings_model = None
         self.llm = None
-        self.vectorstore = None
-        self.retriever = None
         self.workflow = None
-
-        self.files_in_vectorstore = []
-
-        # 🔧 Milvus 접속/검색 기본값
-        self.milvus_conf = {
-            "host": os.getenv("MILVUS_HOST", "localhost"),
-            "port": os.getenv("MILVUS_PORT", "19530"),
-            "collection": os.getenv("MILVUS_COLLECTION", "info_exam_chunks"),
-            "topk": int(os.getenv("MILVUS_TOPK", "15")),
-        }
+        self._current_milvus_data = None  # MilvusDB 연결 정보 저장용
+        # MilvusDB는 이제 supervisor에서 관리됨
 
         self._initialize_models()
         self._build_graph()  # 2) 과목별 2노드(생성/검증) 구축
@@ -226,17 +182,13 @@ class InfoProcessingExamAgent(BaseAgent):
             filename = input_data.get("filename")
             parallel_agents = max(1, int(input_data.get("parallel_agents", 2)))  # 3) 병렬 개수
 
-            # ✅ Milvus 사용 (기본)
-            if not self._build_retriever_from_milvus(input_data):
-                return {
-                    "success": False,
-                    "error": "Milvus 리트리버 초기화에 실패했습니다. (컬렉션/접속/임베딩 설정 확인)"
-                }
+            # MilvusDB는 supervisor에서 관리됨
 
             if mode == "full_exam":
                 # 1) 5과목 × 20문항 = 총 100문항
                 result = self._generate_full_exam(difficulty=difficulty,
-                                                  parallel_agents=parallel_agents)
+                                                  parallel_agents=parallel_agents,
+                                                  milvus_data=input_data.get("milvus_data"))
             elif mode == "partial_exam":
                 # 선택된 과목들에 대해 지정된 문제 수만큼 생성
                 selected_subjects = input_data.get("selected_subjects", [])
@@ -259,7 +211,8 @@ class InfoProcessingExamAgent(BaseAgent):
                     selected_subjects=selected_subjects,
                     questions_per_subject=questions_per_subject,
                     difficulty=difficulty,
-                    parallel_agents=parallel_agents
+                    parallel_agents=parallel_agents,
+                    milvus_data=input_data.get("milvus_data")
                 )
             elif mode == "subject_quiz":
                 subject_area = input_data.get("subject_area")
@@ -273,7 +226,8 @@ class InfoProcessingExamAgent(BaseAgent):
                 result = self._generate_subject_quiz(
                     subject_area=subject_area,
                     target_count=target_count,
-                    difficulty=difficulty
+                    difficulty=difficulty,
+                    milvus_data=input_data.get("milvus_data")
                 )
                 # subject_quiz는 단일 과목 결과만 리턴
                 if "error" in result:
@@ -324,176 +278,56 @@ class InfoProcessingExamAgent(BaseAgent):
         except Exception as e:
             raise ValueError(f"모델 초기화 중 오류 발생: {e}")
 
-    # ✅ Milvus 리트리버 초기화 (milvus_store 사용 또는 기존 컬렉션 접속)
-    def _build_retriever_from_milvus(self, input_data: Dict[str, Any]) -> bool:
-        """
-        우선순위:
-        1) input_data['milvus_question_path'] 또는 환경변수 MILVUS_QUESTION_PATH 가 있으면
-           milvus_store.load_questions_from_json으로 적재+리트리버 생성
-        2) 그렇지 않으면 기존 컬렉션에 접속하여 리트리버 생성
-        """
-        try:
-            question_path = input_data.get("milvus_question_path") or os.getenv("MILVUS_QUESTION_PATH")
-            host = self.milvus_conf["host"]
-            port = self.milvus_conf["port"]
-            collection = self.milvus_conf["collection"]
-            topk = self.milvus_conf["topk"]
+    # MilvusDB 리트리버는 이제 supervisor에서 관리됨
 
-            # 연결 정리 후 재접속
-            if "default" in connections.list_connections():
-                connections.disconnect(alias="default")
-            connections.connect(alias="default", host=host, port=port)
-
-            if question_path and os.path.exists(question_path):
-                print(f"🆕 JSON 문제은행 적재 후 리트리버 준비: {question_path}")
-                out = load_questions_from_json({
-                    "question_path": question_path,
-                    "collection_name": collection,
-                    "milvus_host": host,
-                    "milvus_port": port,
-                    "drop_old": False,     # 필요 시 True로 초기화
-                    "k": topk,
-                })
-                self.vectorstore = out["vectorstore"]
-                self.retriever = out["retriever"]
-                self.files_in_vectorstore = []
-                return True
-
-            # 기존 컬렉션 접속
-            if not utility.has_collection(collection):
-                print(f"[DEBUG] Milvus 컬렉션이 없습니다: {collection} → 검색 없이 진행(폴백)")
-                self.vectorstore = None
-                self.retriever = None
-                return True
-
-            print(f"✅ 기존 Milvus 컬렉션 사용: {collection}")
-            # solution_agent 방식: 필드 자동 추론 + L2 메트릭
-            def infer_fields(coll_name: str):
-                c = Collection(coll_name)
-                vec_field, text_field, dim = None, None, None
-                for f in c.schema.fields:
-                    if f.dtype == DataType.FLOAT_VECTOR and vec_field is None:
-                        vec_field = f.name
-                        try:
-                            dim = int(f.params.get("dim") or 0)
-                        except Exception:
-                            dim = None
-                candidates = ("text", "page_content", "content", "question", "item_title", "title")
-                varchar_fields = [f.name for f in c.schema.fields if f.dtype == DataType.VARCHAR]
-                for name in candidates:
-                    if name in varchar_fields:
-                        text_field = name
-                        break
-                if text_field is None and varchar_fields:
-                    text_field = varchar_fields[0]
-                if vec_field is None:
-                    raise RuntimeError(f"[Milvus] '{coll_name}'에 FLOAT_VECTOR 필드가 없습니다.")
-                print(f"[Milvus] '{coll_name}' → text_field='{text_field}', vector_field='{vec_field}', dim={dim}")
-                return text_field, vec_field, dim
-
-            txt_f, vec_f, _ = infer_fields(collection)
-            self.vectorstore = Milvus(
-                embedding_function=self.embeddings_model,
-                collection_name=collection,
-                connection_args={"host": host, "port": port},
-                text_field=txt_f,
-                vector_field=vec_f,
-                index_params={"index_type": "AUTOINDEX", "metric_type": "L2"},
-                search_params={"metric_type": "L2"},
-            )
-            self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": topk})
-            self.files_in_vectorstore = []
-            return True
-
-        except Exception as e:
-            print(f"[DEBUG] _build_retriever_from_milvus error: {e} → 검색 없이 진행(폴백)")
-            self.vectorstore = None
-            self.retriever = None
-            return True
-
-    # (이전 FAISS 경로 대체: 이름은 그대로 유지해도 내부는 Milvus 사용)
-    def _build_vectorstore_from_all_pdfs(self) -> bool:
-        """
-        과거 FAISS 구축 함수의 시그니처를 유지하기 위해 남겨두지만,
-        현재는 Milvus 리트리버를 초기화합니다.
-        """
-        return self._build_retriever_from_milvus({})
+    # MilvusDB는 이제 supervisor에서 관리됨
 
     def get_pdf_files(self) -> List[str]:
         # Milvus 사용으로 의미는 적지만, 외부 호환을 위해 남김
         return glob.glob(os.path.join(self.data_folder, "*.pdf"))
 
     # ---- 공통 노드 구현(그대로 재사용) ----
-    def _retrieve_documents(self, state: GraphState) -> GraphState:
+    def _retrieve_documents(self, state) -> dict:
         try:
             query = state["query"]
             subject_area = state.get("subject_area", "")
             enhanced_query = f"{subject_area} {query}".strip()
             print(f"[DEBUG] _retrieve_documents: query='{query}', subject_area='{subject_area}', enhanced_query='{enhanced_query}'")
-            topk = self.milvus_conf["topk"]
+            
             documents: List[Document] = []
-            # 과목명이 DB에 공백 포함/미포함으로 섞여있는 경우를 모두 커버
-            subject_aliases = self._subject_aliases(subject_area) if subject_area else []
-            expr = None
-            if subject_aliases:
-                if len(subject_aliases) == 1:
-                    expr = f"subject == '{subject_aliases[0]}'"
+            
+            # 전역 milvus_data 사용
+            if hasattr(self, '_current_milvus_data') and self._current_milvus_data and self._current_milvus_data.get("connection_status", False):
+                print(f"🔍 MilvusDB에서 과목별 문서 검색 중: {subject_area}")
+                
+                # 과목명으로 개념 관련 문서 검색
+                concept_docs = search_milvus_documents_by_subject(
+                    milvus_data=self._current_milvus_data,
+                    collection_name="concepts",
+                    subject_area=subject_area,
+                    k=20
+                )
+                
+                # 과목명으로 문제 관련 문서 검색
+                problem_docs = search_milvus_documents_by_subject(
+                    milvus_data=self._current_milvus_data,
+                    collection_name="problems",
+                    subject_area=subject_area,
+                    k=30
+                )
+                
+                # 문서 합치기
+                documents = concept_docs + problem_docs
+                
+                if documents:
+                    print(f"✅ MilvusDB 과목 검색 완료: {subject_area} - {len(documents)}개 문서")
                 else:
-                    or_clauses = [f"subject == '{a}'" for a in subject_aliases]
-                    expr = " or ".join(or_clauses)
-            try:
-                # 1) expr 포함 검색
-                if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
-                    if expr:
-                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk, expr=expr)
-                    else:
-                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk)
-                elif self.retriever:
-                    if expr and hasattr(self.retriever, "search_kwargs"):
-                        self.retriever.search_kwargs.update({"expr": expr})
-                    documents = self.retriever.invoke(enhanced_query)
-            except Exception as e:
-                print(f"[DEBUG] _retrieve_documents: primary search failed ({e}), fallback without expr")
-                documents = []
-
-            # 2) 결과가 비어 있으면 expr 제거 후 재검색
-            if not documents:
-                try:
-                    if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
-                        documents = self.vectorstore.similarity_search(enhanced_query, k=topk)
-                    elif self.retriever:
-                        if hasattr(self.retriever, "search_kwargs") and "expr" in self.retriever.search_kwargs:
-                            self.retriever.search_kwargs.pop("expr", None)
-                        documents = self.retriever.invoke(enhanced_query)
-                    print(f"[DEBUG] _retrieve_documents: fallback without expr → {len(documents)} docs")
-                except Exception as e2:
-                    print(f"[DEBUG] _retrieve_documents: fallback without expr failed ({e2})")
-                    documents = []
-
-            # 3) 여전히 비어 있으면 주제 접두사 없이 순수 쿼리로 재검색
-            if not documents and query and query != enhanced_query:
-                try:
-                    if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
-                        documents = self.vectorstore.similarity_search(query, k=topk)
-                    elif self.retriever:
-                        documents = self.retriever.invoke(query)
-                    print(f"[DEBUG] _retrieve_documents: fallback plain query → {len(documents)} docs")
-                except Exception as e3:
-                    print(f"[DEBUG] _retrieve_documents: plain query search failed ({e3})")
-                    documents = []
-
-            if subject_area and documents:
-                # 메타데이터 subject도 공백 무시하고 별칭으로 정규화 매칭
-                aliases_norm = {self._normalize_subject(a) for a in subject_aliases}
-                filtered = []
-                for d in documents:
-                    meta_subj_norm = self._normalize_subject(d.metadata.get('subject') or '')
-                    if meta_subj_norm in aliases_norm:
-                        filtered.append(d)
-                if filtered:
-                    documents = filtered
+                    print(f"⚠️ MilvusDB에서 {subject_area} 과목 관련 문서를 찾지 못함")
+            else:
+                print("⚠️ MilvusDB 연결 안됨 - 빈 문서로 진행")
 
             print(f"[DEBUG] _retrieve_documents: found {len(documents)} documents")
+            
             # Milvus 문서에는 source_file이 없을 수 있으므로 보완
             source_files = []
             for doc in documents:
@@ -505,7 +339,7 @@ class InfoProcessingExamAgent(BaseAgent):
             print(f"[DEBUG] _retrieve_documents: error {e}")
             return {**state, "error": f"문서 검색 오류: {e}"}
 
-    def _prepare_context(self, state: GraphState) -> GraphState:
+    def _prepare_context(self, state) -> dict:
         documents = state.get("documents", [])
         key_sents = []
         for doc in documents:
@@ -519,138 +353,9 @@ class InfoProcessingExamAgent(BaseAgent):
         print(f"[DEBUG] _prepare_context: subject_area='{subject_area}'")
         return {**state, "context": context, "subject_area": subject_area}
 
-    def _validate_with_ragas(self, questions: List[Dict[str, Any]], context: str, subject_area: str = "정보처리기사") -> float:
-        """개선된 RAGAS를 사용한 문제 품질 검증"""
-        
-        if not RAGAS_AVAILABLE or not RAGAS_ENABLED:
-            print("[DEBUG] RAGAS 비활성화됨 - 품질 검증 건너뜀")
-            return 1.0  # RAGAS가 없으면 기본적으로 통과
-        
-        try:
-            print(f"[DEBUG] RAGAS 품질 검증 시작: {len(questions)}개 문제")
-            
-            # RAGAS LLM 및 임베딩 설정
-            try:
-                openai_api_key = os.getenv("OPENAI_API_KEY")
-                if not openai_api_key:
-                    print("[DEBUG] OPENAI_API_KEY가 설정되지 않음 - RAGAS 검증 건너뜀")
-                    return 1.0
-                
-                # RAGAS에서 사용할 LLM 설정: 환경의 BASE_URL을 그대로 사용(강제 덮어쓰기 금지)
-                os.environ["OPENAI_API_KEY"] = openai_api_key
-                base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-                
-                ragas_model = os.getenv("RAGAS_LLM_MODEL") or os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
-                llm_factory = get_llm_factory()
-                
-                llm = llm_factory(
-                    model=ragas_model,
-                    base_url=base_url
-                )
-                
-                # 임베딩 모델 설정 (HuggingFace 무료 모델 사용)
-                from langchain_huggingface import HuggingFaceEmbeddings
-                embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    model_kwargs={"device": "cpu"},
-                    encode_kwargs={"normalize_embeddings": True}
-                )
-                
-                print(f"[DEBUG] RAGAS LLM 설정 완료 (OpenAI {os.getenv('OPENAI_LLM_MODEL', 'gpt-4o-mini')})")
-                print("[DEBUG] RAGAS 임베딩 설정 완료 (HuggingFace all-MiniLM-L6-v2)")
-                    
-            except Exception as llm_error:
-                print(f"[DEBUG] RAGAS LLM/임베딩 설정 실패: {llm_error}")
-                return 1.0
-            
-            # RAGAS 평가 데이터 구성 (개선된 버전)
-            eval_data = {
-                "question": [],
-                "contexts": [],
-                "answer": [],
-                "ground_truth": []
-            }
-            
-            for q in questions:
-                question_text = q.get("question", "")
-                
-                # 답변 구성: 선택지 + 정답 번호 + 해설
-                options = q.get("options", [])
-                answer_num = q.get("answer", "1")
-                explanation = q.get("explanation", "")
-                
-                # 선택지를 포함한 풍부한 답변 구성
-                options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(options)])
-                try:
-                    correct_option = options[int(answer_num)-1] if answer_num.isdigit() and int(answer_num) <= len(options) else options[0]
-                except (IndexError, ValueError):
-                    correct_option = options[0] if options else "정답 없음"
-                
-                # Answer Relevancy를 위한 간결한 답변 구성
-                answer_text = f"{correct_option}. {explanation}"
-                
-                # 더 나은 컨텍스트: 여러 관련 문서 조각 사용
-                contexts_list = [
-                    context[:800],  # 메인 컨텍스트를 더 길게
-                    f"문제 유형: {subject_area} 과목의 객관식 문제",
-                    f"선택지: {options_text}"
-                ]
-                
-                eval_data["question"].append(question_text)
-                eval_data["contexts"].append(contexts_list)
-                eval_data["answer"].append(answer_text)
-                eval_data["ground_truth"].append(f"{correct_option}. {explanation}")
-            
-            # RAGAS 평가 실행
-            dataset = Dataset.from_dict(eval_data)
-            faithfulness, answer_relevancy, context_precision, context_recall = get_ragas_metrics()
-            results = evaluate_with_ragas(
-                dataset,
-                metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
-                llm=llm,
-                embeddings=embeddings
-            )
-            
-            # 평균 점수 계산 (개선된 버전)
-            scores = []
-            metric_scores = {}
-            
-            # 각 메트릭별 점수 추출
-            for metric_name in ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']:
-                if hasattr(results, metric_name):
-                    metric_values = getattr(results, metric_name)
-                    if isinstance(metric_values, list):
-                        # NaN과 None 값 제외
-                        valid_values = []
-                        for val in metric_values:
-                            if val is not None and not (hasattr(val, '__iter__') and len(str(val)) == 0):
-                                try:
-                                    float_val = float(val)
-                                    if not (float_val != float_val):  # NaN 체크
-                                        valid_values.append(float_val)
-                                except (ValueError, TypeError):
-                                    continue
-                        
-                        if valid_values:
-                            avg_metric = sum(valid_values) / len(valid_values)
-                            metric_scores[metric_name] = avg_metric
-                            scores.append(avg_metric)
-                            print(f"[DEBUG] {metric_name}: {avg_metric:.4f}")
-            
-            if scores:
-                avg_score = sum(scores) / len(scores)
-                print(f"[DEBUG] RAGAS 전체 평균 점수: {avg_score:.4f}")
-                print(f"[DEBUG] 메트릭별 점수: {metric_scores}")
-                return avg_score
-            else:
-                print("[DEBUG] RAGAS 점수 계산 실패 - 기본값 반환")
-                return 1.0
-                
-        except Exception as e:
-            print(f"[DEBUG] RAGAS 검증 중 오류: {e}")
-            return 1.0  # 오류 시 기본적으로 통과
+# RAGAS 검증 함수 제거 (LLM 기반 검증 사용)
 
-    def _generate_quiz_incremental(self, state: GraphState) -> GraphState:
+    def _generate_quiz_incremental(self, state) -> dict:
         try:
             context = state.get("context", "")
             target_quiz_count = state.get("target_quiz_count", 5)
@@ -666,7 +371,7 @@ class InfoProcessingExamAgent(BaseAgent):
                 print(f"[DEBUG] _generate_quiz_incremental: no context, attempts={new_attempts}")
                 # 컨텍스트 없을 때 과목 일반 개념 기반 생성 폴백
                 fallback_prompt = (
-                    f"당신은 정보처리기사 출제 전문가입니다. {subject_area} 과목의 기본 개념을 바탕으로 "
+                    f"당신은 정보처리기사 출제 전문가입니다. {subject_area} 과목의 다음 핵심 개념들을 바탕으로 "
                     f"객관식 문제 {needed_count}개를 생성하세요.\n\n"
                     "출제 규칙:\n"
                     "1) 보기에는 번호(1. 2. 3. 4.)를 절대 붙이지 말고, 순수 텍스트만 사용하세요.\n"
@@ -701,7 +406,8 @@ class InfoProcessingExamAgent(BaseAgent):
                     "error": "검색된 문서 내용이 없습니다."
                 }
 
-            generate_count = max(min(needed_count, 10), 1)
+            # 부족한 문제 수만큼 생성 (최대 20문제, 한 번에 모두 생성)
+            generate_count = max(min(needed_count, 20), 1)
 
             # 🔧 JSON 형식에 주석이 들어가던 문제 수정
             prompt_template = PromptTemplate(
@@ -711,6 +417,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     "조건:\n"
                     "• 보기에는 번호(1. 2. 3. 4.)를 붙이지 마십시오.\n"
                     "• answer에는 정답의 '번호'만 문자열로 적으십시오. 예: \"2\"\n"
+                    "• 각 문제는 서로 다른 내용이어야 합니다.\n"
                     "• 출력은 아래 JSON 형식만 포함하십시오. 다른 텍스트 금지.\n\n"
                     "[문서 내용]\n{context}\n\n"
                     "[응답 형식]\n"
@@ -721,7 +428,14 @@ class InfoProcessingExamAgent(BaseAgent):
                     "      \"options\": [\"선택지1\", \"선택지2\", \"선택지3\", \"선택지4\"],\n"
                     "      \"answer\": \"1\",\n"
                     "      \"explanation\": \"정답에 대한 간단한 해설\"\n"
+                    "    }},\n"
+                    "    {{\n"
+                    "      \"question\": \"두 번째 문제 내용\",\n"
+                    "      \"options\": [\"선택지1\", \"선택지2\", \"선택지3\", \"선택지4\"],\n"
+                    "      \"answer\": \"2\",\n"
+                    "      \"explanation\": \"정답에 대한 간단한 해설\"\n"
                     "    }}\n"
+                    "    // ... {needed_count}개까지 반복\n"
                     "  ]\n"
                     "}}\n"
                 )
@@ -733,15 +447,17 @@ class InfoProcessingExamAgent(BaseAgent):
 
             print(f"[DEBUG] _generate_quiz_incremental: calling LLM for {generate_count} questions")
             self.llm.temperature = 0.15
-            self.llm.max_tokens = 900
+            self.llm.max_tokens = 4000  # 여러 문제 생성에 충분한 토큰 수
             response = self.llm.invoke(prompt)
             response_content = getattr(response, "content", str(response))
             print(f"[DEBUG] _generate_quiz_incremental: LLM response length={len(response_content)}")
             
             new_questions = self._parse_quiz_response(response_content, subject_area)
+            print(f"[DEBUG] _generate_quiz_incremental: parsed {len(new_questions)} questions before filtering")
+            
             # 중복 필터링(동일 턴/이전/벡터스토어 유사 제거)
             new_questions = self._filter_duplicate_questions(new_questions, validated_questions, subject_area)
-            print(f"[DEBUG] _generate_quiz_incremental: parsed {len(new_questions)} questions")
+            print(f"[DEBUG] _generate_quiz_incremental: after filtering: {len(new_questions)} questions")
 
             if not new_questions:
                 new_attempts = state.get("generation_attempts", 0) + 1
@@ -754,54 +470,15 @@ class InfoProcessingExamAgent(BaseAgent):
                     "error": "유효한 문제를 생성하지 못했습니다."
                 }
 
-            # 🔍 RAGAS 품질 검증 추가
-            if RAGAS_ENABLED and new_questions:
-                print(f"[DEBUG] _generate_quiz_incremental: RAGAS 품질 검증 시작")
-                subject_area = state.get("subject_area", "정보처리기사")
-                quality_score = self._validate_with_ragas(new_questions, context, subject_area)
-                
-                # 품질 임계값 체크
-                if quality_score >= RAGAS_QUALITY_THRESHOLD:
-                    print(f"[DEBUG] _generate_quiz_incremental: RAGAS 품질 기준 통과 ({quality_score:.4f} >= {RAGAS_QUALITY_THRESHOLD})")
-                    new_attempts = state.get("generation_attempts", 0) + 1
-                    return {
-                        **state,
-                        "quiz_questions": new_questions,
-                        "validated_questions": validated_questions,
-                        "generation_attempts": new_attempts,
-                        "ragas_score": quality_score
-                    }
-                else:
-                    print(f"[DEBUG] _generate_quiz_incremental: RAGAS 품질 기준 미달 ({quality_score:.4f} < {RAGAS_QUALITY_THRESHOLD})")
-                    # 품질이 낮으면 재생성 시도
-                    current_attempts = state.get("generation_attempts", 0) + 1
-                    if current_attempts < RAGAS_MAX_ATTEMPTS:
-                        print(f"[DEBUG] _generate_quiz_incremental: 재생성 시도 ({current_attempts}/{RAGAS_MAX_ATTEMPTS})")
-                        return {
-                            **state,
-                            "generation_attempts": current_attempts,
-                            "error": f"품질 기준 미달 ({quality_score:.4f}), 재생성 시도 중..."
-                        }
-                    else:
-                        print(f"[DEBUG] _generate_quiz_incremental: 최대 재시도 횟수 초과")
-                        return {
-                            **state,
-                            "quiz_questions": new_questions,
-                            "validated_questions": validated_questions,
-                            "generation_attempts": current_attempts,
-                            "error": f"최대 재시도 후에도 품질 기준 미달 (최종 점수: {quality_score:.4f})",
-                            "ragas_score": quality_score
-                        }
-            else:
-                # RAGAS 비활성화된 경우 기존 로직
-                new_attempts = state.get("generation_attempts", 0) + 1
-                print(f"[DEBUG] _generate_quiz_incremental: generated {len(new_questions)} questions, attempts={new_attempts}")
-                return {
-                    **state,
-                    "quiz_questions": new_questions,
-                    "validated_questions": validated_questions,
-                    "generation_attempts": new_attempts
-                }
+            # LLM 기반 검증으로 변경 (RAGAS 제거)
+            new_attempts = state.get("generation_attempts", 0) + 1
+            print(f"[DEBUG] _generate_quiz_incremental: generated {len(new_questions)} questions, attempts={new_attempts}")
+            return {
+                **state,
+                "quiz_questions": new_questions,
+                "validated_questions": validated_questions,
+                "generation_attempts": new_attempts
+            }
         except Exception as e:
             new_attempts = state.get("generation_attempts", 0) + 1
             print(f"[DEBUG] _generate_quiz_incremental: exception {e}, attempts={new_attempts}")
@@ -813,7 +490,7 @@ class InfoProcessingExamAgent(BaseAgent):
                 "error": f"문제 생성 중 오류 발생: {e}"
             }
 
-    def _validate_quiz_incremental(self, state: GraphState) -> GraphState:
+    def _validate_quiz_incremental(self, state) -> dict:
         subject_area = state.get("subject_area", "")
         previously_validated = state.get("validated_questions", [])
         new_questions = state.get("quiz_questions", [])
@@ -836,15 +513,12 @@ class InfoProcessingExamAgent(BaseAgent):
         newly_validated = []
         print(f"[DEBUG] _validate_quiz_incremental: validating {len(new_questions)} questions")
 
-        # 간단한 검증: 모든 문제를 유효하다고 가정 (LLM 호출 없이)
-        # 실제로는 LLM 검증을 할 수 있지만, 테스트를 위해 간단하게 처리
-        for q in new_questions:
-            if len(newly_validated) >= target_quiz_count - len(previously_validated):
-                break
-            # 기본 검증: 필수 필드가 있는지 확인
-            if q.get("question") and q.get("options") and q.get("answer") and q.get("explanation"):
-                newly_validated.append(q)
-                print(f"[DEBUG] _validate_quiz_incremental: validated question: {q.get('question', '')[:50]}...")
+        # LLM 기반 검증 (한 번에 모든 문제 검증)
+        print(f"[DEBUG] _validate_quiz_incremental: validating all {len(new_questions)} questions at once")
+        
+        # LLM 기반 검증
+        validated_batch = self._llm_validate_questions_batch(new_questions, subject_area)
+        newly_validated.extend(validated_batch)
 
         all_validated = previously_validated + newly_validated
         print(f"[DEBUG] _validate_quiz_incremental: total validated: {len(all_validated)}/{target_quiz_count}")
@@ -856,7 +530,110 @@ class InfoProcessingExamAgent(BaseAgent):
             "error": ""  # 에러 상태 초기화
         }
 
-    def _check_completion(self, state: GraphState) -> str:
+    def _llm_validate_questions_batch(self, questions: List[Dict[str, Any]], subject_area: str) -> List[Dict[str, Any]]:
+        """LLM 기반 문제 배치 검증 (FEVER 형식)"""
+        if not questions:
+            return []
+        
+        # 검증 프롬프트 생성
+        validation_prompt = self._create_validation_prompt(questions, subject_area)
+        
+        try:
+            # LLM 호출
+            response = self.llm.invoke(validation_prompt)
+            validation_result = self._parse_validation_response(response.content)
+            
+            # 검증 결과에 따라 문제 필터링
+            validated_questions = []
+            for i, question in enumerate(questions):
+                if i < len(validation_result) and validation_result[i] == True:
+                    # 보기 수 검증 추가
+                    if self._validate_options_count(question):
+                        validated_questions.append(question)
+                        print(f"[DEBUG] LLM 검증 통과: {question.get('question', '')[:50]}...")
+                    else:
+                        print(f"[DEBUG] 보기 수 검증 실패: {question.get('question', '')[:50]}...")
+                else:
+                    print(f"[DEBUG] LLM 검증 실패: {question.get('question', '')[:50]}...")
+            
+            return validated_questions
+            
+        except Exception as e:
+            print(f"[ERROR] LLM 검증 실패: {e}")
+            # 에러 시 기본 검증으로 폴백
+            return self._basic_validate_questions(questions)
+
+    def _create_validation_prompt(self, questions: List[Dict[str, Any]], subject_area: str) -> str:
+        """간단한 검증 프롬프트 생성"""
+        questions_text = ""
+        for i, q in enumerate(questions, 1):
+            questions_text += f"{i}. {q.get('question', '')}\n"
+            for j, option in enumerate(q.get('options', []), 1):
+                questions_text += f"   {j}) {option}\n"
+            questions_text += f"   정답: {q.get('answer', '')}\n\n"
+        
+        prompt = f"""
+다음 {subject_area} 과목의 {len(questions)}개 문제들을 검증해주세요.
+
+{questions_text}
+
+검증 기준:
+1. 질문이 명확하고 이해하기 쉬운가?
+2. 보기가 4개인가? (정답 1개, 오답 3개)
+3. 정답이 명확하고 논리적인가?
+4. 해설이 충분하고 정확한가?
+5. {subject_area} 과목과 관련성이 있는가?
+6. 중복되거나 유사한 문제가 아닌가?
+
+각 문제에 대해 유효하면 "VALID", 무효하면 "INVALID"로 판단해주세요.
+
+응답 형식:
+문제1: VALID/INVALID
+문제2: VALID/INVALID
+...
+문제{len(questions)}: VALID/INVALID
+"""
+        return prompt
+
+    def _parse_validation_response(self, response: str) -> List[Dict[str, Any]]:
+        """검증 응답 파싱"""
+        try:
+            print(f"[DEBUG] _parse_validation_response: response='{response}'")
+            
+            # 간단한 텍스트 파싱
+            lines = response.strip().split('\n')
+            valid_questions = []
+            
+            for line in lines:
+                line = line.strip()
+                if ':' in line and ('VALID' in line or 'INVALID' in line):
+                    if 'VALID' in line:
+                        valid_questions.append(True)
+                    else:
+                        valid_questions.append(False)
+            
+            print(f"[DEBUG] _parse_validation_response: found {len(valid_questions)} validation results")
+            return valid_questions
+            
+        except Exception as e:
+            print(f"[ERROR] 검증 응답 파싱 실패: {e}")
+            return []
+
+    def _validate_options_count(self, question: Dict[str, Any]) -> bool:
+        """보기 수 검증 (4개 필수)"""
+        options = question.get("options", [])
+        return len(options) == 4
+
+    def _basic_validate_questions(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """기본 검증 (LLM 실패 시 폴백)"""
+        validated = []
+        for q in questions:
+            if (q.get("question") and q.get("options") and q.get("answer") and 
+                q.get("explanation") and self._validate_options_count(q)):
+                validated.append(q)
+        return validated
+
+    def _check_completion(self, state) -> str:
         validated_count = len(state.get("validated_questions", []))
         target_count = state.get("target_quiz_count", 5)
         generation_attempts = state.get("generation_attempts", 0)
@@ -869,9 +646,9 @@ class InfoProcessingExamAgent(BaseAgent):
             print(f"[DEBUG] Target reached ({validated_count}/{target_count}), completing")
             return "complete"
         
-        # 최대 시도 횟수 도달
-        if generation_attempts >= 5:  # 5회로 증가
-            print(f"[DEBUG] Max attempts reached ({generation_attempts}), completing")
+        # 최대 시도 횟수 도달 (20문제씩 생성하므로 3회로 제한)
+        if generation_attempts >= 3:
+            print(f"[DEBUG] Max attempts reached ({generation_attempts}), completing with {validated_count} questions")
             return "complete"
         
         # 에러가 있으면 중단
@@ -879,8 +656,11 @@ class InfoProcessingExamAgent(BaseAgent):
             print(f"[DEBUG] Error detected: {error}, completing")
             return "complete"
         
-        # 계속 생성
-        print(f"[DEBUG] Need more questions ({validated_count}/{target_count}), continuing generation (attempt {generation_attempts})")
+        # 부족한 문제 수만큼 재생성 (최대 20문제)
+        remaining = target_count - validated_count
+        needed = min(remaining, 20)  # 한 번에 최대 20문제 생성
+        
+        print(f"[DEBUG] Need {needed} more questions ({validated_count}/{target_count}), continuing generation (attempt {generation_attempts + 1})")
         return "generate_more"
 
     def _parse_quiz_response(self, response: str, subject_area: str = "") -> List[Dict[str, Any]]:
@@ -908,23 +688,41 @@ class InfoProcessingExamAgent(BaseAgent):
             
             # 4. JSON 파싱
             data = json.loads(json_str)
-            if "questions" not in data or not isinstance(data["questions"], list):
+            
+            # questions 배열이 있는 경우와 단일 문제 객체인 경우 모두 처리
+            if "questions" in data and isinstance(data["questions"], list):
+                questions = data["questions"]
+                print(f"[DEBUG] _parse_quiz_response: found {len(questions)} questions in array")
+            elif isinstance(data, dict) and "question" in data:
+                # 단일 문제 객체인 경우 배열로 변환
+                questions = [data]
+                print(f"[DEBUG] _parse_quiz_response: found single question object")
+            else:
                 print(f"[DEBUG] _parse_quiz_response: invalid data structure, keys={list(data.keys()) if isinstance(data, dict) else 'not dict'}")
                 return []
-
-            questions = data.get("questions", [])
-            print(f"[DEBUG] _parse_quiz_response: found {len(questions)} questions")
             
             # 5. 각 문제 처리 및 정규화(보기에 번호 제거, 과목 주입, 보기 정리, 정답 보정)
+            print(f"[DEBUG] _parse_quiz_response: processing {len(questions)} questions")
+            
+            processed_questions = []
             for i, question in enumerate(questions):
+                print(f"[DEBUG] _parse_quiz_response: processing question {i+1}: {question}")
+                
+                # 필수 필드 확인
+                if not question.get("question") or not question.get("options"):
+                    print(f"[DEBUG] _parse_quiz_response: skipping invalid question {i+1}")
+                    continue
+                
                 if "options" in question and isinstance(question["options"], list):
                     numbered_options = []
                     for j, option_text in enumerate(question["options"], 1):
                         cleaned_text = re.sub(r'^\s*\d+\.\s*', '', str(option_text)).strip()
                         numbered_options.append(f"  {j}. {cleaned_text}")
                     question["options"] = numbered_options
+                
                 if "subject" not in question:
                     question["subject"] = subject_area
+                
                 # 보기 길이/중복 필터링 및 4개 제한
                 dedup_opts, seen = [], set()
                 for opt in question["options"]:
@@ -935,13 +733,17 @@ class InfoProcessingExamAgent(BaseAgent):
                     dedup_opts.append(opt)
                 if len(dedup_opts) >= 4:
                     question["options"] = dedup_opts[:4]
+                
                 # 정답 인덱스 유효성 보정
                 ans = str(question.get("answer", "")).strip()
                 if ans not in {"1","2","3","4"}:
                     question["answer"] = "1"
+                
+                processed_questions.append(question)
                 print(f"[DEBUG] _parse_quiz_response: processed question {i+1}: {question.get('question', '')[:50]}...")
             
-            return questions
+            print(f"[DEBUG] _parse_quiz_response: returning {len(processed_questions)} processed questions")
+            return processed_questions
         except Exception as e:
             print(f"[DEBUG] _parse_quiz_response: exception during parsing: {e}")
             print(f"[DEBUG] _parse_quiz_response: response that caused error: '{response[:500]}...'")
@@ -968,41 +770,44 @@ class InfoProcessingExamAgent(BaseAgent):
     def _filter_duplicate_questions(self, new_qs: List[Dict[str, Any]], prev_validated: List[Dict[str, Any]], subject_area: str) -> List[Dict[str, Any]]:
         if not new_qs:
             return []
+        
+        print(f"[DEBUG] _filter_duplicate_questions: filtering {len(new_qs)} new questions against {len(prev_validated)} previous")
+        
         kept: List[Dict[str, Any]] = []
         seen_norm: set = set()
         prev_texts = [q.get("question", "") for q in (prev_validated or [])]
-        for q in new_qs:
+        
+        for i, q in enumerate(new_qs):
             qtext = q.get("question", "")
             norm = self._norm_text(qtext)
+            
+            print(f"[DEBUG] _filter_duplicate_questions: checking question {i+1}: '{qtext[:50]}...'")
+            
             if not norm:
+                print(f"[DEBUG] _filter_duplicate_questions: skipping empty question {i+1}")
                 continue
+                
             if norm in seen_norm:
+                print(f"[DEBUG] _filter_duplicate_questions: skipping duplicate in current batch {i+1}")
                 continue
-            dup_local = any(self._jaccard_sim(qtext, p) >= 0.9 for p in prev_texts)
-            if dup_local:
+                
+            # 이전 문제와의 중복 검사 (더 관대한 기준)
+            max_similarity = 0.0
+            for p in prev_texts:
+                sim = self._jaccard_sim(qtext, p)
+                max_similarity = max(max_similarity, sim)
+            
+            if max_similarity >= 0.98:  # 0.95 -> 0.98로 더욱 관대하게 (거의 완전히 같은 경우만)
+                print(f"[DEBUG] _filter_duplicate_questions: skipping similar to previous {i+1} (similarity: {max_similarity:.3f})")
                 continue
-            is_dup_vs = False
-            try:
-                if self.vectorstore and hasattr(self.vectorstore, "similarity_search"):
-                    expr = f"subject == '{subject_area}'" if subject_area else None
-                    docs = self.vectorstore.similarity_search(qtext, k=3, expr=expr) if expr else self.vectorstore.similarity_search(qtext, k=3)
-                    for d in docs or []:
-                        if self._jaccard_sim(qtext, d.page_content) >= 0.9:
-                            is_dup_vs = True
-                            break
-            except Exception:
-                try:
-                    docs = self.retriever.invoke(qtext) if self.retriever else []
-                    for d in docs or []:
-                        if self._jaccard_sim(qtext, getattr(d, "page_content", "")) >= 0.9:
-                            is_dup_vs = True
-                            break
-                except Exception:
-                    pass
-            if is_dup_vs:
-                continue
+            else:
+                print(f"[DEBUG] _filter_duplicate_questions: similarity check passed {i+1} (max: {max_similarity:.3f})")
+                
             kept.append(q)
             seen_norm.add(norm)
+            print(f"[DEBUG] _filter_duplicate_questions: keeping question {i+1}")
+        
+        print(f"[DEBUG] _filter_duplicate_questions: returning {len(kept)} questions")
         return kept
 
     # ---------- 핵심: 그래프 구성 변경 (과목별 2노드 × 5과목 = 10노드) ----------
@@ -1017,151 +822,298 @@ class InfoProcessingExamAgent(BaseAgent):
         workflow.add_node("retrieve", self._retrieve_documents)
         workflow.add_node("prepare_context", self._prepare_context)
 
-        # 과목별 노드 함수: subject를 클로저로 묶어 2개 노드 생성
+        # 과목별 노드 함수: subject를 클로저로 묶어 1개 노드 생성 (순차 처리)
         def make_generate_node(subject_name):
             def _gen(state: GraphState) -> GraphState:
-                # subject_name을 state에 보증
                 print(f"[DEBUG] {subject_name}_generate 노드 실행")
-                state = {**state, "subject_area": subject_name}
-                return self._generate_quiz_incremental(state)
+                # 독립적인 state 생성 (충돌 방지)
+                independent_state = {
+                    "query": state.get("query", ""),
+                    "documents": state.get("documents", []),
+                    "context": state.get("context", ""),
+                    "quiz_questions": [],
+                    "difficulty": state.get("difficulty", "중급"),
+                    "error": "",
+                    "used_sources": state.get("used_sources", []),
+                    "generation_attempts": 0,
+                    "target_quiz_count": state.get("target_quiz_count", 5),
+                    "subject_area": subject_name,
+                    "validated_questions": [],
+                    "node_id": 1
+                }
+                result = self._generate_quiz_incremental(independent_state)
+                # 결과를 원본 state에 병합 (충돌 방지)
+                return {
+                    **state,
+                    f"{subject_name}_quiz_questions": result.get("quiz_questions", []),
+                    f"{subject_name}_validated_questions": result.get("validated_questions", []),
+                    f"{subject_name}_error": result.get("error", "")
+                }
             return _gen
 
         def make_validate_node(subject_name):
             def _val(state: GraphState) -> GraphState:
-                state = {**state, "subject_area": subject_name}
-                return self._validate_quiz_incremental(state)
+                print(f"[DEBUG] {subject_name}_validate 노드 실행")
+                # 독립적인 state 생성
+                independent_state = {
+                    "query": state.get("query", ""),
+                    "documents": state.get("documents", []),
+                    "context": state.get("context", ""),
+                    "quiz_questions": state.get(f"{subject_name}_quiz_questions", []),
+                    "difficulty": state.get("difficulty", "중급"),
+                    "error": "",
+                    "used_sources": state.get("used_sources", []),
+                    "generation_attempts": 0,
+                    "target_quiz_count": state.get("target_quiz_count", 5),
+                    "subject_area": subject_name,
+                    "validated_questions": [],
+                    "node_id": 1
+                }
+                result = self._validate_quiz_incremental(independent_state)
+                # 결과를 원본 state에 병합
+                return {
+                    **state,
+                    f"{subject_name}_validated_questions": result.get("validated_questions", []),
+                    f"{subject_name}_error": result.get("error", "")
+                }
             return _val
 
-        # 과목별 노드 추가
+        # 과목별 노드 추가 (각 과목당 1개 노드, 순차 처리)
         subject_to_nodes = {}
         for subj in self.SUBJECT_AREAS.keys():
             gen_name = f"{subj}_generate"
             val_name = f"{subj}_validate"
             workflow.add_node(gen_name, make_generate_node(subj))
             workflow.add_node(val_name, make_validate_node(subj))
-            # 과목별 내부 엣지
+            # 과목별 내부 엣지 (순차 처리)
             workflow.add_edge(gen_name, val_name)
             workflow.add_conditional_edges(
                 val_name,
                 self._check_completion,
-                {"generate_more": gen_name, "complete": END}
+                {"generate_more": gen_name, "complete": "merge_results"}
             )
             subject_to_nodes[subj] = (gen_name, val_name)
 
-        # 라우터: prepare_context 이후 과목별 generate로 분기
+        # 라우터: prepare_context 이후 과목별 generate로 분기 (단일 노드)
         def _route_to_subject(state: GraphState) -> str:
             subj = state.get("subject_area", "")
             print(f"[DEBUG] _route_to_subject: subject_area='{subj}', available_subjects={list(subject_to_nodes.keys())}")
             if subj in subject_to_nodes:
-                gen_name, val_name = subject_to_nodes[subj]  # 튜플 언패킹
-                print(f"[DEBUG] Found subject '{subj}', returning generate node: {gen_name}")
-                return gen_name  # generate 노드명만 반환
+                gen_name, val_name = subject_to_nodes[subj]
+                print(f"[DEBUG] Found subject '{subj}', returning node: {gen_name}")
+                return gen_name
             # 기본값(안 맞으면 설계로)
             print(f"[DEBUG] Subject '{subj}' not found, using default: 소프트웨어설계")
             gen_name, val_name = subject_to_nodes["소프트웨어설계"]
             return gen_name
 
+        # 결과 합치기 노드 추가
+        workflow.add_node("merge_results", self._merge_results)
+
         workflow.set_entry_point("retrieve")
         workflow.add_edge("retrieve", "prepare_context")
         
-        # 수정: _route_to_subject 함수가 반환하는 값과 노드명을 매핑하는 딕셔너리 생성
-        # _route_to_subject는 노드명을 반환하므로, routing_dict는 {노드명: 노드명} 형태여야 함
-        routing_dict = {subject_to_nodes[subj][0]: subject_to_nodes[subj][0] for subj in subject_to_nodes.keys()}
-        print(f"[DEBUG] routing_dict: {routing_dict}")
-        print(f"[DEBUG] Available nodes: {list(workflow.nodes.keys())}")
-        print(f"[DEBUG] routing_dict keys: {list(routing_dict.keys())}")
-        print(f"[DEBUG] routing_dict keys in nodes: {[k in workflow.nodes for k in routing_dict.keys()]}")
-        workflow.add_conditional_edges("prepare_context", _route_to_subject, routing_dict)
+        # 순차 처리: prepare_context 이후 과목별 노드로 분기
+        workflow.add_conditional_edges(
+            "prepare_context",
+            _route_to_subject,
+            {f"{subj}_generate": f"{subj}_generate" 
+             for subj in self.SUBJECT_AREAS.keys()}
+        )
+        
+        # 모든 노드에서 merge_results로 수렴
+        for subj in self.SUBJECT_AREAS.keys():
+            workflow.add_edge(f"{subj}_validate", "merge_results")
+        
+        # merge_results에서 종료
+        workflow.add_edge("merge_results", END)
 
         self.workflow = workflow.compile()
+    
+    def _build_independent_workflow(self):
+        """과목별 독립적인 워크플로우 생성 (충돌 방지)"""
+        workflow = StateGraph(SubjectState)
+        
+        # 공통 전처리
+        workflow.add_node("retrieve", self._retrieve_documents)
+        workflow.add_node("prepare_context", self._prepare_context)
+        
+        # 과목별 노드 함수 (독립적인 처리)
+        def make_generate_node():
+            def _gen(state: SubjectState) -> SubjectState:
+                print(f"[DEBUG] {state['subject_area']}_generate 노드 실행")
+                result = self._generate_quiz_incremental(state)
+                return result
+            return _gen
+
+        def make_validate_node():
+            def _val(state: SubjectState) -> SubjectState:
+                print(f"[DEBUG] {state['subject_area']}_validate 노드 실행")
+                result = self._validate_quiz_incremental(state)
+                return result
+            return _val
+
+        # 노드 추가
+        workflow.add_node("generate", make_generate_node())
+        workflow.add_node("validate", make_validate_node())
+        
+        # 워크플로우 연결
+        workflow.set_entry_point("retrieve")
+        workflow.add_edge("retrieve", "prepare_context")
+        workflow.add_edge("prepare_context", "generate")
+        workflow.add_edge("generate", "validate")
+        workflow.add_conditional_edges(
+            "validate",
+            self._check_completion,
+            {"generate_more": "generate", "complete": END}
+        )
+        
+        return workflow.compile()
+
+    def _merge_results(self, state: GraphState) -> GraphState:
+        """결과 합치기 (과목별 순차 처리)"""
+        print(f"[DEBUG] _merge_results: 결과 합치기 시작")
+        
+        # 과목별 결과를 수집
+        all_validated_questions = []
+        subject_area = state.get("subject_area", "")
+        
+        # 현재 과목의 결과 수집
+        subject_key = f"{subject_area}_validated_questions"
+        subject_questions = state.get(subject_key, [])
+        if subject_questions:
+            all_validated_questions.extend(subject_questions)
+            print(f"[DEBUG] _merge_results: {subject_area}에서 {len(subject_questions)}개 문제 수집")
+        
+        print(f"[DEBUG] _merge_results: 총 {len(all_validated_questions)}개 문제 수집")
+        
+        # 중복 제거 (동일한 질문 내용)
+        unique_questions = []
+        seen_questions = set()
+        
+        for question in all_validated_questions:
+            question_text = question.get("question", "").strip()
+            if question_text and question_text not in seen_questions:
+                unique_questions.append(question)
+                seen_questions.add(question_text)
+        
+        print(f"[DEBUG] _merge_results: 중복 제거 후 {len(unique_questions)}개 문제")
+        
+        return {
+            **state,
+            "validated_questions": unique_questions,
+            "quiz_questions": unique_questions,
+            "error": ""
+        }
     # --------------------------------------------------------------------
 
-    # 단일 과목 생성(내부는 그래프 한 번 실행)
-    def _generate_subject_quiz(self, subject_area: str, target_count: int = 5, difficulty: str = "중급") -> Dict[str, Any]:
-        # 벡터 저장소 초기화 (retriever가 None인 경우)
-        if self.retriever is None:
-            print("[DEBUG] Retriever가 None입니다. 벡터 저장소를 초기화합니다...")
-            try:
-                self._build_retriever_from_milvus({})
-                print("[DEBUG] 벡터 저장소 초기화 완료")
-            except Exception as e:
-                print(f"[DEBUG] 벡터 저장소 초기화 실패: {e}")
-                # 초기화 실패해도 계속 진행 (컨텍스트 없이 문제 생성)
+    # 단일 과목 생성 (독립적인 워크플로우 사용)
+    def _generate_subject_quiz(self, subject_area: str, target_count: int = 5, difficulty: str = "중급", milvus_data: Dict[str, Any] = None) -> Dict[str, Any]:
+        # MilvusDB 연결 정보를 전역 변수로 저장
+        self._current_milvus_data = milvus_data
+        
+        # MilvusDB 연결 정보 확인
+        if not milvus_data or not milvus_data.get("connection_status", False):
+            print("⚠️ MilvusDB 연결 안됨 - 컨텍스트 없이 문제 생성")
         
         if subject_area not in self.SUBJECT_AREAS:
             return {"error": f"유효하지 않은 과목: {subject_area}"}
-        keywords = self.SUBJECT_AREAS[subject_area]["keywords"]
-
-        all_validated_questions = []
-        max_rounds = 10
-        current_round = 0
-
-        while len(all_validated_questions) < target_count and current_round < max_rounds:
-            current_round += 1
-            remaining_needed = target_count - len(all_validated_questions)
-
-            # RAGAS 기반 개선: 키워드 조합 대신 의미있는 쿼리 생성
-            for i in range(0, len(keywords), 3):  # 3개씩 그룹화
-                if len(all_validated_questions) >= target_count:
-                    break
-                
-                # 키워드 조합을 더 자연스러운 쿼리로 변환
-                keyword_group = keywords[i:i+3]
-                if len(keyword_group) >= 2:
-                    # 첫 번째와 두 번째 키워드를 중심으로 자연스러운 쿼리 생성
-                    primary_concept = keyword_group[0]
-                    secondary_concept = keyword_group[1] if len(keyword_group) > 1 else ""
-                    
-                    if secondary_concept:
-                        query = f"{primary_concept}와 {secondary_concept}의 개념과 활용"
-                    else:
-                        query = f"{primary_concept}의 개념과 특징"
-                else:
-                    query = " ".join(keyword_group)
-
-                initial_state = {
-                    "query": query,
-                    "target_quiz_count": min(remaining_needed, 3),  # 한 번에 3문제씩 생성
+        
+        # 독립적인 워크플로우 인스턴스 생성 (충돌 방지)
+        independent_workflow = self._build_independent_workflow()
+        
+        # 초기 상태 설정 (SubjectState 형식)
+        initial_state = {
+            "query": f"{subject_area} {difficulty} 문제",
+            "documents": [],
+            "context": "",
+            "quiz_questions": [],
                     "difficulty": difficulty,
+            "error": "",
+            "used_sources": [],
                     "generation_attempts": 0,
-                    "quiz_questions": [],
-                    "validated_questions": [],
+            "target_quiz_count": target_count,
                     "subject_area": subject_area,
-                    "keywords": keyword_group  # RAGAS 검증에서 사용할 키워드 정보
+            "validated_questions": [],
+            "node_id": 1
+        }
+        
+        try:
+            # 독립적인 워크플로우 실행
+            result = independent_workflow.invoke(initial_state)
+            
+            # 결과 반환
+            validated_questions = result.get("validated_questions", [])
+            return {
+                "success": True,
+                "questions": validated_questions,  # 이 키가 중요!
+                "status": "SUCCESS" if len(validated_questions) > 0 else "FAILED",
+                "result": {
+                    "exam_title": f"{subject_area} {difficulty} 문제집",
+                    "total_questions": len(validated_questions),
+                    "difficulty": difficulty,
+                    "subjects": {
+                        subject_area: {
+                            "requested_count": target_count,
+                            "actual_count": len(validated_questions),
+                            "questions": validated_questions,
+                            "status": "SUCCESS" if len(validated_questions) > 0 else "FAILED"
+                        }
+                    },
+                    "all_questions": validated_questions,
+                    "generation_summary": {
+                        "target_total": target_count,
+                        "actual_total": len(result.get("validated_questions", [])),
+                        "success_rate": f"{(len(result.get('validated_questions', [])) / target_count * 100):.1f}%",
+                        "successful_subjects": 1 if len(result.get("validated_questions", [])) > 0 else 0,
+                        "failed_subjects": 0 if len(result.get("validated_questions", [])) > 0 else 1,
+                        "completion_status": "COMPLETE" if len(result.get("validated_questions", [])) >= target_count else "PARTIAL",
+                        "generation_time": "0.0초"
+                    },
+                    "failed_subjects": [],
+                    "model_info": OPENAI_LLM_MODEL,
+                    "parallel_agents": 1
                 }
-                # 과목별 라우팅 그래프 단발 실행
-                result = self.workflow.invoke(initial_state)
-
-                if result.get("error"):
-                    continue
-
-                new_qs = result.get("validated_questions", [])
-                if new_qs:
-                    # 중복 제거
-                    exists = {q.get("question", "") for q in all_validated_questions}
-                    for q in new_qs:
-                        if q.get("question", "") not in exists:
-                            all_validated_questions.append(q)
-                            exists.add(q.get("question", ""))
-
-                if len(all_validated_questions) >= target_count:
-                    break
-
-            if current_round < max_rounds and len(all_validated_questions) < target_count:
-                time.sleep(1.5)
-
-        final_questions = all_validated_questions[:target_count]
-        return {
-            "subject_area": subject_area,
-            "difficulty": difficulty,
-            "requested_count": target_count,
-            "quiz_count": len(final_questions),
-            "questions": final_questions,
-            "status": "SUCCESS" if len(final_questions) >= target_count else "PARTIAL"
+            }
+            
+        except Exception as e:
+            err = str(e)
+            print(f"❌ 문제 생성 실패: {err}")
+            return {
+                "success": False,
+                "questions": [],  # 빈 리스트 반환
+                "status": "FAILED",
+                "error": err,
+                "result": {
+                    "exam_title": f"{subject_area} {difficulty} 문제집",
+                    "total_questions": 0,
+                    "difficulty": difficulty,
+                    "subjects": {
+                        subject_area: {
+                            "requested_count": target_count,
+                            "actual_count": 0,
+                            "questions": [],
+                            "status": "FAILED"
+                        }
+                    },
+                    "all_questions": [],
+                    "generation_summary": {
+                        "target_total": target_count,
+                        "actual_total": 0,
+                        "success_rate": "0.0%",
+                        "successful_subjects": 0,
+                        "failed_subjects": 1,
+                        "completion_status": "FAILED",
+                        "generation_time": "0.0초"
+                    },
+                    "failed_subjects": [{"subject": subject_area, "error": str(e)}],
+                    "model_info": OPENAI_LLM_MODEL,
+                    "parallel_agents": 1
+                }
         }
 
     # 3) 사용자 지정 병렬 실행로 5과목 동시 처리(최대 parallel_agents 동시)
-    def _generate_full_exam(self, difficulty: str = "중급", parallel_agents: int = 2) -> Dict[str, Any]:
+    def _generate_full_exam(self, difficulty: str = "중급", parallel_agents: int = 2, milvus_data: Dict[str, Any] = None) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         start_time = time.time()
 
@@ -1187,7 +1139,8 @@ class InfoProcessingExamAgent(BaseAgent):
                     self._generate_subject_quiz,
                     subject_area=subject_area,
                     target_count=target,
-                    difficulty=difficulty
+                    difficulty=difficulty,
+                    milvus_data=milvus_data
                 )] = subject_area
 
             per_subject_results = {}
@@ -1240,17 +1193,12 @@ class InfoProcessingExamAgent(BaseAgent):
         return full_exam_result
 
     def _generate_partial_exam(self, selected_subjects: List[str], questions_per_subject: int = 10, 
-                              difficulty: str = "중급", parallel_agents: int = 2) -> Dict[str, Any]:
+                              difficulty: str = "중급", parallel_agents: int = 2, milvus_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """선택된 과목들에 대해 지정된 문제 수만큼 생성"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         start_time = time.time()
 
-        # self._generate_workflow_diagram("partial_exam", {
-        #     "selected_subjects": selected_subjects,
-        #     "questions_per_subject": questions_per_subject,
-        #     "difficulty": difficulty,
-        #     "parallel_agents": parallel_agents
-        # })
+        # 워크플로우 다이어그램 생성 제거
 
         partial_exam_result = {
             "exam_title": f"정보처리기사 선택과목 모의고사 ({len(selected_subjects)}과목)",
@@ -1274,7 +1222,8 @@ class InfoProcessingExamAgent(BaseAgent):
                     self._generate_subject_quiz,
                     subject_area=subject_area,
                     target_count=questions_per_subject,
-                    difficulty=difficulty
+                    difficulty=difficulty,
+                    milvus_data=milvus_data
                 )] = subject_area
 
             per_subject_results = {}
@@ -1362,101 +1311,4 @@ class InfoProcessingExamAgent(BaseAgent):
             json.dump(exam_result, f, ensure_ascii=False, indent=2)
         return filename
 
-    def _generate_workflow_diagram(self, mode: str, params: Dict[str, Any]) -> None:
-        """Graphviz를 사용하여 문제 생성 워크플로우 다이어그램을 생성합니다."""
-        try:
-            from graphviz import Digraph
-            import time
-            
-            # 다이어그램 생성
-            dot = Digraph(comment=f'정보처리기사 문제 생성 워크플로우 - {mode}')
-            dot.attr(rankdir='TB', size='12,8')
-            
-            # 노드 스타일 정의
-            dot.attr('node', shape='box', style='rounded,filled', fontname='Arial', fontsize='10')
-            
-            # 시작 노드
-            dot.node('start', '사용자 입력', fillcolor='lightgreen')
-            
-            # 입력 파싱 노드들
-            dot.node('parse', 'LLM 기반\n입력 파싱', fillcolor='lightblue')
-            dot.node('validate', '파라미터 검증\n(과목/문제수/난이도)', fillcolor='lightyellow')
-            
-            # 모드별 분기
-            if mode == "partial_exam":
-                dot.node('mode', 'PARTIAL_EXAM\n(선택과목 모드)', fillcolor='orange')
-                dot.node('parallel', '병렬 처리\n(ThreadPoolExecutor)', fillcolor='lightcoral')
-                dot.node('merge', '결과 통합\n(과목별 결과 병합)', fillcolor='lightcoral')
-            elif mode == "single_subject":
-                dot.node('mode', 'SINGLE_SUBJECT\n(단일 과목 모드)', fillcolor='orange')
-                dot.node('single', '단일 에이전트\n(직렬 처리)', fillcolor='lightcoral')
-            else:
-                dot.node('mode', 'FULL_EXAM\n(전체 과목 모드)', fillcolor='orange')
-                dot.node('full_parallel', '전체 병렬\n(5과목 동시)', fillcolor='lightcoral')
-            
-            # 에이전트 실행
-            dot.node('agent', 'TestGenerator\n.execute()', fillcolor='lightpink')
-            dot.node('result', '결과 처리\n(모드별 결과 추출)', fillcolor='lightcyan')
-            
-            # 데이터 변환
-            dot.node('transform', '데이터 변환\n(QA 형식)', fillcolor='lightcyan')
-            dot.node('output', '출력\n(JSON/PDF)', fillcolor='lightgreen')
-            
-            # 엣지 연결
-            dot.edge('start', 'parse')
-            dot.edge('parse', 'validate')
-            dot.edge('validate', 'mode')
-            
-            if mode == "partial_exam":
-                dot.edge('mode', 'parallel')
-                dot.edge('parallel', 'agent')
-                dot.edge('agent', 'merge')
-                dot.edge('merge', 'result')
-            elif mode == "single_subject":
-                dot.edge('mode', 'single')
-                dot.edge('single', 'agent')
-                dot.edge('agent', 'result')
-            else:
-                dot.edge('mode', 'full_parallel')
-                dot.edge('full_parallel', 'agent')
-                dot.edge('agent', 'result')
-            
-            dot.edge('result', 'transform')
-            dot.edge('transform', 'output')
-            
-            # 서브그래프로 과목별 처리 구조 표시
-            if mode == "partial_exam":
-                with dot.subgraph(name='cluster_subjects') as c:
-                    c.attr(label='과목별 병렬 처리', style='filled', fillcolor='lightgray')
-                    subjects = params.get("selected_subjects", [])
-                    count_per_subject = params.get("questions_per_subject", 10)
-                    for i, subject in enumerate(subjects):
-                        c.node(f'subject_{i}', f'{subject}\n({count_per_subject}문제)')
-                        if i > 0:
-                            c.edge(f'subject_{i-1}', f'subject_{i}', style='dashed')
-            
-            # 파일 저장
-            # output_dir = os.path.join(os.path.dirname(__file__), "workflow_diagrams")
-            # os.makedirs(output_dir, exist_ok=True)
-            
-            # timestamp = time.strftime("%Y%m%d_%H%M%S")
-            # filename = f"generation_workflow_{mode}_{timestamp}"
-            # filepath = os.path.join(output_dir, filename)
-            
-            # dot.render(filepath, format='png', cleanup=True)
-            # print(f"\n 워크플로우 다이어그램 생성 완료: {filepath}.png")
-            
-            # 간단한 텍스트 요약도 출력
-            print(f"\n📊 워크플로우 요약:")
-            print(f"   ┌─ 모드: {mode.upper()}")
-            if mode == "partial_exam":
-                subjects = params.get("selected_subjects", [])
-                count_per_subject = params.get("questions_per_subject", 10)
-                print(f"   ├─ 선택된 과목: {', '.join(subjects)}")
-                print(f"   ├─ 과목당 문제 수: {count_per_subject}개")
-                print(f"   └─ 병렬 에이전트: {params.get('parallel_agents', 2)}개")
-            
-        except ImportError:
-            print("\n⚠️  Graphviz가 설치되지 않았습니다. pip install graphviz로 설치하세요.")
-        except Exception as e:
-            print(f"\n❌ 다이어그램 생성 실패: {e}")
+# 워크플로우 다이어그램 함수 제거 (사용하지 않음)

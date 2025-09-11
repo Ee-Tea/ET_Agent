@@ -149,6 +149,7 @@ services:
     - .env
     environment:
       PYTHONPATH: /app
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/auth/health', timeout=2).read(); print('ok')\""]
       interval: 10s
@@ -183,8 +184,7 @@ services:
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
       RUN_IN_CONTAINER: '1'
       REDIS_DEBUG: 'false'
-      DATABASE_URL: postgresql+psycopg://appuser:apppw@langgraph-postgres:5432/appdb
-      POSTGRES_URI: postgres://appuser:apppw@langgraph-postgres:5432/appdb
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
 
     volumes:
     - ./:/deps/LLM-T:rw

@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str
     GOOGLE_REDIRECT_URI: str
+    NAVER_CLIENT_ID: str | None = None
+    NAVER_CLIENT_SECRET: str | None = None
+    NAVER_REDIRECT_URI: str | None = None
     FRONTEND_BASE_URL: str
     
     # JWT Settings

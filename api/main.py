@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 import httpx
 from api.routers import chat, health, sessions
+import auth.auth_routes as auth_routes
 from api.services.hybrid_session_service import HybridSessionService
 # supervisor import는 런타임에 처리
 
@@ -265,6 +266,7 @@ from .routers import chat, health, sessions
 app.include_router(chat.router)
 app.include_router(health.router)
 app.include_router(sessions.router)
+app.include_router(auth_routes.router)
 
 # ========== Pydantic 모델 정의 ==========
 

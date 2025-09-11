@@ -10,9 +10,16 @@ from sqlalchemy import and_
 
 from .config import settings
 from .models.user import User, OAuthAccount
-from .schemas import GoogleUserInfo, Token, TokenData, AuthResponse
+from .schemas import GoogleUserInfo, NaverUserInfo, Token, TokenData, AuthResponse
 
 class GoogleOAuthError(Exception):
+    def __init__(self, message: str, status: int | None = None, payload: dict | None = None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload or {}
+
+
+class NaverOAuthError(Exception):
     def __init__(self, message: str, status: int | None = None, payload: dict | None = None):
         super().__init__(message)
         self.status = status
@@ -32,6 +39,19 @@ class AuthService:
     @property
     def google_redirect_uri(self) -> str:
         return settings.GOOGLE_REDIRECT_URI
+
+    # NAVER
+    @property
+    def naver_client_id(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_ID
+
+    @property
+    def naver_client_secret(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_SECRET
+
+    @property
+    def naver_redirect_uri(self) -> Optional[str]:
+        return settings.NAVER_REDIRECT_URI
 
     @property
     def secret_key(self) -> str:
@@ -248,6 +268,121 @@ class AuthService:
             is_new_user=is_new
         )
 
+
+class NaverOAuthService:
+    @property
+    def client_id(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_ID
+
+    @property
+    def client_secret(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_SECRET
+
+    @property
+    def redirect_uri(self) -> Optional[str]:
+        return settings.NAVER_REDIRECT_URI
+
+    async def exchange_token(self, code: str, state: Optional[str]) -> dict:
+        if not (self.client_id and self.client_secret and self.redirect_uri):
+            raise NaverOAuthError("Missing NAVER_* settings (client_id/secret/redirect_uri)")
+        token_url = "https://nid.naver.com/oauth2.0/token"
+        params = {
+            "grant_type": "authorization_code",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "code": code,
+            "state": state or "",
+            "redirect_uri": self.redirect_uri,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.post(token_url, params=params)
+            if res.status_code != 200:
+                try:
+                    payload = res.json()
+                except Exception:
+                    payload = {"raw": res.text}
+                raise NaverOAuthError("Naver token exchange failed", status=res.status_code, payload=payload)
+            return res.json()
+
+    async def fetch_userinfo(self, access_token: str) -> NaverUserInfo:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(
+                "https://openapi.naver.com/v1/nid/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if res.status_code != 200:
+                try:
+                    payload = res.json()
+                except Exception:
+                    payload = {"raw": res.text}
+                raise NaverOAuthError("Naver userinfo fetch failed", status=res.status_code, payload=payload)
+            ud = res.json() or {}
+            response = (ud or {}).get("response", {})
+            return NaverUserInfo(
+                id=str(response.get("id", "")),
+                email=response.get("email"),
+                name=response.get("name"),
+                nickname=response.get("nickname"),
+                profile_image=response.get("profile_image"),
+                mobile=response.get("mobile"),
+            )
+
+    def get_or_create_user(self, db: Session, naver_user: NaverUserInfo) -> tuple[User, bool]:
+        oauth = db.query(OAuthAccount).filter(
+            and_(OAuthAccount.provider == "naver", OAuthAccount.provider_account_id == naver_user.id)
+        ).first()
+        if oauth:
+            user = oauth.user
+            if naver_user.email:
+                user.email = naver_user.email
+            user.name = naver_user.name or naver_user.nickname or user.name
+            user.updated_at = datetime.utcnow()
+            db.commit(); db.refresh(user)
+            return user, False
+
+        email = naver_user.email
+        if email:
+            existing = db.query(User).filter(User.email == email).first()
+            if existing:
+                db.add(OAuthAccount(
+                    user_id=existing.id, provider="naver", provider_account_id=naver_user.id,
+                    access_token=None, refresh_token=None, expires_at=None, scope="profile"
+                ))
+                db.commit()
+                return existing, False
+
+        new_user = User(email=email, name=naver_user.name or naver_user.nickname or "", is_active=True)
+        db.add(new_user); db.flush()
+        db.add(OAuthAccount(
+            user_id=new_user.id, provider="naver", provider_account_id=naver_user.id,
+            access_token=None, refresh_token=None, expires_at=None, scope="profile"
+        ))
+        db.commit(); db.refresh(new_user)
+        return new_user, True
+
+    async def authenticate(self, db: Session, code: str, state: Optional[str]) -> AuthResponse:
+        token_json = await self.exchange_token(code, state)
+        access_token = token_json.get("access_token")
+        if not access_token:
+            raise NaverOAuthError("No access_token in Naver token response", payload=token_json)
+        userinfo = await self.fetch_userinfo(access_token)
+        user, is_new = self.get_or_create_user(db, userinfo)
+        jwt_token = auth_service.create_access_token(data={"sub": str(user.id)})
+        return AuthResponse(
+            user=user,
+            token=Token(access_token=jwt_token, token_type="bearer", expires_in=auth_service.access_token_expire_minutes * 60),
+            is_new_user=is_new,
+        )
+
+
 # 전역 인스턴스
 auth_service = AuthService()
-__all__ = ["AuthService", "auth_service", "GoogleOAuthError"]
+naver_oauth_service = NaverOAuthService()
+__all__ = [
+    "AuthService",
+    "auth_service",
+    "GoogleOAuthError",
+    "NaverOAuthError",
+    "NaverOAuthService",
+    "naver_oauth_service",
+]

@@ -71,6 +71,15 @@ class GoogleAuthRequest(BaseModel):
     code: str
     state: Optional[str] = None
 
+# Naver schemas
+class NaverUserInfo(BaseModel):
+    id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    nickname: Optional[str] = None
+    profile_image: Optional[str] = None
+    mobile: Optional[str] = None
+
 # Response schemas
 class AuthResponse(BaseModel):
     user: User

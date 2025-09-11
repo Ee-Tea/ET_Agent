@@ -5,9 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========[ 벡터스토어 / 임베딩 관련 Import (맨 위) ]=========
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
-from common.milvus_helpers import search_milvus_documents, create_context_from_documents
+from common.milvus_helpers import search_milvus_documents, search_milvus_documents_by_subject, create_context_from_documents
 
 # =========[ 표준/외부 라이브러리 ]=========
 import os
@@ -29,21 +27,17 @@ import math
 from dotenv import load_dotenv
 from tavily import TavilyClient
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
 from langchain.schema import Document
 
 # =========[ LangChain / LangGraph / LLM ]=========
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 load_dotenv()
 
 # =========[ 환경설정 ]=========
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
-MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
-MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "agri_disaster_docs")
 
 # OpenAI 설정
@@ -255,9 +249,6 @@ def _has_web_results(context_text: str) -> bool:
     c = (context_text or "")
     return "[웹 검색 결과]" in c
 
-# =========[ 전역 변수 ]=========
-_vectorstore = None
-
 # =========[ LangGraph 노드 ]=========
 def load_store_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: MilvusDB 연결 확인")
@@ -280,59 +271,84 @@ def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "question": q_raw, "temporal": temporal, "question_resolved": q_resolved}
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 검색 (MilvusDB 통합)")
+    print("🧩 노드: 검색 (MilvusDB 통합 + 메타데이터 필터링)")
     q = state.get("question_resolved", state.get("question", ""))
-    vectorstore = _vectorstore
+    milvus_data = state.get("milvus_data", {})
+    
+    # MilvusDB 연결 상태 확인
+    if not milvus_data.get("connection_status", False):
+        print("   - ⚠️ MilvusDB 연결 안됨 - 빈 컨텍스트로 진행")
+        return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
 
     region = extract_region_from_question(q)
-    # ✅ 질문에서 연도 추출
+    # ✅ 질문에서 연도 추출 (기존 기능 유지)
     year_match = re.search(r"(19|20)\d{2}", q)
     year = int(year_match.group()) if year_match else None
 
-    results_with_score = []
-
     try:
-        exprs = []
+        print("   - 🔍 MilvusDB에서 문서 검색 중...")
+        
+        # 검색 쿼리 구성 (지역명과 연도 정보 포함)
+        search_query = q
         if region:
-            exprs.append(f"json_contains(regions, '\"{region}\"')")
+            search_query = f"{q} {region}"
+            print(f"   - 지역명 '{region}'을(를) 검색 쿼리에 포함")
         if year:
-            exprs.append(f"json_contains(years, {year})")
-        expr = " and ".join(exprs) if exprs else None
-
-        if expr:
-            print(f"   - 필터 적용: {expr}")
-            results_with_score = vectorstore.similarity_search_with_score(q, k=30, expr=expr)
-            print(f"   - 필터링된 검색 결과: {len(results_with_score)}개")
-            if len(results_with_score) < 10:
-                print("   - 결과 부족 → 일반 검색 추가")
-                unfiltered = vectorstore.similarity_search_with_score(q, k=30)
-                existing_content = {doc.page_content for doc, _ in results_with_score}
-                for doc, score in unfiltered:
-                    if doc.page_content not in existing_content:
-                        results_with_score.append((doc, score))
-                        existing_content.add(doc.page_content)
+            search_query = f"{search_query} {year}년"
+            print(f"   - 연도 '{year}'을(를) 검색 쿼리에 포함")
+        
+        # MilvusDB에서 재해 관련 문서 검색
+        documents = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=COLLECTION_NAME,
+            query=search_query,
+            k=30
+        )
+        
+        # 필터링된 검색 결과가 부족한 경우 일반 검색 추가
+        if (region or year) and documents and len(documents) < 10:
+            print("   - 필터링된 검색 결과가 부족하여 일반 검색을 추가로 수행합니다.")
+            additional_docs = search_milvus_documents(
+                milvus_data=milvus_data,
+                collection_name=COLLECTION_NAME,
+                query=q,
+                k=20
+            )
+            
+            # 중복 제거하면서 추가
+            existing_content = {doc.page_content for doc in documents}
+            for doc in additional_docs:
+                if doc.page_content not in existing_content:
+                    documents.append(doc)
+                    existing_content.add(doc.page_content)
+        
+        if documents:
+            print(f"   - ✅ MilvusDB 검색 완료: {len(documents)}개 문서")
+            
+            # 검색 결과를 상세하게 포맷팅 (기존 형식 유지)
+            ctx_parts = []
+            for i, doc in enumerate(documents[:30], 1):
+                meta = getattr(doc, "metadata", {})
+                fname = meta.get("file_name") or meta.get("source") or f"문서{i}"
+                page = meta.get("page")
+                tag = meta.get("type") or "text"
+                years = meta.get("years", [])
+                
+                # 기존 형식과 유사하게 유사도 점수 표시 (MilvusDB에서는 직접 점수를 얻기 어려움)
+                header = f"[문서{i}][{tag}][{fname}{f' p.{page}' if page else ''}][years={years}]"
+                ctx_parts.append(f"{header}\n{doc.page_content}")
+            
+            context = "\n\n".join(ctx_parts)
+            print(f"   - 📄 상세 컨텍스트 생성: {len(context)}자")
+            
+            return {**state, "db_context": context, "retrieved_docs": documents}
         else:
-            print("   - 필터 조건 없음 → 일반 검색 수행")
-            results_with_score = vectorstore.similarity_search_with_score(q, k=30)
+            print("   - ⚠️ MilvusDB에서 관련 문서를 찾지 못함")
+            return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
+            
     except Exception as e:
-        print(f"   - ⚠️ 메타데이터 필터링 실패 → 일반 검색 사용: {e}")
-        results_with_score = vectorstore.similarity_search_with_score(q, k=30)
-
-    results_with_score.sort(key=lambda x: x[1])
-    docs = [doc for doc, score in results_with_score]
-
-    ctx_parts = []
-    for d, score in results_with_score[:30]:
-        meta = getattr(d, "metadata", {})
-        fname = meta.get("file_name") or meta.get("source") or "unknown"
-        page = meta.get("page")
-        tag = meta.get("type") or "text"
-        years = meta.get("years") or []
-        header = f"[유사도:{score:.4f}][{tag}][{fname}{f' p.{page}' if page else ''}][years={years}]"
-        ctx_parts.append(f"{header}\n{d.page_content}")
-
-    context = "\n\n".join(ctx_parts) or "관련 문서를 찾을 수 없습니다."
-    return {**state, "db_context": context, "retrieved_docs": docs}
+        print(f"   - ❌ MilvusDB 검색 실패: {e}")
+        return {**state, "db_context": f"검색 중 오류가 발생했습니다: {e}", "retrieved_docs": []}
 
 
 def combine_context_node(state: GraphState) -> Dict[str, Any]:
@@ -533,15 +549,24 @@ def run(state: dict) -> dict:
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
         print(f"[재해_agent_LLM] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
+        # MilvusDB 연결 상태 확인 및 로깅
+        if milvus_data.get("connection_status", False):
+            print(f"[재해_agent_LLM] MilvusDB 컬렉션: {COLLECTION_NAME}")
+        else:
+            print(f"[재해_agent_LLM] ⚠️ MilvusDB 연결 안됨 - 제한된 기능으로 진행")
+        
         # 그래프 빌드 및 실행
         app = build_graph()
         
-        # 그래프 실행
-        result = app.invoke({
+        # 그래프 실행을 위한 초기 상태 구성
+        initial_state = {
             "question": query,
             "milvus_data": milvus_data,
             "milvus_context": milvus_context
-        })
+        }
+        
+        # 그래프 실행
+        result = app.invoke(initial_state)
         
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")

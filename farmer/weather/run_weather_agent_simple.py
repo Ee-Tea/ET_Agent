@@ -501,13 +501,13 @@ def build_simple_graph():
 
     app = g.compile()
 
-    try:
-        graph_image_path = "agent_workflow_simple.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\n단순화된 LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_simple.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\n단순화된 LangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
 
     return app
 

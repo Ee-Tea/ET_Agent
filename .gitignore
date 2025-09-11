@@ -320,6 +320,8 @@ appendonlydir/
 
 pdf_outputs/
 pdf_outputs/**
+pdfs/
+pdfs/**
 
 # Node / pnpm leftovers (backend only)
 pnpm-lock.yaml

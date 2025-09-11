@@ -67,6 +67,8 @@ dependencies = [
     "chardet>=5.2.0",
     "tqdm>=4.67.1",
     "pandas>=2.3.2",
+    "rapidfuzz>=3.14.1",
+    "fitz>=0.0.1.dev2",
 ]
 
 [build-system]

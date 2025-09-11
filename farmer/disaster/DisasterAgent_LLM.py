@@ -5,9 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========[ 벡터스토어 / 임베딩 관련 Import (맨 위) ]=========
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
-from common.milvus_helpers import search_milvus_documents, create_context_from_documents
+from common.milvus_helpers import search_milvus_documents, search_milvus_documents_by_subject, create_context_from_documents
 
 # =========[ 표준/외부 라이브러리 ]=========
 import os
@@ -29,21 +27,17 @@ import math
 from dotenv import load_dotenv
 from tavily import TavilyClient
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
 from langchain.schema import Document
 
 # =========[ LangChain / LangGraph / LLM ]=========
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 load_dotenv()
 
 # =========[ 환경설정 ]=========
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
-MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
-MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "agri_disaster_docs")
 
 # OpenAI 설정
@@ -124,6 +118,10 @@ def make_llm() -> ChatOpenAI:
 DRAFT_PROMPT = ChatPromptTemplate.from_template(
     """너는 농작물 재해 정보 전문가야.
 아래 문맥을 참고하여 질문에 대한 초안 답변을 작성해줘.
+**문맥에 표(pdf_table)가 있으면 이를 중심으로 답변해줘.**
+**문맥에 없는 정보는 절대 넣지마.**
+**질문에서 요청한 연도와 문맥의 연도가 다르면 반드시 "해당 연도의 정보를 찾을 수 없습니다"라고 답변해줘.**
+
 답변은 딱딱한 보고서 형식이 아닌, 대화하듯이 친절하게 설명하는 스타일로 작성해야 해.
 
 **답변 형식 규칙:**
@@ -149,9 +147,11 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
 )
 
 WEB_SEARCH_PROMPT = ChatPromptTemplate.from_template(
-    """너는 농업재해 및 농업 정보 전문가야.
+    """너는 농업재해 및 작물 재해대응 정보 전문가야.
 아래에는 로컬 인덱스 문맥과 웹 검색 결과가 함께 있어.
 이 모든 정보를 활용하여 초안 답변을 작성해줘. 답변은 대화체로, 친절하게 설명하는 스타일로 작성해야 해.
+
+**중요**: 질문에서 요청한 연도와 문맥의 연도가 다르면 반드시 "해당 연도의 정보를 찾을 수 없습니다"라고 답변해줘.
 
 **답변 형식 규칙:**
 - 시작, 개요, 상세 내용, 출처, 마무리 규칙은 로컬 인덱스 초안과 동일하게 적용해.
@@ -249,9 +249,6 @@ def _has_web_results(context_text: str) -> bool:
     c = (context_text or "")
     return "[웹 검색 결과]" in c
 
-# =========[ 전역 변수 ]=========
-_vectorstore = None
-
 # =========[ LangGraph 노드 ]=========
 def load_store_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: MilvusDB 연결 확인")
@@ -274,44 +271,85 @@ def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "question": q_raw, "temporal": temporal, "question_resolved": q_resolved}
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 검색 (MilvusDB 통합)")
+    print("🧩 노드: 검색 (MilvusDB 통합 + 메타데이터 필터링)")
     q = state.get("question_resolved", state.get("question", ""))
     milvus_data = state.get("milvus_data", {})
-
-    # MilvusDB 연결 확인
+    
+    # MilvusDB 연결 상태 확인
     if not milvus_data.get("connection_status", False):
-        print("   - ⚠️ MilvusDB 연결 안됨 - 빈 컨텍스트 반환")
+        print("   - ⚠️ MilvusDB 연결 안됨 - 빈 컨텍스트로 진행")
         return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
 
+    region = extract_region_from_question(q)
+    # ✅ 질문에서 연도 추출 (기존 기능 유지)
+    year_match = re.search(r"(19|20)\d{2}", q)
+    year = int(year_match.group()) if year_match else None
+
     try:
+        print("   - 🔍 MilvusDB에서 문서 검색 중...")
+        
+        # 검색 쿼리 구성 (지역명과 연도 정보 포함)
+        search_query = q
+        if region:
+            search_query = f"{q} {region}"
+            print(f"   - 지역명 '{region}'을(를) 검색 쿼리에 포함")
+        if year:
+            search_query = f"{search_query} {year}년"
+            print(f"   - 연도 '{year}'을(를) 검색 쿼리에 포함")
+        
         # MilvusDB에서 재해 관련 문서 검색
         documents = search_milvus_documents(
             milvus_data=milvus_data,
             collection_name=COLLECTION_NAME,
-            query=q,
-            k=8
+            query=search_query,
+            k=30
         )
         
-        if not documents:
+        # 필터링된 검색 결과가 부족한 경우 일반 검색 추가
+        if (region or year) and documents and len(documents) < 10:
+            print("   - 필터링된 검색 결과가 부족하여 일반 검색을 추가로 수행합니다.")
+            additional_docs = search_milvus_documents(
+                milvus_data=milvus_data,
+                collection_name=COLLECTION_NAME,
+                query=q,
+                k=20
+            )
+            
+            # 중복 제거하면서 추가
+            existing_content = {doc.page_content for doc in documents}
+            for doc in additional_docs:
+                if doc.page_content not in existing_content:
+                    documents.append(doc)
+                    existing_content.add(doc.page_content)
+        
+        if documents:
+            print(f"   - ✅ MilvusDB 검색 완료: {len(documents)}개 문서")
+            
+            # 검색 결과를 상세하게 포맷팅 (기존 형식 유지)
+            ctx_parts = []
+            for i, doc in enumerate(documents[:30], 1):
+                meta = getattr(doc, "metadata", {})
+                fname = meta.get("file_name") or meta.get("source") or f"문서{i}"
+                page = meta.get("page")
+                tag = meta.get("type") or "text"
+                years = meta.get("years", [])
+                
+                # 기존 형식과 유사하게 유사도 점수 표시 (MilvusDB에서는 직접 점수를 얻기 어려움)
+                header = f"[문서{i}][{tag}][{fname}{f' p.{page}' if page else ''}][years={years}]"
+                ctx_parts.append(f"{header}\n{doc.page_content}")
+            
+            context = "\n\n".join(ctx_parts)
+            print(f"   - 📄 상세 컨텍스트 생성: {len(context)}자")
+            
+            return {**state, "db_context": context, "retrieved_docs": documents}
+        else:
             print("   - ⚠️ MilvusDB에서 관련 문서를 찾지 못함")
             return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
-        
-        # 기존 Milvus 컨텍스트가 있으면 추가
-        existing_milvus_context = state.get("milvus_context", "")
-        if existing_milvus_context:
-            # 기존 컨텍스트와 결합
-            context = f"{existing_milvus_context}\n\n[MilvusDB 검색 결과]\n{create_context_from_documents(documents, max_length=2000)}"
-            print("   - ✅ 기존 Milvus 컨텍스트와 결합")
-        else:
-            # 새로 생성
-            context = create_context_from_documents(documents, max_length=2000)
-        
-        print(f"   - ✅ MilvusDB 검색 완료: {len(documents)}개 문서")
-        return {**state, "db_context": context, "retrieved_docs": documents}
-        
+            
     except Exception as e:
         print(f"   - ❌ MilvusDB 검색 실패: {e}")
-        return {**state, "db_context": "관련 문서를 찾을 수 없습니다.", "retrieved_docs": []}
+        return {**state, "db_context": f"검색 중 오류가 발생했습니다: {e}", "retrieved_docs": []}
+
 
 def combine_context_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 컨텍스트 결합")
@@ -343,7 +381,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         return {**state, "web_context": f"[웹 검색 실패: {e}]"}
 
 def generate_draft_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 초안 생성")
+    print("🧩 노드: 최종 답변 생성")
     if not state.get("context"):
         raise ValueError("context 누락")
     t = state.get("temporal") or {}
@@ -364,33 +402,9 @@ def generate_draft_node(state: GraphState) -> Dict[str, Any]:
         "question_raw": state.get("question", ""),
         "question_resolved": state.get("question_resolved", state.get("question", "")),
     })
-    return {**state, "answer_draft": ans.strip()}
-
-def refine_answer_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 답변 개선 및 최종 생성")
-    if not state.get("answer_draft"):
-        raise ValueError("answer_draft 누락")
-    t = state.get("temporal") or {}
-    use_web_prompt = _has_web_results(state.get("context", ""))
-    prompt = WEB_SEARCH_REFINE_PROMPT if use_web_prompt else REFINE_PROMPT
-    chain = (
-        {
-            "context": itemgetter("context"),
-            "question_raw": lambda s: s.get("question", ""),
-            "question_resolved": lambda s: s.get("question_resolved", s.get("question", "")),
-            "answer_draft": itemgetter("answer_draft"),
-        }
-        | prompt.partial(today=t.get("today", ""))
-        | make_llm()
-        | StrOutputParser()
-    )
-    ans = chain.invoke({
-        "context": state.get("context", ""),
-        "question_raw": state.get("question", ""),
-        "question_resolved": state.get("question_resolved", state.get("question", "")),
-        "answer_draft": state["answer_draft"],
-    })
     return {**state, "answer": ans.strip()}
+
+# refine_answer_node 제거됨 - 초안 답변을 그대로 최종 답변으로 사용
 
 # ===== LLM 기반 검증 노드들 =====
 # (삭제됨) MAX_RETRIES
@@ -475,7 +489,7 @@ def build_graph():
     g.add_node("web_search", web_search_node)
     g.add_node("combine_context", combine_context_node)
     g.add_node("generate_draft", generate_draft_node)
-    g.add_node("refine_answer", refine_answer_node)
+    # refine_answer 노드 제거됨
     # 2차 검증/폴백 노드 제거
 
     g.set_entry_point("load_store")
@@ -491,9 +505,8 @@ def build_graph():
     )
     g.add_edge("web_search", "combine_context")
     g.add_edge("combine_context", "generate_draft")
-    g.add_edge("generate_draft", "refine_answer")
-    # 2차 검증 제거: 최종 답변 생성 후 바로 종료
-    g.add_edge("refine_answer", END)
+    # refine_answer 제거: generate_draft에서 바로 최종 답변 생성 후 종료
+    g.add_edge("generate_draft", END)
 
     # 2차 검증 흐름 제거에 따라 관련 분기 제거 (복구 가능)
     # 필요 시 추후 복구 가능
@@ -536,15 +549,24 @@ def run(state: dict) -> dict:
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
         print(f"[재해_agent_LLM] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
+        # MilvusDB 연결 상태 확인 및 로깅
+        if milvus_data.get("connection_status", False):
+            print(f"[재해_agent_LLM] MilvusDB 컬렉션: {COLLECTION_NAME}")
+        else:
+            print(f"[재해_agent_LLM] ⚠️ MilvusDB 연결 안됨 - 제한된 기능으로 진행")
+        
         # 그래프 빌드 및 실행
         app = build_graph()
         
-        # 그래프 실행
-        result = app.invoke({
+        # 그래프 실행을 위한 초기 상태 구성
+        initial_state = {
             "question": query,
             "milvus_data": milvus_data,
             "milvus_context": milvus_context
-        })
+        }
+        
+        # 그래프 실행
+        result = app.invoke(initial_state)
         
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")

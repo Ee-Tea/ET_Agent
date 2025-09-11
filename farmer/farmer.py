@@ -446,46 +446,6 @@ class Farmer:
                 "execution_order": ["작물추천_agent"]
             }
 
-    def select_single_crop_from_recommendations(self, crop_recommendations):
-        """
-        작물추천 결과에서 상세 분석할 작물 하나를 선택하는 함수
-        """
-        print("\n=== 작물 추출 과정 시작 ===")
-        
-        selection_prompt = f"""
-        다음은 작물추천 에이전트가 추천한 작물들입니다. 
-        사용자의 질문과 상황을 고려하여 상세 분석할 작물 하나를 선택해주세요.
-        
-        [추천 작물 목록]
-        {crop_recommendations}
-        
-        [요구사항]
-        - 작물명만 작성 (예: 무, 토마토, 고추, 오이)
-        - 설명이나 문장은 절대 포함하지 말 것
-        - 한 단어로 된 작물명만
-        - 작물을 찾을 수 없으면 "없음"이라고만 답변
-        - 작물 추천 결과에 있는 맨 처음 작물을 선택해줘
-        
-        상세 분석할 작물: """
-        
-        try:
-            print("[1단계] LLM에게 작물 추출 요청...")
-            selected_crop = self.llm.invoke(selection_prompt).content.strip() 
-
-            # "없음"이거나 빈 문자열인 경우 공백 반환
-            if selected_crop in ["없음", "", "None", "null"]:
-                print(f"[⚠️ 작물을 찾을 수 없음 - 공백 반환]")
-                return ""
-            
-            # 간단한 정리만 수행 (clean_crop_name 함수 사용 안함)
-            cleaned_crop = selected_crop.split('\n')[0].split('.')[0].split(',')[0].strip()
-            
-            print(f"[✅ 최종 추출된 작물] {cleaned_crop}")
-            return cleaned_crop
-            
-        except Exception as e:
-            print(f"[❌ LLM 호출 오류 - 공백 반환] {e}")
-            return ""
 
     @traceable(name="node_input")
     def node_input(self, state: RouterState) -> RouterState:
@@ -532,29 +492,60 @@ class Farmer:
         
         return state
     
-    def extract_crop_from_question(self, question: str) -> str:
-        """질문에서 작물명을 추출하는 LLM 함수"""
+    def extract_crop_from_question(self, question: str, crop_recommendations: str = None) -> str:
+        """
+        질문에서 작물명을 추출하거나 작물추천 결과에서 작물을 선택하는 통합 함수
+        
+        Args:
+            question: 사용자 질문
+            crop_recommendations: 작물추천 결과 (선택사항)
+        
+        Returns:
+            추출된 작물명
+        """
         print(f"🤖 LLM으로 작물명 추출 중...")
         
-        extraction_prompt = f"""
-        사용자의 질문에서 구체적인 작물명을 추출해주세요.
-        
-        [추출 규칙]
-        1. 구체적인 작물명만 추출 (예: 토마토, 상추, 무, 배추, 고구마, 감자 등)
-        2. 일반적인 용어는 제외 (예: 작물, 채소, 농작물, 식물 등)
-        3. 작물명이 없으면 "없음"만 답변
-        4. 작물명만 한 단어로 답변 (설명이나 문장 금지)
-        
-        [예시]
-        - "토마토 키우는 방법 알려줘" → "토마토"
-        - "알배기배추 가격이 궁금해" → "알배기배추"
-        - "감자랑 고구마 중에 뭐가 좋을까?" → "감자"
-        - "어떤 작물을 심을까요?" → "없음"
-        - "농작물 재배 방법" → "없음"
-        
-        질문: "{question}"
-        
-        추출된 작물명:"""
+        if crop_recommendations:
+            # 작물추천 결과에서 작물 선택
+            extraction_prompt = f"""
+            다음은 작물추천 에이전트가 추천한 작물들입니다. 
+            사용자의 질문과 상황을 고려하여 상세 분석할 작물 하나를 선택해주세요.
+            
+            [사용자 질문]
+            {question}
+            
+            [추천 작물 목록]
+            {crop_recommendations}
+            
+            [요구사항]
+            - 작물명만 작성 (예: 무, 토마토, 고추, 오이)
+            - 설명이나 문장은 절대 포함하지 말 것
+            - 한 단어로 된 작물명만
+            - 작물을 찾을 수 없으면 "없음"이라고만 답변
+            - 작물 추천 결과에 있는 맨 처음 작물을 선택해줘
+            
+            상세 분석할 작물: """
+        else:
+            # 질문에서 직접 작물명 추출
+            extraction_prompt = f"""
+            사용자의 질문에서 구체적인 작물명을 추출해주세요.
+            
+            [추출 규칙]
+            1. 구체적인 작물명만 추출 (예: 토마토, 상추, 무, 배추, 고구마, 감자 등)
+            2. 일반적인 용어는 제외 (예: 작물, 채소, 농작물, 식물 등)
+            3. 작물명이 없으면 "없음"만 답변
+            4. 작물명만 한 단어로 답변 (설명이나 문장 금지)
+            
+            [예시]
+            - "토마토 키우는 방법 알려줘" → "토마토"
+            - "알배기배추 가격이 궁금해" → "알배기배추"
+            - "감자랑 고구마 중에 뭐가 좋을까?" → "감자"
+            - "어떤 작물을 심을까요?" → "없음"
+            - "농작물 재배 방법" → "없음"
+            
+            질문: "{question}"
+            
+            추출된 작물명:"""
         
         try:
             result = self.llm.invoke(extraction_prompt)
@@ -637,7 +628,7 @@ class Farmer:
         print(f"\n[작물추천_agent 원본 응답]\n{answer}")
         
         # 작물추천 결과에서 하나의 작물 선택
-        selected_crop = self.select_single_crop_from_recommendations(answer)
+        selected_crop = self.extract_crop_from_question(user_input, answer)
         
         state["crop_info"] = [answer]
         # 기존 selected_crop을 완전히 클리어하고 새 값으로 대체

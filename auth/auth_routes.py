@@ -264,8 +264,34 @@ async def refresh_token(
 
 @router.post("/logout")
 async def logout():
-    """Logout user (client should discard token)"""
-    return {"message": "Successfully logged out"}
+    """Logout user: delete auth cookies for both with/without domain."""
+    from urllib.parse import urlparse
+    resp = JSONResponse({"message": "Logged out"})
+    frontend_host = None
+    try:
+        frontend_host = urlparse(settings.FRONTEND_BASE_URL).hostname or None
+    except Exception:
+        frontend_host = None
+
+    # delete with and without domain to cover how cookie was set
+    for dom in (None, frontend_host):
+        try:
+            resp.delete_cookie("access_token", path="/", domain=dom)
+        except Exception:
+            pass
+        try:
+            resp.delete_cookie("access_token_web", path="/", domain=dom)
+        except Exception:
+            pass
+        try:
+            resp.delete_cookie("kakao_oauth_state", path="/", domain=dom)
+        except Exception:
+            pass
+        try:
+            resp.delete_cookie("naver_oauth_state", path="/", domain=dom)
+        except Exception:
+            pass
+    return resp
 
 # Health check endpoint
 @router.get("/health")

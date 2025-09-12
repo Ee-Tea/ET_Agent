@@ -4,23 +4,40 @@ import pandas as pd
 import sys
 import asyncio
 import requests
+import random
 from datetime import datetime
 from dotenv import load_dotenv
 from tqdm import tqdm
-from ragas.testset import TestsetGenerator
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from ragas.testset.persona import Persona
-from ragas.testset.transforms.extractors.llm_based import NERExtractor
-from ragas.testset.transforms.splitters import HeadlineSplitter
-from ragas.testset.synthesizers.single_hop.specific import SingleHopSpecificQuerySynthesizer
 
 # OpenAI와 Hugging Face 모델을 임포트합니다.
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 from langchain.schema import Document
+
+def import_ragas_modules():
+    """RAGAS 관련 모듈들을 지연 로딩으로 import"""
+    try:
+        from ragas.testset import TestsetGenerator
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.embeddings import LangchainEmbeddingsWrapper
+        from ragas.testset.persona import Persona
+        from ragas.testset.transforms.extractors.llm_based import NERExtractor
+        from ragas.testset.transforms.splitters import HeadlineSplitter
+        from ragas.testset.synthesizers.single_hop.specific import SingleHopSpecificQuerySynthesizer
+        
+        return {
+            'TestsetGenerator': TestsetGenerator,
+            'LangchainLLMWrapper': LangchainLLMWrapper,
+            'LangchainEmbeddingsWrapper': LangchainEmbeddingsWrapper,
+            'Persona': Persona,
+            'NERExtractor': NERExtractor,
+            'HeadlineSplitter': HeadlineSplitter,
+            'SingleHopSpecificQuerySynthesizer': SingleHopSpecificQuerySynthesizer
+        }
+    except ImportError as e:
+        print(f"❌ RAGAS 모듈 import 실패: {e}")
+        raise
 
 # .env 파일에서 환경 변수를 로드합니다.
 load_dotenv()
@@ -147,7 +164,11 @@ async def main():
                 
                 print(f"CSV에서 전체 {len(df)}개 데이터 사용")
                 
-                for index, row in df.iterrows():
+                # 데이터를 랜덤으로 섞기
+                df_shuffled = df.sample(frac=1, random_state=42).reset_index(drop=True)
+                print(f"📊 CSV 데이터를 랜덤으로 섞었습니다.")
+                
+                for index, row in df_shuffled.iterrows():
                     store_name = str(row['판매장 이름']).replace('(', '').replace(')', '').replace(',', ' ').strip()
                     address = str(row['주소']).replace('(', '').replace(')', '').replace(',', ' ').strip()
                     
@@ -178,6 +199,10 @@ async def main():
             api_docs = fetch_api_data()
             print(f"API에서 {len(api_docs)}개의 농산물 가격 정보를 가져왔습니다.")
             
+            # API 데이터를 랜덤으로 섞기
+            random.shuffle(api_docs)
+            print(f"📊 API 데이터를 랜덤으로 섞었습니다.")
+            
             for i, doc_text in enumerate(api_docs):
                 content = doc_text
                 documents.append(Document(
@@ -202,10 +227,15 @@ async def main():
     print(f"\n총 {len(documents)}개의 문서를 로드했습니다.")
     print("---")
 
+    # RAGAS 모듈들 import
+    print("📦 RAGAS 모듈들 로딩 중...")
+    ragas_modules = import_ragas_modules()
+    print("✅ RAGAS 모듈들 로딩 완료")
+    
     # 2. Initialize required models (공식 문서 구조)
     print("Initialize required models...")
-    generator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini"))
-    generator_embeddings = LangchainEmbeddingsWrapper(
+    generator_llm = ragas_modules['LangchainLLMWrapper'](ChatOpenAI(model="gpt-4o-mini", temperature=0.7))
+    generator_embeddings = ragas_modules['LangchainEmbeddingsWrapper'](
         HuggingFaceEmbeddings(model_name="jhgan/ko-sroberta-multitask", model_kwargs={'device': 'cpu'})
     )
 
@@ -215,25 +245,25 @@ async def main():
     if choice == '1':
         # CSV (판매처) 전용 페르소나
         personas = [
-            Persona(
+            ragas_modules['Persona'](
                 name="Sales Channel Farmer",
-                role_description="농사를 시작한지 얼마되지 않은 농가 주인으로, 자신이 키운 농작물을 팔 수 있는 판매처를 찾고 있습니다. 영어를 못하고 한국어만을 사용합니다."
+                role_description="I am a new farmer looking for places to sell the crops I've grown. I can't speak English and only use Korean."
             )
         ]
     else:
         # API (가격) 전용 페르소나
         personas = [
-            Persona(
+            ragas_modules['Persona'](
                 name="Price Research Farmer",
-                role_description="농사를 시작한지 얼마되지 않은 농가 주인으로, 자신이 키운 농작물의 현재 시세와 가격 동향을 알고 싶어합니다. 영어를 못하고 한국어만을 사용합니다."
+                role_description="I am a new farmer and would like to know the current market price and price trends for the crops I've grown. I can't speak English and only use Korean."
             )
         ]
 
-    transforms = [HeadlineSplitter(), NERExtractor()]
+    transforms = [ragas_modules['HeadlineSplitter'](), ragas_modules['NERExtractor']()]
 
     # 4. Initialize test generator (공식 문서 구조)
     print("Initialize test generator...")
-    generator = TestsetGenerator(
+    generator = ragas_modules['TestsetGenerator'](
         llm=generator_llm, 
         embedding_model=generator_embeddings, 
         persona_list=personas
@@ -242,7 +272,7 @@ async def main():
     # 5. Load and Adapt Queries (공식 문서 구조)
     print("Load and Adapt Queries...")
     distribution = [
-        (SingleHopSpecificQuerySynthesizer(llm=generator_llm), 1.0),
+        (ragas_modules['SingleHopSpecificQuerySynthesizer'](llm=generator_llm), 1.0),
     ]
 
     for query, _ in distribution:

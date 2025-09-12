@@ -7,7 +7,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 import os
 import sys
 import json
-import time
 from datetime import datetime
 
 # 서드파티 라이브러리
@@ -15,32 +14,38 @@ import pandas as pd
 from dotenv import load_dotenv
 
 # LangChain 관련
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
 
+# RAGAS 관련 모듈들을 지연 로딩으로 import
+def import_ragas_modules():
+    """RAGAS 관련 모듈들을 지연 로딩으로 import"""
+    try:
+        from ragas import evaluate, SingleTurnSample
+        from ragas.metrics import (
+            ResponseRelevancy,
+            LLMContextPrecisionWithReference,
+            Faithfulness,
+            LLMContextRecall
+        )
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.embeddings import LangchainEmbeddingsWrapper
+        
+        return {
+            'evaluate': evaluate,
+            'SingleTurnSample': SingleTurnSample,
+            'ResponseRelevancy': ResponseRelevancy,
+            'LLMContextPrecisionWithReference': LLMContextPrecisionWithReference,
+            'Faithfulness': Faithfulness,
+            'LLMContextRecall': LLMContextRecall,
+            'LangchainLLMWrapper': LangchainLLMWrapper,
+            'LangchainEmbeddingsWrapper': LangchainEmbeddingsWrapper
+        }
+    except ImportError as e:
+        print(f"❌ RAGAS 모듈 import 실패: {e}")
+        raise
 
-# RAGAS 관련
-def evaluate_with_ragas(dataset, metrics):
-    # 사용 직전에만 ragas import (지연 import)
-    from ragas import evaluate
-    return evaluate(dataset, metrics=metrics)
-
-def get_ragas_metrics():
-    # metrics도 내부에서 import
-    from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall  # 필요한 것만
-    return faithfulness, answer_relevancy, context_precision, context_recall
-
-from ragas import evaluate, SingleTurnSample
-from ragas.metrics import (
-    ResponseRelevancy,
-    LLMContextPrecisionWithoutReference,
-    Faithfulness,
-    LLMContextRecall
-)
-
-
-# RAGAS 래퍼 & 데이터 스키마
+# RAGAS 래퍼 & 데이터 스키마 (기존 함수 유지)
 def get_ragas_wrappers():
     from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
     from ragas.embeddings import LangchainEmbeddingsWrapper as RagasEmbWrapper
@@ -49,9 +54,10 @@ def get_ragas_wrappers():
 # HuggingFace 관련
 from datasets import Dataset
 
-
-# 환경 변수 로드
-load_dotenv()
+# 환경 변수 로드 - 프로젝트 루트의 .env 파일 로드
+project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+env_path = os.path.join(project_root, '.env')
+load_dotenv(env_path)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # 경로 설정
@@ -60,7 +66,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '
 from SalesAgent import run
 from common.milvus_manager import MilvusDBManager
 
-def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
+def __init__(self, csv_path="./farmer/sales/data/price_golden_dataset_20250912_160841.csv"):
     """SalesAgent RAGAS 평가기 초기화"""
     print(f"🔧 SalesRAGAS 평가기 초기화 시작...")
     print(f"📁 CSV 파일 경로: {csv_path}")
@@ -103,12 +109,12 @@ def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
 
 def _setup_models(self):
     """공식 문서에 따른 모델 설정"""
-    print("🔧 RAGAS 래퍼 가져오는 중...")
+    print("📦 RAGAS 모듈들 로딩 중...")
     try:
-        LangchainLLMWrapper, LangchainEmbeddingsWrapper = get_ragas_wrappers()
-        print("✅ RAGAS 래퍼 가져오기 완료")
+        self.ragas_modules = import_ragas_modules()
+        print("✅ RAGAS 모듈들 로딩 완료")
     except Exception as e:
-        print(f"❌ RAGAS 래퍼 가져오기 실패: {e}")
+        print(f"❌ RAGAS 모듈 로딩 실패: {e}")
         raise
 
     try:
@@ -116,20 +122,20 @@ def _setup_models(self):
         print("🤖 OpenAI LLM 설정 중...")
         self.llm = ChatOpenAI(
             model_name="gpt-4o-mini", 
-            temperature=0.1,  # 매우 일관된 질문 생성
+            temperature=0.1,
             api_key=OPENAI_API_KEY
         )
         print("✅ OpenAI LLM 설정 완료")
         
         print("🔧 LLM 래퍼 설정 중...")
-        self.evaluator_llm = LangchainLLMWrapper(self.llm)
+        self.evaluator_llm = self.ragas_modules['LangchainLLMWrapper'](self.llm)
         print("✅ LLM 래퍼 설정 완료")
         
         # 임베딩 모델 설정
         print("🔤 임베딩 모델 설정 중...")
-        self.embeddings = LangchainEmbeddingsWrapper(
+        self.embeddings = self.ragas_modules['LangchainEmbeddingsWrapper'](
             HuggingFaceEmbeddings(
-                model_name="BAAI/bge-m3",
+                model_name="jhgan/ko-sroberta-multitask",
                 model_kwargs={'device': 'cpu'}  # GPU가 있으면 'cuda'로 변경
             )
         )
@@ -289,7 +295,7 @@ def _format_context(self, context):
             
             # 유효한 가격 정보가 있는 경우만 추가
             if valid_prices:
-                formatted_parts.append(f"시세 정보: {' | '.join(valid_prices)}")
+                formatted_parts.append(' | '.join(valid_prices))
     
     # 판매처 정보를 더 상세하게 포맷팅
     if '판매처' in context:
@@ -305,13 +311,13 @@ def _format_context(self, context):
             
             # 유효한 판매처 정보가 있는 경우만 추가
             if valid_vendors:
-                formatted_parts.append(f"판매처 정보: {' | '.join(valid_vendors)}")
+                formatted_parts.append(' | '.join(valid_vendors))
     
     # 웹검색 결과를 더 상세하게 포맷팅
     if '웹검색' in context:
         web_results = context['웹검색']
         if web_results:
-            formatted_parts.append(f"웹 검색 결과: {' | '.join(map(str, web_results))}")
+            formatted_parts.append(' | '.join(map(str, web_results)))
     
     # 추가 정보가 없으면 빈 문자열 반환
     if not formatted_parts:
@@ -319,7 +325,7 @@ def _format_context(self, context):
     
     # 컨텍스트를 더 명확하게 구조화 (RAGAS 점수 향상)
     if formatted_parts:
-        return "농작물 시세 및 판매처 정보:\n" + "\n".join(formatted_parts)
+        return "\n".join(formatted_parts)
     else:
         return ""
 
@@ -377,14 +383,15 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
                     print("   - ⚠️ Context Precision 건너뜀: 컨텍스트 없음")
                     return ("context_precision", 0.0)
                 
-                context_precision_scorer = LLMContextPrecisionWithoutReference(llm=self.evaluator_llm)
+                context_precision_scorer = self.ragas_modules['LLMContextPrecisionWithReference'](llm=self.evaluator_llm)
                 
                 # 컨텍스트가 비어있거나 None인 경우 처리
                 contexts = [context] if context and context.strip() else [""]
                 
-                context_sample = SingleTurnSample(
+                context_sample = self.ragas_modules['SingleTurnSample'](
                     user_input=question,
                     response=answer,
+                    reference=reference,
                     retrieved_contexts=contexts
                 )
                 score = context_precision_scorer.single_turn_score(context_sample)
@@ -397,14 +404,15 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
         def evaluate_faithfulness():
             try:
                 print("🔍 Faithfulness 평가 중...")
-                faithfulness_scorer = Faithfulness(llm=self.evaluator_llm)
+                faithfulness_scorer = self.ragas_modules['Faithfulness'](llm=self.evaluator_llm)
                 
                 # 컨텍스트가 비어있거나 None인 경우 처리
                 contexts = [context] if context and context.strip() else [""]
                 
-                faithfulness_sample = SingleTurnSample(
+                faithfulness_sample = self.ragas_modules['SingleTurnSample'](
                     user_input=question,
                     response=answer,
+                    reference=reference,
                     retrieved_contexts=contexts
                 )
                 score = faithfulness_scorer.single_turn_score(faithfulness_sample)
@@ -419,17 +427,17 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
         def evaluate_answer_relevancy():
             try:
                 print("🔍 Answer Relevancy 평가 중...")
-                # ResponseRelevancy는 user_input과 response만으로 평가 가능 (retrieved_contexts 불필요)
-                response_relevancy_scorer = ResponseRelevancy(
+                response_relevancy_scorer = self.ragas_modules['ResponseRelevancy'](
                     llm=self.evaluator_llm, 
                     embeddings=self.embeddings
                 )
                 
-                # ResponseRelevancy는 retrieved_contexts 없이도 평가 가능
-                sample = SingleTurnSample(
+                # ResponseRelevancy
+                contexts = [context] if context and context.strip() else [""]
+                sample = self.ragas_modules['SingleTurnSample'](
                     user_input=question,
                     response=answer,
-                    retrieved_contexts=[]  # 빈 리스트로 설정
+                    retrieved_contexts=contexts
                 )
                 score = response_relevancy_scorer.single_turn_score(sample)
                 print(f"✅ Answer Relevancy: {float(score) if score is not None else 0.0:.3f}")
@@ -446,12 +454,12 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
                     print("   - ⚠️ Context Recall 건너뜀: 컨텍스트 없음")
                     return ("context_recall", 0.0)
                 
-                context_recall_scorer = LLMContextRecall(llm=self.evaluator_llm)
+                context_recall_scorer = self.ragas_modules['LLMContextRecall'](llm=self.evaluator_llm)
                 
                 # 컨텍스트가 비어있거나 None인 경우 처리
                 contexts = [context] if context and context.strip() else [""]
                 
-                recall_sample = SingleTurnSample(
+                recall_sample = self.ragas_modules['SingleTurnSample'](
                     user_input=question,
                     response=answer,
                     reference=reference,
@@ -554,13 +562,13 @@ def run_ragas_evaluation(self):
     
     # RAGAS 메트릭 실행
     try:
-        results = evaluate(
+        results = self.ragas_modules['evaluate'](
             dataset,
             metrics=[
-                ResponseRelevancy(llm=self.evaluator_llm, embeddings=self.embeddings),
-                LLMContextPrecisionWithoutReference(llm=self.evaluator_llm),  # LLM 기반 Context Precision
-                Faithfulness(llm=self.evaluator_llm),  # SingleTurnSample 방식
-                LLMContextRecall(llm=self.evaluator_llm)  # Context Recall 추가
+                self.ragas_modules['ResponseRelevancy'](llm=self.evaluator_llm, embeddings=self.embeddings),
+                self.ragas_modules['LLMContextPrecisionWithReference'](llm=self.evaluator_llm),  # LLM 기반 Context Precision
+                self.ragas_modules['Faithfulness'](llm=self.evaluator_llm),  # SingleTurnSample 방식
+                self.ragas_modules['LLMContextRecall'](llm=self.evaluator_llm)  # Context Recall 추가
             ],
             llm=self.evaluator_llm
         )

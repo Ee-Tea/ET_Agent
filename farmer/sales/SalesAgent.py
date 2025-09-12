@@ -1,9 +1,8 @@
 # 설정
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, list_collections, utility
+from pymilvus import connections, Collection, utility
 import requests
 from dotenv import load_dotenv
 import os
-import threading
 import pandas as pd
 try:
     from kiwipiepy import Kiwi
@@ -18,7 +17,6 @@ except ImportError:
         USE_KIWI = None
 import re
 from langchain_openai import ChatOpenAI
-from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, TypedDict
 from tavily import TavilyClient
@@ -26,7 +24,7 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from common.milvus_helpers import search_milvus_documents, create_context_from_documents
+from common.milvus_helpers import search_milvus_documents
 
 # 임베딩 모델
 embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
@@ -35,7 +33,6 @@ embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
 load_dotenv()
 api_key = os.getenv("KAMIS_API_KEY")
 api_id = os.getenv("KAMIS_ID")
-openai_api_key = os.getenv("OPENAI_KEY1")
 milvus_host = os.getenv("MILVUS_HOST", "localhost")
 milvus_port = os.getenv("MILVUS_PORT", "19530")
 collection_name = "market_price_docs"
@@ -185,15 +182,6 @@ def node_collect_info_graph(state: GraphState) -> GraphState:
         results["판매처"] = execute_milvus_search(query, milvus_data)
 
     state["context"] = results
-    
-    # 사용된 도구 정보 기록
-    tools_used = []
-    if results.get("실시간시세"):
-        tools_used.append("시세 API")
-    if results.get("판매처"):
-        tools_used.append("판매처 정보")
-    if results.get("웹검색"):
-        tools_used.append("웹 검색")
     
     print(f"✅ 정보 수집 완료.")
     
@@ -355,17 +343,6 @@ def execute_milvus_search(query: str, milvus_data: Dict[str, Any] = None) -> lis
         print(f"❌ Milvus 검색 오류: {e}")
         return ["판매점 정보를 가져오는 중 오류가 발생했습니다."]
 
-# CSV 파일 임베딩 및 Milvus에 저장 함수
-def embed_and_store_csv(csv_path="sales/info_20240812.csv"):
-    df = pd.read_csv(csv_path, encoding="euc-kr")
-    df['품목'] = df['품목'].fillna("정보 없음")
-    docs = []
-    for _, row in df.iterrows():
-        doc = f"{row['판매장 이름']} ({row['주소']} / 주요 품목: {row['품목']})"
-        docs.append(doc)
-    if docs:
-        embeddings = embedder.encode(docs)
-        collection.insert([embeddings.tolist(), docs], fields=["embedding", "text"])
 
 # Milvus에서 문서 검색 함수
 def search_market_docs(query, local_collection, top_k=3):
@@ -378,7 +355,7 @@ def search_market_docs(query, local_collection, top_k=3):
 
         # 미리 정의된 지역명 리스트와 명사 키워드를 비교하여 지역명만 추출
         predefined_locations = ['인천','함평','서산','대전', '춘천','광주', '경산', '강동구', '태안', '성주', '창원', '용인', '울주', '순천', '경주', '양평', '울산', '영암', '김제', '고창', '전주', '하동', '제천', '홍성', '화성', '의왕', '담양', '진주', '사천', '남양주', '여수', '유성구', '정읍', '홍천', '남원', '동구', '달서구', '남해', '영동', '서구', '계룡', '고성', '고양', '평택', '남구', '울진', '나주', '전라북도', '익산', '부여', '청도', '합천', '포항', '봉화', '문경', '김해', '함양', '북구', '철원', '화순', '상주', '경북도', '안산', '청양', '충주', '김천', '영광', '성남', '전라남도', '달성', '인제', '천안', '제주', '원주', '가평', '완주', '제천시', '성주군', '고성군', '진천', '거창', '청주', '김포', '화성시', '완도', '함안', '옥천', '김해시', '해남', '무안', '예산', '금산', '강서구', '상당구', '송파구', '공도읍', '곡성', '울릉군', '서귀포', '정선', '평창', '양주', '포천', '진안', '세종']
-        locations = [kw for kw in query_nouns if kw in predefined_locations or any(suffix in kw for suffix in ['시', '군', '구', '도'])]
+        locations = [kw for kw in query_nouns if kw in predefined_locations or any(suffix in kw for suffix in ['시', '군', '구', '도', '읍', '면', '리', '로', '길'])]
 
         # 1. 지역 키워드 임베딩 검색
         if locations:

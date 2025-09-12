@@ -4,6 +4,7 @@ import pandas as pd
 import sys
 import asyncio
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 from tqdm import tqdm
 from ragas.testset import TestsetGenerator
@@ -165,7 +166,9 @@ async def main():
             print("CSV 파일을 찾을 수 없습니다.")
             return
         
-        dataset_filename = "./farmer/sales/data/sales_golden_dataset.csv"
+        # 타임스탬프가 포함된 파일명 생성
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dataset_filename = f"./farmer/sales/data/sales_golden_dataset_{timestamp}.csv"
         
     elif choice == '2':
         # API 문서만 사용
@@ -186,7 +189,9 @@ async def main():
             print(f"API 데이터 처리 중 오류: {e}")
             return
         
-        dataset_filename = "./farmer/sales/data/price_golden_dataset.csv"
+        # 타임스탬프가 포함된 파일명 생성
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dataset_filename = f"./farmer/sales/data/price_golden_dataset_{timestamp}.csv"
     
     print(f"총 {len(documents)}개의 문서를 생성했습니다.")
             

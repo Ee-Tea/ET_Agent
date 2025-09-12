@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 import httpx
 from api.routers import chat, health, sessions
+import auth.auth_routes as auth_routes
 from api.services.hybrid_session_service import HybridSessionService
 # supervisor import는 런타임에 처리
 
@@ -251,10 +252,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS 미들웨어 설정
+# CORS 미들웨어 설정 (credentials 사용 시 * 금지 → 환경변수 기반 화이트리스트)
+def _parse_allowed_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "")
+    if not raw:
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://172.29.208.1:3000",
+            "http://localhost",
+        ]
+    try:
+        import json
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [str(v) for v in val]
+    except Exception:
+        pass
+    # comma-separated
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
+    allow_origins=_parse_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -265,6 +285,7 @@ from .routers import chat, health, sessions
 app.include_router(chat.router)
 app.include_router(health.router)
 app.include_router(sessions.router)
+app.include_router(auth_routes.router)
 
 # ========== Pydantic 모델 정의 ==========
 
@@ -365,7 +386,7 @@ async def chat(request: ChatRequest):
         try:
             # 동적 import로 순환 의존 회피
             from supervisor import MainOrchestrator
-            local_orchestrator = MainOrchestrator(request.user_id, request.chat_id)
+            local_orchestrator = MainOrchestrator(request.user_id, request.chat_id, hybrid_session_service)
             response_text = local_orchestrator.process_query(request.message)
         except ImportError as e:
             raise HTTPException(status_code=500, detail=f"MainOrchestrator import failed: {e}")

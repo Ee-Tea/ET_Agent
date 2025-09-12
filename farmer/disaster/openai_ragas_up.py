@@ -14,7 +14,7 @@ import pandas as pd
 from glob import glob
 from tqdm import tqdm
 from dotenv import load_dotenv
-import asyncio
+from datetime import datetime
 
 import fitz  # PyMuPDF
 import easyocr
@@ -44,8 +44,8 @@ PDF_DIR = "./farmer/disaster/pdfs"
 SINGLE_PDF_PATH = "./farmer/disaster/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
 IMAGE_DIR = ""
 TARGET_QUESTIONS = 50   # 🔥 생성할 질문 수
-CHUNK_SIZE = 900
-CHUNK_OVERLAP = 150
+CHUNK_SIZE = 2000      # 더 긴 context로 변경
+CHUNK_OVERLAP = 300    # overlap도 비례적으로 증가
 
 # ===================== 전처리 (OCR + 표 파싱) =====================
 ocr_reader = None
@@ -64,7 +64,10 @@ def clean_text(text: str) -> str:
 
 def make_splitter() -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len
+        chunk_size=CHUNK_SIZE, 
+        chunk_overlap=CHUNK_OVERLAP, 
+        length_function=len,
+        separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]  # 더 자연스러운 분할
     )
 
 def process_single_pdf(file_path: str) -> list[Document]:
@@ -85,13 +88,14 @@ def process_single_pdf(file_path: str) -> list[Document]:
                 print(f"OCR 실패: {file_path} p.{page_num} - {e}")
 
             cleaned = clean_text(text)
-            if cleaned:
+            if cleaned and len(cleaned) > 100:  # 최소 100자 이상만 처리
                 splitter = make_splitter()
                 for chunk in splitter.split_text(cleaned):
-                    docs.append(Document(
-                        page_content=chunk,
-                        metadata={"file_name": os.path.basename(file_path), "page": page_num, "type": "pdf_text"}
-                    ))
+                    if len(chunk) > 200:  # 최소 200자 이상 chunk만 사용
+                        docs.append(Document(
+                            page_content=chunk,
+                            metadata={"file_name": os.path.basename(file_path), "page": page_num, "type": "pdf_text"}
+                        ))
 
         # --- 표 파싱 항상 실행 ---
         with pdfplumber.open(file_path) as pdf:
@@ -103,14 +107,14 @@ def process_single_pdf(file_path: str) -> list[Document]:
                             ["\t".join([(cell or "") for cell in row]) for row in table if row]
                         )
                         cleaned = clean_text(table_str)
-                        if not cleaned:
-                            continue
-                        splitter = make_splitter()
-                        for chunk in splitter.split_text(cleaned):
-                            docs.append(Document(
-                                page_content=chunk,
-                                metadata={"file_name": os.path.basename(file_path), "page": page_num, "type": "pdf_table"}
-                            ))
+                        if cleaned and len(cleaned) > 100:  # 최소 100자 이상만 처리
+                            splitter = make_splitter()
+                            for chunk in splitter.split_text(cleaned):
+                                if len(chunk) > 200:  # 최소 200자 이상 chunk만 사용
+                                    docs.append(Document(
+                                        page_content=chunk,
+                                        metadata={"file_name": os.path.basename(file_path), "page": page_num, "type": "pdf_table"}
+                                    ))
                 except Exception as e:
                     print(f"표 파싱 실패: {file_path} p.{page_num} - {e}")
 
@@ -139,8 +143,35 @@ def process_single_image(file_path: str) -> list[Document]:
 def load_documents(pdf_dir: str, image_dir: str = "") -> list[Document]:
     all_docs = []
     pdf_paths = sorted(glob(os.path.join(pdf_dir, "*.pdf")))
+    
+    # 연도별 가중치 설정
+    year_weights = {
+        "2020": 3.0,  # 2020년 문서는 3배 가중치
+        "2022": 2.5,  # 2022년 문서는 2.5배 가중치
+        "2023": 2.0,  # 2023년 문서는 2배 가중치
+        "2024": 2.0,  # 2024년 문서는 2배 가중치
+        "2021": 1.0,  # 2021년 문서는 기본 가중치
+    }
+    
     for path in tqdm(pdf_paths, desc="PDF 처리"):
-        all_docs.extend(process_single_pdf(path))
+        docs = process_single_pdf(path)
+        
+        # 파일명에서 연도 추출하여 가중치 적용
+        filename = os.path.basename(path)
+        weight = 1.0
+        for year, w in year_weights.items():
+            if year in filename:
+                weight = w
+                break
+        
+        # 가중치만큼 문서 복제
+        for _ in range(int(weight)):
+            all_docs.extend(docs)
+        
+        # 소수점 가중치 처리 (예: 2.5배면 50% 확률로 한 번 더 추가)
+        if weight > int(weight) and (weight - int(weight)) > 0.5:
+            all_docs.extend(docs)
+    
     if image_dir:
         img_paths = []
         for ext in ("*.png", "*.jpg", "*.jpeg"):
@@ -157,14 +188,18 @@ def get_personas(mode: str) -> list[Persona]:
         # 여러 PDF용 페르소나 (종합적 관점)
         return [
             Persona(
-                name="ComprehensiveFarmer",
+                name="DiverseFarmer",
                 role_description=(
                     "나는 한국의 농업에 종사하는 농부다. "
-                    "특히 기후 변화와 자연재해(태풍, 폭우, 가뭄, 한파, 폭염 등)로 인한 작물 피해에 큰 관심이 있다. "
-                    "과거의 재해 사례, 정부와 지자체의 대응 매뉴얼, 농촌진흥청 자료 등을 참고하여 알려줘라"
-                    "또한, 내가 농사를 짓는 지역(강원도, 전라도 등)에 맞는 특화된 피해 사례를 찾고 싶어 한다. "
+                    "기후 변화와 자연재해(태풍, 폭우, 가뭄, 한파, 폭염 등)로 인한 작물 피해에 큰 관심이 있다. "
+                    "⚠️ 중요: 2021년에만 집중하지 말고, 2020년, 2022년, 2023년, 2024년 등 다양한 연도의 사례를 균형있게 다뤄줘. "
+                    "2021년 이상기후 보고서보다는 다른 연도의 자료를 우선적으로 참고해줘. "
+                    "또한, 다양한 지역(서울, 부산, 대구, 광주, 대전, 울산, 세종, 경기, 강원, 충북, 충남, 전북, 전남, 경북, 경남, 제주)과 "
+                    "다양한 작물(벼, 밀, 옥수수, 콩, 고구마, 감자, 사과, 배, 복숭아, 포도, 딸기, 토마토, 고추, 배추, 무 등)에 대한 "
+                    "특화된 피해 사례를 찾고 싶어 한다. "
                     "가능하다면, 표에 정리된 피해 통계나 과거 사례 데이터를 근거로 설명해주길 기대한다. "
-                    "특정 문서 한두 개에만 집중하지 말고, 가능한 다양한 문서를 근거로 질문-정답을 구성해라."
+                    "특정 문서 한두 개에만 집중하지 말고, 가능한 다양한 문서와 연도를 근거로 질문-정답을 구성해라."
+                    "이게 무슨 문서인지에 대한 질문은 만들지 말고 문서 내용에 대한 질문만 만들어줘"
                 )
             )
         ]
@@ -181,13 +216,19 @@ def get_personas(mode: str) -> list[Persona]:
                     "가이드북에 제시된 단계별 대응 매뉴얼, 시기별 관리 방법, 피해 정도별 조치사항 등을 "
                     "실제 농장 상황에 적용할 수 있도록 구체적이고 실용적인 정보를 원한다. "
                     "질문과 정답은 반드시 이 가이드북의 내용을 기반으로 하되, 실제 농업 현장에서 바로 적용 가능한 수준의 구체적인 답변을 요구한다."
+                    "이게 무슨 문서인지에 대한 질문은 만들지 말고 문서 내용에 대한 질문만 만들어줘"
                 )
             )
         ]
 
 # ===================== 골든셋 생성 =====================
 def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
-    generator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini"))
+    # 더 강력한 LLM 사용 (질문 품질 향상)
+    generator_llm = LangchainLLMWrapper(ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.4,  # 창의성과 일관성의 균형
+        max_tokens=2000   # 더 긴 답변 생성
+    ))
     generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")
 
     personas = get_personas(mode)
@@ -199,10 +240,18 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         persona_list=personas
     )
 
-    # 안정성: SingleHop만 사용
+    # 안정성: SingleHop만 사용 (단일 페르소나)
     query = SingleHopSpecificQuerySynthesizer(llm=generator_llm)
-    prompts = asyncio.run(query.adapt_prompts("ko", llm=generator_llm))
-    query.set_prompts(**prompts)
+    # 한국어 프롬프트 설정 (동기 방식)
+    try:
+        # adapt_prompts를 동기적으로 호출
+        import asyncio
+        prompts = asyncio.run(query.adapt_prompts("ko", llm=generator_llm))
+        query.set_prompts(**prompts)
+    except Exception as e:
+        print(f"⚠️ 한국어 프롬프트 설정 실패, 기본 프롬프트 사용: {e}")
+        # 기본 프롬프트로 폴백
+        query.set_prompts()
 
     dataset = generator.generate_with_langchain_docs(
         documents,
@@ -225,10 +274,11 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
             "contexts": sample.reference_contexts
         })
 
-    # 저장
+    # 저장 (타임스탬프 추가)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = "_multi" if mode == "multi_pdf" else "_single"
-    csv_file = f"golden_dataset_open{suffix}.csv"
-    jsonl_file = f"golden_dataset_open{suffix}.jsonl"
+    csv_file = f"golden_dataset_open{suffix}_{timestamp}.csv"
+    jsonl_file = f"golden_dataset_open{suffix}_{timestamp}.jsonl"
     
     df = pd.DataFrame(results)
     df.to_csv(csv_file, index=False, encoding="utf-8-sig")

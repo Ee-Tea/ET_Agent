@@ -18,7 +18,7 @@ import signal
 load_dotenv()
 
 # 전역 로그 레벨 설정 (DEBUG, INFO, WARNING, ERROR)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 
 # 전역 인터럽트 플래그
 _interrupt_flag = threading.Event()
@@ -622,7 +622,7 @@ class Farmer:
         
         3) 재해_agent: {self.config.AGENT_DESCRIPTIONS["재해_agent"]}
         
-        4) 날씨_agent: '날씨', '기상' 이라는 키워드가 포함되어 있을 경우 선택 **태풍, 폭염 같은 재해는 재해_agent가 처리**
+        4) 날씨_agent: **'날씨', '기상' 이라는 키워드가 포함되어 있을 경우에만 선택**
         
         5) 판매처_agent: {self.config.AGENT_DESCRIPTIONS["판매처_agent"]}
         
@@ -1160,10 +1160,10 @@ class Farmer:
             {merged_output}
             \n\n
             [중요 규칙 - 반드시 지켜주세요]
-            - 답변으로 받은 정보는 변경하거나 빼먹지 말고 출력
+            - 답변으로 받은 정보는 **변경하거나 빼먹지 말고 출력** (특히 오늘인지 내일인지 등 시간 정보)
             - "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답
             - 내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답
-            - 농작물의 직매장 등을 찾는다면 판매하려 한다는 것을 알아둬
+            - 농작물의 **직매장 등을 찾고 있다면** 구매하는 것이 아닌 판매하려 한다는 것을 알아둬
             - **절대 마크다운 형식을 사용하지 마세요**: **, ##, ###, *, -, [], (), ``` 등 모든 마크다운 문법 금지
             - **순수한 텍스트만 사용하세요**: 굵은 글씨, 제목, 리스트, 코드 블록 등 모두 일반 텍스트로 변환
             - 마지막에는 사용자에게 다른 질문을 유도하는 문장 추가

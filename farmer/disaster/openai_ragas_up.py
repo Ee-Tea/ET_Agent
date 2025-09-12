@@ -274,11 +274,16 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
             "contexts": sample.reference_contexts
         })
 
-    # 저장 (타임스탬프 추가)
+    # 저장 (타임스탬프 추가) - farmer/disaster/data 폴더에 저장
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = "_multi" if mode == "multi_pdf" else "_single"
-    csv_file = f"golden_dataset_open{suffix}_{timestamp}.csv"
-    jsonl_file = f"golden_dataset_open{suffix}_{timestamp}.jsonl"
+    
+    # farmer/disaster/data 디렉토리 생성 및 파일 경로 설정
+    data_dir = "./farmer/disaster/data"
+    os.makedirs(data_dir, exist_ok=True)
+    
+    csv_file = os.path.join(data_dir, f"golden_dataset_open{suffix}_{timestamp}.csv")
+    jsonl_file = os.path.join(data_dir, f"golden_dataset_open{suffix}_{timestamp}.jsonl")
     
     df = pd.DataFrame(results)
     df.to_csv(csv_file, index=False, encoding="utf-8-sig")

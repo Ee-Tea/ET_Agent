@@ -18,7 +18,7 @@ import signal
 load_dotenv()
 
 # 전역 로그 레벨 설정 (DEBUG, INFO, WARNING, ERROR)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # 전역 인터럽트 플래그
 _interrupt_flag = threading.Event()
@@ -72,28 +72,38 @@ class LoggingConfig:
     
     @staticmethod
     def setup_logger(name: str, level: str = None) -> logging.Logger:
-        """로거 설정 및 반환"""
+        """로거 설정 및 반환 - 부모 로거(root)로만 전송"""
         if level is None:
             level = LOG_LEVEL  # 전역 로그 레벨 사용
             
         logger = logging.getLogger(name)
         
-        # 이미 핸들러가 설정된 경우 중복 설정 방지
-        if logger.handlers:
+        # 이미 설정된 경우 중복 설정 방지
+        if hasattr(logger, '_farmer_configured'):
             return logger
             
         logger.setLevel(getattr(logging, level.upper()))
         
-        # 포맷터 설정
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        # 부모 로거(root) 설정 확인 및 설정
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            # 포맷터 설정
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            
+            # 루트 로거에 핸들러 추가
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            root_logger.addHandler(console_handler)
+            root_logger.setLevel(getattr(logging, level.upper()))
         
-        # 콘솔 핸들러
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+        # 부모 로거로 전파하도록 설정 (기본값이지만 명시적으로)
+        logger.propagate = True
+        
+        # 설정 완료 표시
+        logger._farmer_configured = True
         
         return logger
     

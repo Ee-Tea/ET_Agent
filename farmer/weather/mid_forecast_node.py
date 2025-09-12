@@ -21,13 +21,11 @@ KMA_TIMEOUT = int(os.getenv("KMA_TIMEOUT", "30"))
 WHEATHER_API_KEY_HUB = os.getenv("WHEATHER_API_KEY_HUB")
 KST = ZoneInfo("Asia/Seoul")
 
-# 권역 매핑 (WeatherAgent.py와 동일한 방식)
+# 권역 매핑
 from .utils import load_region_map, REGION_MAP
-
-# 모듈 로드 시 지역 매핑 초기화
 load_region_map()
 
-# =========[ 권역예보 전용: CSV 권역/질의 해석 (WeatherAgent.py와 동일) ]=========
+# =========[ 권역예보 전용: CSV 권역/질의 해석 ]=========
 REGION_REGIONS_CSV = os.getenv("REGION_CSV_PATH", "farmer/all_regions_combined.csv")
 
 def REGION_load_all_from_csv(path: str) -> Dict[str, str]:
@@ -39,7 +37,6 @@ def REGION_load_all_from_csv(path: str) -> Dict[str, str]:
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # 대소문자 구분 없이 컬럼명 찾기
             rid = (row.get("reg_id") or row.get("REG_ID") or "").strip()
             rname = (row.get("reg_name") or row.get("REG_NAME") or "").strip()
             if rid and rname and rid not in mapping:
@@ -49,29 +46,25 @@ def REGION_load_all_from_csv(path: str) -> Dict[str, str]:
     return mapping
 
 def REGION_split_region_only(all_map: Dict[str, str]) -> Dict[str, str]:
-    """권역 코드만 추출 (WeatherAgent.py와 동일한 정규식)"""
+    """권역 코드만 추출"""
     REGION_CODE_RE = re.compile(r"^(11[A-Z](\d)?0{4,5}|L\d{7}|S\d{7})$")
     region_map = {rid: nm for rid, nm in all_map.items() if REGION_CODE_RE.match(rid)}
     if not region_map:
-        # 비정형 CSV 대비: 알려진 상위코드만 추림
         known = ["11B00000","11D10000","11D20000","11C20000","11C10000",
                  "11F20000","11F10000","11H20000","11H10000","11G00000"]
         region_map = {rid: all_map[rid] for rid in known if rid in all_map}
     return region_map
 
 def REGION_build_alias_map(region_map: Dict[str, str]) -> Dict[str, str]:
-    """권역명 별칭 매핑 생성"""
     alias: Dict[str, str] = {}
     norm = lambda x: re.sub(r"\s+", "", x or "")
-
     def add(a: str, full: str):
         a = norm(a)
         if a and a not in alias:
             alias[a] = full
-
     for _code, full in region_map.items():
-        add(full, full)               # 풀네임
-        for p in full.split("·"):     # 구성요소
+        add(full, full)
+        for p in full.split("·"):
             add(p, full)
         subs = {
             "충청북도":"충북","충청남도":"충남",
@@ -103,12 +96,10 @@ else:
     print("⚠️ 권역 CSV 파일이 없어 권역 매핑을 건너뜁니다. (REGION_REGIONS_CSV)")
 
 REGION_FAMILY_RULES = [
-    # 기존 11X 형식
     (r"^11B",  "11B00000"), (r"^11D1", "11D10000"), (r"^11D2", "11D20000"),
     (r"^11C1", "11C10000"), (r"^11C2", "11C20000"), (r"^11F1", "11F10000"),
     (r"^11F2", "11F20000"), (r"^11H1", "11H10000"), (r"^11H2", "11H20000"),
     (r"^11G",  "11G00000"),
-    # 통합 CSV의 L, S 형식 추가
     (r"^L100", "L1000000"), (r"^L101", "L1010000"), (r"^L102", "L1020000"),
     (r"^L103", "L1030000"), (r"^L104", "L1040000"), (r"^L105", "L1050000"),
     (r"^L106", "L1060000"), (r"^L107", "L1070000"), (r"^L108", "L1080000"),
@@ -121,45 +112,26 @@ def REGION_normalize_region_reg_code(code_like: str) -> Optional[str]:
     """세부 코드를 권역 코드로 정규화 (중기예보 API용 11X00000 형식)"""
     c = (code_like or "").strip()
     if not c: return None
-    
-    # 직접 매칭 (11X00000 형식만)
     if c in REGION_LAND_MAP and c.startswith('11'): return c
-    
-    # 패턴 매칭 (11X 형식만)
     for pat, target in REGION_FAMILY_RULES:
-        if re.match(pat, c) and target.startswith('11'): 
+        if re.match(pat, c) and target.startswith('11'):
             return target if target in REGION_LAND_MAP else target
-    
-    # L 형식을 11X 형식으로 매핑 (중기예보 API 지원)
     if c.startswith('L'):
-        # L1010000 (경기도) -> 11B00000 (서울·인천·경기)
         if c.startswith('L101'): return '11B00000'
-        # L1020000 (강원도) -> 11D10000 (강원영서)
         if c.startswith('L102'): return '11D10000'
-        # L1030000 (충청북도) -> 11C10000 (충북)
         if c.startswith('L103'): return '11C10000'
-        # L1040000 (충청남도) -> 11C20000 (충남)
         if c.startswith('L104'): return '11C20000'
-        # L1050000 (전라북도) -> 11F10000 (전북)
         if c.startswith('L105'): return '11F10000'
-        # L1060000 (전라남도) -> 11F20000 (전남)
         if c.startswith('L106'): return '11F20000'
-        # L1070000 (경상북도) -> 11H10000 (경북)
         if c.startswith('L107'): return '11H10000'
-        # L1080000 (경상남도) -> 11H20000 (경남)
         if c.startswith('L108'): return '11H20000'
-    
-    # S 형식은 중기예보에서 지원하지 않음
     if c.startswith('S'): return None
-    
     return None
 
 def now_kst() -> datetime:
-    """현재 KST 시간 반환"""
     return datetime.now(tz=KST)
 
 def fmt_kst_any(s: str) -> str:
-    """다양한 KST 시간 형식 포맷팅"""
     s = (s or "").strip()
     patterns = [
         ("%Y%m%d%H%M", "%Y-%m-%d %H:%M KST"),
@@ -175,23 +147,18 @@ def fmt_kst_any(s: str) -> str:
     return s
 
 def normalize_spaces(s: str) -> str:
-    """공백 정규화"""
     return re.sub(r"\s+", "", s or "")
 
 def _parse_wl_line(line: str) -> Optional[Dict[str, str]]:
-    """권역예보 라인 파싱"""
     s = (line or "").strip()
     if not s or s.startswith("#") or s.startswith("7777END"):
         return None
     if s.endswith("="):
         s = s[:-1]
-    
     cols = [c.strip() for c in s.split(",") if c.strip() != ""] if "," in s else [c.strip() for c in re.split(r"\s+", s) if c.strip()]
     if len(cols) < 3:
         return None
-    
     looks_date = lambda x: bool(re.fullmatch(r"\d{8}(\d{2}(\d{2})?)?", x))
-    
     if len(cols) >= 11 and looks_date(cols[1]) and looks_date(cols[2]):
         return {
             "reg_id": cols[0],
@@ -203,12 +170,10 @@ def _parse_wl_line(line: str) -> Optional[Dict[str, str]]:
             "wf": cols[9],
             "rn_st": cols[10]
         }
-    
     reg_id = cols[0]
     tmfc = None
     tmef = None
     rest = []
-    
     for c in cols[1:]:
         if tmfc is None and looks_date(c):
             tmfc = c
@@ -217,7 +182,6 @@ def _parse_wl_line(line: str) -> Optional[Dict[str, str]]:
             tmef = c
             continue
         rest.append(c)
-    
     return {
         "reg_id": reg_id,
         "tmfc": tmfc or "",
@@ -230,7 +194,6 @@ def _parse_wl_line(line: str) -> Optional[Dict[str, str]]:
     }
 
 def REGION_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """일별로 권역예보 데이터 병합"""
     day_map = {}
     for it in latest_rows:
         tmef = it.get("tmef", "")
@@ -244,7 +207,6 @@ def REGION_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str
             rec[slot] = it
         else:
             rec["etc"].append(it)
-    
     merged = []
     for day, slots in sorted(day_map.items()):
         am = slots["am"]
@@ -256,13 +218,11 @@ def REGION_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str
             rn_am = (am or {}).get("rn_st", "")
             wf_pm = (pm or {}).get("wf", "")
             rn_pm = (pm or {}).get("rn_st", "")
-            
             bits = []
             if wf_am:
                 bits.append(f"오전 {wf_am}{f'({rn_am}%)' if rn_am.isdigit() else ''}")
             if wf_pm:
                 bits.append(f"오후 {wf_pm}{f'({rn_pm}%)' if rn_pm.isdigit() else ''}")
-            
             wf = " / ".join(bits) if bits else (wf_am or wf_pm or "")
             merged.append({
                 "tmfc": tmfc,
@@ -273,11 +233,9 @@ def REGION_merge_by_day(latest_rows: List[Dict[str, str]]) -> List[Dict[str, str
                 "sky_code": "",
                 "pre_code": ""
             })
-    
     return merged
 
 def request_with_retries(url: str, timeout: int, retries: int, backoff: float) -> requests.Response:
-    """재시도가 포함된 HTTP 요청"""
     last = None
     for i in range(1, retries + 1):
         try:
@@ -294,7 +252,6 @@ def request_with_retries(url: str, timeout: int, retries: int, backoff: float) -
     raise last or RuntimeError("request failed")
 
 def to_tmfc(dt: datetime) -> str:
-    """API는 KST 기준 문자열을 기대"""
     k = dt.astimezone(KST)
     return k.strftime("%Y%m%d%H")
 
@@ -310,8 +267,7 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
         return []
     
     now = now_kst()
-    # 중기예보는 더 넓은 범위에서 조회 (발표 시간 범위 확장)
-    tmfc1 = to_tmfc(now - timedelta(days=tmfc_range_days))  # 파라미터로 받은 범위 사용
+    tmfc1 = to_tmfc(now - timedelta(days=tmfc_range_days))
     tmfc2 = to_tmfc(now)
     tmef1 = to_tmef(target_date - timedelta(days=widen_days))
     tmef2 = to_tmef(target_date + timedelta(days=widen_days))
@@ -334,26 +290,17 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
         latest = {}
         want_d8 = to_tmef(target_date)
         
-        parsed_lines = 0
-        filtered_lines = 0
-        
         for ln in text.splitlines():
             if not ln.strip():
                 continue
-            
             item = _parse_wl_line(ln)
             if not item:
                 continue
-            parsed_lines += 1
-            
             if item.get("reg_id") != reg_id:
                 continue
-            filtered_lines += 1
-            
             tmef = item.get("tmef", "")
             if (tmef or "")[:8] != want_d8:
                 continue
-            
             prev = latest.get(tmef)
             if (prev is None) or (item.get("tmfc", "") > prev.get("tmfc", "")):
                 latest[tmef] = item
@@ -373,11 +320,9 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
             is_day_level = len(it.get("tmef", "")) == 8
             target_label = (fmt_kst_any(it["tmef"]) if not is_day_level else
                           datetime.strptime(it["tmef"], "%Y%m%d").replace(tzinfo=KST).strftime("%Y-%m-%d"))
-            
             wf = (it.get("wf", "") or "").strip()
             conf = (it.get("conf", "") or "").strip()
             rn = (it.get("rn_st", "") or "").strip()
-            
             bits = []
             if wf:
                 bits.append(wf)
@@ -385,9 +330,7 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
                 bits.append(conf)
             if rn.isdigit():
                 bits.append(f"강수확률 {rn}%")
-            
             summary = " · ".join(bits) if bits else (wf or "예보문 없음")
-            
             payload = {
                 "source": "KMA_REGION_WEEK_LAND",
                 "region_id": reg_id,
@@ -400,15 +343,12 @@ def fetch_mid_week_land(reg_id: str, target_date: datetime, tmfc_range_days: int
                 "sky_code": it.get("sky_code", ""),
                 "pre_code": it.get("pre_code", ""),
             }
-            
             human = f"{region_name} 권역예보(주간) — 발표 {fmt_kst_any(payload['announce_time'])}, 대상 {target_label}: {summary}"
             docs.append({
                 "json": json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
                 "human": human
             })
-        
         return docs
-        
     except requests.exceptions.HTTPError as e:
         print(f"❌ HTTP 오류: {e}")
         return []
@@ -424,17 +364,12 @@ class MidForecastNode:
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """중기예보 노드 실행"""
-        print("🧩 노드: 중기예보 데이터 수집")
-        
         try:
-            # 질문에서 지역과 날짜 추출
             question = state.get("question", "")
-            
-            # 지역 추출 (WeatherAgent.py와 동일한 방식)
-            region_code = "11B00000"  # 기본값: 서울
+            date_range = state.get("question_date_range")  # (start_dt, end_dt, is_weekly)
+            # 지역 추출 (기본: 서울·인천·경기도)
+            region_code = "11B00000"
             region_name = "서울·인천·경기도"
-            
-            # CSV에서 지역 매핑이 있으면 사용
             if REGION_ALL_MAP:
                 for code, name in REGION_ALL_MAP.items():
                     if name in question or code in question:
@@ -442,45 +377,41 @@ class MidForecastNode:
                         region_name = name
                         print(f"   - CSV에서 지역코드 로드: {region_code} ({region_name})")
                         break
-            
-            # 중기예보는 권역 코드를 사용해야 함 (세부 코드 -> 권역 코드 정규화)
             region_code = REGION_normalize_region_reg_code(region_code)
             print(f"   - 권역 코드 정규화: {region_code}")
-            
-            # 날짜 추출 (LLM이 처리하도록 변경)
-            # 기본값으로 4일 후 설정 (중기예보 최소 요구사항)
+
+            # 기본: 4일 후 (중기 최소)
             now = now_kst()
             target_date = now + timedelta(days=4)
-            
-            # 중기예보는 4일 이후 데이터만 제공하므로 조정
-            now = now_kst()
-            days_diff = (target_date.date() - now.date()).days
-            print(f"   - 원본 날짜: {target_date.strftime('%Y-%m-%d')} (오늘로부터 {days_diff}일 후)")
-            
-            if days_diff < 4:
-                target_date = now + timedelta(days=4)  # 최소 4일 후로 설정
-                print(f"   - 날짜 조정: {target_date.strftime('%Y-%m-%d')} (최소 4일 후로 설정)")
-            else:
-                print(f"   - 날짜 유지: {target_date.strftime('%Y-%m-%d')}")
-            
-            # 중기예보 데이터 가져오기 (longapi.py와 동일한 파라미터)
-            mid_forecasts = fetch_mid_week_land(
-                reg_id=region_code,
-                target_date=target_date,
-                tmfc_range_days=3,  # longapi.py와 동일
-                widen_days=0        # longapi.py와 동일
-            )
-            
-            # 상태에 결과 저장
-            if "mid_forecast_data" not in state:
-                state["mid_forecast_data"] = []
-            state["mid_forecast_data"].extend(mid_forecasts)
-            
-            print(f"   - ✅ 중기예보 데이터 수집 완료: {len(mid_forecasts)}개 (지역: {region_name}, 날짜: {target_date.strftime('%Y-%m-%d')})")
-            
+
+            targets: List[datetime] = [target_date]
+            # 주간 요청이면 범위 내 4~10일(중기 커버 영역 추정) 중 교집합 날짜들 뽑기
+            if date_range:
+                sdt, edt, _weekly = date_range
+                # 중기는 통상 3~10일 범위를 다룸. 여기서는 sdt~edt 내의 날짜 중 4일 후 이상을 대상으로 함
+                cur = sdt
+                tmp = []
+                while cur <= edt:
+                    if (cur.date() - now.date()).days >= 4:
+                        tmp.append(cur)
+                    cur = cur + timedelta(days=1)
+                if tmp:
+                    targets = tmp
+
+            all_docs: List[Dict[str, str]] = []
+            for td in targets:
+                docs = fetch_mid_week_land(
+                    reg_id=region_code,
+                    target_date=td,
+                    tmfc_range_days=3,
+                    widen_days=0
+                )
+                all_docs.extend(docs)
+
+            state.setdefault("mid_forecast_data", [])
+            state["mid_forecast_data"].extend(all_docs)
+            print(f"   - ✅ 중기예보 데이터 수집 완료: {len(all_docs)}개 (지역: {region_name})")
         except Exception as e:
             print(f"   - ❌ 중기예보 데이터 수집 실패: {e}")
-            if "mid_forecast_data" not in state:
-                state["mid_forecast_data"] = []
-        
+            state.setdefault("mid_forecast_data", [])
         return state

@@ -19,7 +19,6 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 
-
 # RAGAS 관련
 def evaluate_with_ragas(dataset, metrics):
     # 사용 직전에만 ragas import (지연 import)
@@ -39,7 +38,6 @@ from ragas.metrics import (
     LLMContextRecall
 )
 
-
 # RAGAS 래퍼 & 데이터 스키마
 def get_ragas_wrappers():
     from ragas.llms import LangchainLLMWrapper as RagasLLMWrapper
@@ -49,51 +47,33 @@ def get_ragas_wrappers():
 # HuggingFace 관련
 from datasets import Dataset
 
-
 # 환경 변수 로드
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # 경로 설정
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from SalesAgent import run
-from common.milvus_manager import MilvusDBManager
+from DisasterAgent_LLM import run
 
-def __init__(self, csv_path="./farmer/sales/data/sales_golden_dataset.csv"):
-    """SalesAgent RAGAS 평가기 초기화"""
-    print(f"🔧 SalesRAGAS 평가기 초기화 시작...")
+def __init__(self, csv_path="./golden_dataset_open_single.csv", milvus_data=None):
+    """DisasterAgent RAGAS 평가기 초기화"""
+    print(f"🔧 DisasterRAGAS 평가기 초기화 시작...")
     print(f"📁 CSV 파일 경로: {csv_path}")
     
     try:
-        # MilvusDB 관리자 초기화
-        print("🔗 MilvusDB 관리자 초기화 중...")
-        self.milvus_manager = MilvusDBManager()
-        
-        # MilvusDB 연결
-        try:
-            if not self.milvus_manager.connect():
-                print("⚠️ MilvusDB 연결 실패 - 일부 기능이 제한될 수 있습니다.")
-                self.milvus_manager = None  # 연결 실패 시 None으로 설정
-            else:
-                print("✅ MilvusDB 연결 성공")
-        except Exception as e:
-            print(f"❌ MilvusDB 연결 중 오류 발생: {e}")
-            self.milvus_manager = None  # 오류 발생 시 None으로 설정
-        
         # 공식 문서에 따라 모델 설정
         print("🤖 모델 설정 중...")
         self._setup_models()
         print("✅ 모델 설정 완료")
         
         self.csv_path = csv_path
+        self.milvus_data = milvus_data or {}
         print("📊 테스트 질문 생성 중...")
         self.test_questions = self._create_test_questions()
         print(f"✅ 테스트 질문 생성 완료: {len(self.test_questions)}개")
         
         self.evaluation_results = []
         print("🎯 평가기 초기화 완료!")
-        print(f"🔗 MilvusDB 연결 상태: {'✅ 연결됨' if self.milvus_manager and self.milvus_manager.is_connected else '❌ 연결 안됨'}")
         
     except Exception as e:
         print(f"❌ 평가기 초기화 실패: {e}")
@@ -125,12 +105,13 @@ def _setup_models(self):
         self.evaluator_llm = LangchainLLMWrapper(self.llm)
         print("✅ LLM 래퍼 설정 완료")
         
-        # 임베딩 모델 설정
+        # 임베딩 모델 설정 (한국어 특화 모델)
         print("🔤 임베딩 모델 설정 중...")
         self.embeddings = LangchainEmbeddingsWrapper(
             HuggingFaceEmbeddings(
-                model_name="BAAI/bge-m3",
-                model_kwargs={'device': 'cpu'}  # GPU가 있으면 'cuda'로 변경
+                model_name="jhgan/ko-sroberta-multitask",
+                model_kwargs={'device': 'cpu'},  # GPU가 있으면 'cuda'로 변경
+                encode_kwargs={'normalize_embeddings': True}
             )
         )
         print("✅ 임베딩 모델 설정 완료")
@@ -156,7 +137,7 @@ def _create_test_questions(self):
         return []
 
 def _load_csv_data(self):
-    """CSV 파일에서 user_input과 reference 컬럼을 읽어옵니다."""
+    """CSV 파일에서 question과 ground_truth 컬럼을 읽어옵니다."""
     print(f"📖 CSV 파일 읽기 시작: {self.csv_path}")
     
     try:
@@ -168,8 +149,8 @@ def _load_csv_data(self):
         # 컬럼 확인
         print(f"📋 CSV 컬럼들: {list(df.columns)}")
         
-        # 필요한 컬럼 확인
-        required_columns = ['user_input', 'reference']
+        # 필요한 컬럼 확인 (DisasterAgent용 컬럼명)
+        required_columns = ['question', 'ground_truth']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
@@ -184,11 +165,11 @@ def _load_csv_data(self):
         test_cases = []
         for i, (_, row) in enumerate(df.iterrows()):
             test_cases.append({
-                'question': str(row['user_input']).strip(),
-                'reference': str(row['reference']).strip()
+                'question': str(row['question']).strip(),
+                'reference': str(row['ground_truth']).strip()
             })
             if i < 3:  # 처음 3개만 출력
-                print(f"  📝 질문 {i+1}: {str(row['user_input']).strip()[:50]}...")
+                print(f"  📝 질문 {i+1}: {str(row['question']).strip()[:50]}...")
         
         print(f"✅ CSV 데이터 로드 완료: {len(test_cases)}개 질문")
         return test_cases
@@ -199,55 +180,37 @@ def _load_csv_data(self):
         traceback.print_exc()
         return []
 
-def run_sales_agent_evaluation(self, question):
-    """SalesAgent를 실행하여 답변과 컨텍스트 수집"""
-    print(f"🤖 SalesAgent 실행 시작: {question[:50]}...")
+def run_disaster_agent_evaluation(self, question):
+    """DisasterAgent를 실행하여 답변과 컨텍스트 수집"""
+    print(f"🤖 DisasterAgent 실행 시작: {question[:50]}...")
     
     try:
-        # MilvusDB 연결 정보 준비
-        milvus_data = {}
-        if self._is_milvus_connected():
-            milvus_data = {
-                "connection_status": True,
-                "host": self.milvus_manager.host,
-                "port": self.milvus_manager.port,
-                "embedding_model_name": self.milvus_manager.embedding_model_name
-            }
-            print("🔗 MilvusDB 연결 정보 주입됨")
-        else:
-            milvus_data = {
-                "connection_status": False,
-                "error": "MilvusDB 연결되지 않음"
-            }
-            print("⚠️ MilvusDB 연결 정보 없음")
-        
-        # SalesAgent 실행 (동기 함수 호출)
-        print("🔄 SalesAgent 실행 중...")
+        # DisasterAgent 실행 (동기 함수 호출)
+        print("🔄 DisasterAgent 실행 중...")
         initial_state = {
             "query": question,
-            "milvus_data": milvus_data  # MilvusDB 연결 정보 주입
+            "milvus_data": self.milvus_data
         }
         result_state = run(initial_state)
-        print("✅ SalesAgent 실행 완료")
+        print("✅ DisasterAgent 실행 완료")
         
         # 결과 추출
         print("📊 결과 추출 중...")
         answer = result_state.get('agent_answer', '')
-        context = result_state.get('context', {})
         
         print(f"📝 답변 길이: {len(answer)}자")
-        print(f"💬 SalesAgent 응답: {answer}")
+        print(f"💬 DisasterAgent 응답: {answer}")
         
-        # 컨텍스트를 문자열로 변환
+        # DisasterAgent의 그래프 상태에서 컨텍스트 정보 추출
         print("🔧 컨텍스트 포맷팅 중...")
-        context_str = self._format_context(context)
+        context_str = self._extract_context_from_graph_state(result_state)
         print(f"📄 컨텍스트 길이: {len(context_str)}자")
         if context_str:
             print(f"📋 컨텍스트 내용: {context_str[:200]}...")
         else:
             print("⚠️ 컨텍스트가 비어있음")
         
-        print("✅ SalesAgent 평가 완료")
+        print("✅ DisasterAgent 평가 완료")
         return {
             'answer': answer,
             'context': context_str,
@@ -255,7 +218,7 @@ def run_sales_agent_evaluation(self, question):
         }
         
     except Exception as e:
-        print(f"❌ SalesAgent 실행 실패: {e}")
+        print(f"❌ DisasterAgent 실행 실패: {e}")
         import traceback
         traceback.print_exc()
         return {
@@ -264,62 +227,89 @@ def run_sales_agent_evaluation(self, question):
             'success': False
         }
 
-def _is_milvus_connected(self):
-    """MilvusDB 연결 상태 확인"""
-    return self.milvus_manager is not None and self.milvus_manager.is_connected
-
-def _format_context(self, context):
-    """컨텍스트를 문자열로 포맷팅"""
-    if not context:
-        return ""
+def _extract_context_from_graph_state(self, result_state):
+    """DisasterAgent 그래프 상태에서 컨텍스트 정보 추출"""
+    context_parts = []
     
-    formatted_parts = []
+    # DB 컨텍스트 추출
+    db_context = result_state.get('db_context', '')
+    if db_context and db_context.strip() and "관련 문서를 찾을 수 없습니다" not in db_context:
+        context_parts.append(f"DB 검색 결과: {db_context[:500]}...")
     
-    # 시세 정보를 더 상세하게 포맷팅
-    if '실시간시세' in context:
-        prices = context['실시간시세']
-        if prices and len(prices) > 0:
-            # 의미 있는 가격 정보만 필터링
-            valid_prices = []
-            for price in prices:
-                if isinstance(price, str) and price.strip():
-                    # "정보가 없습니다" 같은 키워드가 포함되지 않은 경우만 추가
-                    if not any(keyword in price for keyword in ['해당 작물에 대한 정보는 현재 없습니다.']):
-                        valid_prices.append(price)
-            
-            # 유효한 가격 정보가 있는 경우만 추가
-            if valid_prices:
-                formatted_parts.append(f"시세 정보: {' | '.join(valid_prices)}")
+    # 웹 컨텍스트 추출
+    web_context = result_state.get('web_context', '')
+    if web_context and web_context.strip() and "[웹 검색 결과 없음]" not in web_context:
+        context_parts.append(f"웹 검색 결과: {web_context[:500]}...")
     
-    # 판매처 정보를 더 상세하게 포맷팅
-    if '판매처' in context:
-        vendors = context['판매처']
-        if vendors and len(vendors) > 0:
-            # 의미 있는 판매처 정보만 필터링
-            valid_vendors = []
-            for vendor in vendors:
-                if isinstance(vendor, str) and vendor.strip():
-                    # "정보가 없습니다" 같은 키워드가 포함되지 않은 경우만 추가
-                    if not any(keyword in vendor for keyword in ['해당 지역에 위치한 판매점 정보가 없습니다.']):
-                        valid_vendors.append(vendor)
-            
-            # 유효한 판매처 정보가 있는 경우만 추가
-            if valid_vendors:
-                formatted_parts.append(f"판매처 정보: {' | '.join(valid_vendors)}")
+    # 최종 컨텍스트 추출
+    final_context = result_state.get('context', '')
+    if final_context and final_context.strip():
+        context_parts.append(f"최종 컨텍스트: {final_context[:500]}...")
     
-    # 웹검색 결과를 더 상세하게 포맷팅
-    if '웹검색' in context:
-        web_results = context['웹검색']
-        if web_results:
-            formatted_parts.append(f"웹 검색 결과: {' | '.join(map(str, web_results))}")
+    # 검색된 문서 정보 추출
+    retrieved_docs = result_state.get('retrieved_docs', [])
+    if retrieved_docs:
+        doc_info = []
+        for i, doc in enumerate(retrieved_docs[:5], 1):  # 최대 5개 문서만
+            meta = getattr(doc, "metadata", {})
+            fname = meta.get("file_name") or meta.get("source") or f"문서{i}"
+            page = meta.get("page")
+            doc_type = meta.get("type") or "text"
+            doc_info.append(f"[문서{i}][{doc_type}][{fname}{f' p.{page}' if page else ''}]")
+        
+        if doc_info:
+            context_parts.append(f"검색된 문서: {' | '.join(doc_info)}")
     
-    # 추가 정보가 없으면 빈 문자열 반환
-    if not formatted_parts:
-        return ""
+    # MilvusDB 연결 상태 정보
+    milvus_data = result_state.get('milvus_data', {})
+    if milvus_data.get('connection_status', False):
+        context_parts.append("MilvusDB 연결됨")
+    else:
+        context_parts.append("MilvusDB 연결 안됨")
     
     # 컨텍스트를 더 명확하게 구조화 (RAGAS 점수 향상)
-    if formatted_parts:
-        return "농작물 시세 및 판매처 정보:\n" + "\n".join(formatted_parts)
+    if context_parts:
+        return "농업재해 정보:\n" + "\n".join(context_parts)
+    else:
+        return ""
+
+def _extract_context_from_answer(self, answer):
+    """DisasterAgent 답변에서 컨텍스트 정보 추출 (폴백용)"""
+    if not answer:
+        return ""
+    
+    # 답변에서 출처 정보나 근거 정보를 추출
+    context_parts = []
+    
+    # 출처 정보가 있는 경우 추출
+    if "이 정보는" in answer and "에서 가져온 내용이에요" in answer:
+        # 출처 정보 추출
+        import re
+        source_pattern = r"이 정보는 ([^에서]+)에서 가져온 내용이에요"
+        sources = re.findall(source_pattern, answer)
+        if sources:
+            context_parts.append(f"출처: {', '.join(sources)}")
+    
+    # 표나 데이터 정보가 있는 경우
+    if "표" in answer or "데이터" in answer or "통계" in answer:
+        context_parts.append("통계 및 표 데이터 포함")
+    
+    # 지역 정보가 있는 경우
+    regions = ["강원", "경기", "경남", "경북", "광주", "대구", "대전", "부산", "서울", "세종",
+               "울산", "인천", "전남", "전북", "제주", "충남", "충북"]
+    found_regions = [region for region in regions if region in answer]
+    if found_regions:
+        context_parts.append(f"지역 정보: {', '.join(found_regions)}")
+    
+    # 재해 유형 정보가 있는 경우
+    disaster_types = ["태풍", "폭우", "가뭄", "한파", "폭염", "대설", "우박", "홍수"]
+    found_disasters = [disaster for disaster in disaster_types if disaster in answer]
+    if found_disasters:
+        context_parts.append(f"재해 유형: {', '.join(found_disasters)}")
+    
+    # 컨텍스트를 더 명확하게 구조화 (RAGAS 점수 향상)
+    if context_parts:
+        return "농업재해 정보:\n" + "\n".join(context_parts)
     else:
         return ""
 
@@ -331,11 +321,11 @@ def evaluate_single_question(self, test_case):
     
     print(f"\n📝 질문 평가 시작: {question[:50]}...")
     
-    # SalesAgent 실행
-    agent_result = self.run_sales_agent_evaluation(question)
+    # DisasterAgent 실행
+    agent_result = self.run_disaster_agent_evaluation(question)
     
     if not agent_result['success']:
-        print(f"❌ SalesAgent 실행 실패")
+        print(f"❌ DisasterAgent 실행 실패")
         return None
     
     # 개별 RAGAS 평가 실행 (동기)
@@ -368,7 +358,7 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
     print(f"📄 참조 길이: {len(reference)}자")
     
     try:
-        # 🚀 WeatherAgent 방식: 4개 RAGAS 평가 모두 병렬 처리
+        # 🚀 WeatherAgent 방식: 4개 RAGAS 평가 모두 순차 처리
         def evaluate_context_precision():
             try:
                 print("🔍 Context Precision 평가 중...")
@@ -482,7 +472,7 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
             metric_name, score = result
             scores[metric_name] = score
         
-        print("   - ✅ 4개 병렬 평가 완료!")
+        print("   - ✅ 4개 순차 평가 완료!")
         return scores
         
     except Exception as e:
@@ -490,7 +480,7 @@ def _evaluate_single_ragas_simple(self, question, answer, context, reference="")
         traceback.print_exc()
         return None
 
-def run_full_evaluation(self, batch_size=3):
+def run_full_evaluation(self, batch_size=3, max_questions=None):
     """전체 테스트 케이스에 대한 평가 실행 (개별 RAGAS 포함) - 동기"""
     
     print(f"\n🚀 전체 평가 시작!")
@@ -501,10 +491,16 @@ def run_full_evaluation(self, batch_size=3):
         print("❌ 평가할 질문이 없습니다.")
         return []
     
+    # 테스트할 질문 수 제한 (개발/테스트용)
+    questions_to_test = self.test_questions
+    if max_questions and max_questions < len(self.test_questions):
+        questions_to_test = self.test_questions[:max_questions]
+        print(f"🔧 테스트 질문 수를 {max_questions}개로 제한합니다.")
+    
     # 각 질문에 대해 평가 실행
-    for i, test_case in enumerate(self.test_questions, 1):
+    for i, test_case in enumerate(questions_to_test, 1):
         print(f"\n{'='*60}")
-        print(f"📝 질문 {i}/{len(self.test_questions)} 평가 시작")
+        print(f"📝 질문 {i}/{len(questions_to_test)} 평가 시작")
         print(f"{'='*60}")
         
         try:
@@ -514,16 +510,22 @@ def run_full_evaluation(self, batch_size=3):
                 print(f"✅ 질문 {i} 평가 완료")
             else:
                 print(f"❌ 질문 {i} 평가 실패")
+        except KeyboardInterrupt:
+            print(f"\n⚠️ 사용자에 의해 중단되었습니다.")
+            break
         except Exception as e:
             print(f"❌ 질문 {i} 평가 중 오류 발생: {e}")
             import traceback
             traceback.print_exc()
+            # 오류가 발생해도 다음 질문으로 계속 진행
+            continue
         
-        # 대기 시간 제거 (동기 처리로 변경했으므로 불필요)
+        # 각 질문 사이에 짧은 대기 (API 제한 방지)
+        time.sleep(1)
     
     print(f"\n🎉 전체 평가 완료!")
     print(f"📊 성공한 평가: {len(self.evaluation_results)}개")
-    print(f"📊 실패한 평가: {len(self.test_questions) - len(self.evaluation_results)}개")
+    print(f"📊 실패한 평가: {len(questions_to_test) - len(self.evaluation_results)}개")
     return self.evaluation_results
 
 def create_ragas_dataset(self):
@@ -580,10 +582,10 @@ def save_results(self, output_path=None):
     
     if not output_path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # ./farmer/sales/data 디렉토리에 저장
-        data_dir = "./farmer/sales/data"
+        # ./farmer/disaster/data 디렉토리에 저장
+        data_dir = "./farmer/disaster/data"
         os.makedirs(data_dir, exist_ok=True)  # 디렉토리가 없으면 생성
-        output_path = os.path.join(data_dir, f"ragas_evaluation_results_{timestamp}.json")
+        output_path = os.path.join(data_dir, f"disaster_ragas_evaluation_results_{timestamp}.json")
     
     # 평균 점수 계산
     context_precision_scores = []
@@ -641,7 +643,7 @@ def print_summary(self):
         return
     
     print("\n" + "="*60)
-    print("📊 RAGAS 평가 결과 요약")
+    print("📊 DisasterAgent RAGAS 평가 결과 요약")
     print("="*60)
     
     # 전체 통계
@@ -671,7 +673,7 @@ def print_summary(self):
 
 # 테스트 실행 코드
 if __name__ == "__main__":
-    print("🧪 SalesRAGAS 테스트 실행 시작")
+    print("🧪 DisasterRAGAS 테스트 실행 시작")
     print("="*60)
     
     try:
@@ -682,9 +684,9 @@ if __name__ == "__main__":
         evaluator._setup_models = lambda: _setup_models(evaluator)
         evaluator._create_test_questions = lambda: _create_test_questions(evaluator)
         evaluator._load_csv_data = lambda: _load_csv_data(evaluator)
-        evaluator.run_sales_agent_evaluation = lambda question: run_sales_agent_evaluation(evaluator, question)
-        evaluator._format_context = lambda context: _format_context(evaluator, context)
-        evaluator._is_milvus_connected = lambda: _is_milvus_connected(evaluator)
+        evaluator.run_disaster_agent_evaluation = lambda question: run_disaster_agent_evaluation(evaluator, question)
+        evaluator._extract_context_from_graph_state = lambda result_state: _extract_context_from_graph_state(evaluator, result_state)
+        evaluator._extract_context_from_answer = lambda answer: _extract_context_from_answer(evaluator, answer)
         evaluator.evaluate_single_question = lambda test_case: evaluate_single_question(evaluator, test_case)
         evaluator._evaluate_single_ragas_simple = lambda question, answer, context, reference="": _evaluate_single_ragas_simple(evaluator, question, answer, context, reference)
         evaluator.run_full_evaluation = lambda batch_size=3: run_full_evaluation(evaluator, batch_size)
@@ -693,10 +695,15 @@ if __name__ == "__main__":
         evaluator.save_results = lambda output_path=None: save_results(evaluator, output_path)
         evaluator.print_summary = lambda: print_summary(evaluator)
         
-        __init__(evaluator)
+        # MilvusDB 연결 정보 설정 (실제 연결은 하지 않고 상태만 설정)
+        milvus_data = {
+            "connection_status": False,  # MilvusDB 연결 없이 테스트
+            "collection_name": "agri_disaster_docs"
+        }
+        __init__(evaluator, milvus_data=milvus_data)
         
-        # 동기 평가 실행
-        results = run_full_evaluation(evaluator)
+        # 동기 평가 실행 (테스트용으로 3개 질문만)
+        results = run_full_evaluation(evaluator, max_questions=3)
         
         if results:
             print_summary(evaluator)

@@ -4,14 +4,14 @@
 KMA 기상특보 데이터를 가져오는 노드
 - 1차: 현재 특보 전용 wrn_now_data_new.php
 - 2차: 이력 wrn_met_data.php (어제~내일) 백업 후 현재/예정만 필터
-- 이 노드는 지역 필터를 하지 않는다. (지역 필터는 상위 래퍼가 담당)
+- 이 노드는 기본적으로 지역 필터를 하지 않지만, state에 주간 범위가 오면 기간/지역 필터를 래퍼에서 쉽게 하도록 payload 확장
 """
 
 import os
 import re
 import json
 import requests
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -23,8 +23,11 @@ KMA_TIMEOUT = int(os.getenv("KMA_TIMEOUT", "30"))
 WHEATHER_API_KEY_HUB = os.getenv("WHEATHER_API_KEY_HUB")  # 프로젝트 전반과 동일한 변수명 유지
 KST = ZoneInfo("Asia/Seoul")
 
-# 특보 매핑
-WRN_MAP = {"T":"태풍","W":"강풍","R":"호우","C":"한파","D":"건조","O":"해일","N":"지진해일","V":"풍랑","S":"대설","Y":"황사","H":"폭염","F":"안개"}
+# 특보 매핑 (확장된 버전)
+WRN_MAP = {
+    "T":"태풍","W":"강풍","R":"호우","C":"한파","D":"건조","O":"해일","N":"지진해일","V":"풍랑","S":"대설","Y":"황사","H":"폭염","F":"안개",
+    "A":"기타","B":"기타","E":"기타","G":"기타","I":"기타","J":"기타","K":"기타","L":"기타","M":"기타","P":"기타","Q":"기타","U":"기타","X":"기타","Z":"기타"
+}
 LVL_MAP = {"1":"예비특보","2":"주의보","3":"경보"}
 CMD_MAP = {"1":"발표","2":"대치","3":"해제","4":"대치해제","5":"연장","6":"변경","7":"변경해제"}
 REGION_CODE_RE = re.compile(r"^[A-Z]\d{7}$")
@@ -38,7 +41,7 @@ def resolve_region(token: str) -> str:
         return "N/A"
     return REGION_MAP.get(token.strip(), token)
 
-def _parse_kst_yyyymmddHHMM(s: str) -> datetime | None:
+def _parse_kst_yyyymmddHHMM(s: str) -> Optional[datetime]:
     try:
         return datetime.strptime(s, "%Y%m%d%H%M").replace(tzinfo=KST)
     except Exception:
@@ -71,7 +74,8 @@ def _make_payload_from_parts(
         "level_name": LVL_MAP.get((lvl or "").strip(), "N/A"),
         "command_code": (cmd or "").strip(),
         "command_name": CMD_MAP.get((cmd or "").strip(), (cmd or "")),
-        "window_start": (tm_ef or tm_st or "") or "N/A",  # 발효시각 우선
+        # 창구표기: 발효시각 우선
+        "window_start": (tm_ef or tm_st or "") or "N/A",
         "window_end": tm_ed or "N/A",
         "window_start_kst": _fmt_kst((tm_ef or tm_st or "") or ""),
         "window_end_kst": _fmt_kst(tm_ed or "") if (tm_ed or "") else "N/A",
@@ -79,6 +83,10 @@ def _make_payload_from_parts(
     }
     if (wrn or "") == "T" and grd:
         payload["typhoon_grade"] = grd
+
+    # 상태/표기 보조
+    status_label = "예정" if (payload["window_start_kst"] != "N/A" and _parse_kst_yyyymmddHHMM(payload["window_start"]) and _parse_kst_yyyymmddHHMM(payload["window_start"]) > datetime.now(tz=KST)) else "진행/유지"
+    payload["status_label"] = status_label
 
     parts = [f"지역: {region_name} ({reg_token})"]
     if payload["window_start_kst"] != "N/A" and payload["window_end_kst"] != "N/A":
@@ -90,7 +98,8 @@ def _make_payload_from_parts(
     parts += [
         f"현상: {payload['hazard_name']}({payload['hazard_code']})",
         f"수준: {payload['level_name']}({payload['level_code']})",
-        f"명령: {payload['command_name']}({payload['command_code']})"
+        f"명령: {payload['command_name']}({payload['command_code']})",
+        f"상태: {payload['status_label']}"
     ]
     if "typhoon_grade" in payload:
         parts.append(f"태풍 등급: {payload['typhoon_grade']}")
@@ -187,17 +196,9 @@ def fetch_wrn_history_window() -> List[Dict[str, str]]:
         lvl    = raw[6] if len(raw) > 6 else ""
         cmd    = raw[7] if len(raw) > 7 else ""
         grd    = raw[8] if len(raw) > 8 else ""
-        # TM_FC, TM_EF는 뒤쪽에 있는 경우가 많음(문서 케이스 상 안전 접근)
         tm_fc  = None
         tm_ef  = None
-        if len(raw) >= 12:
-            # 위치가 바뀌는 경우가 있어 유연히 스캔
-            for i, v in enumerate(raw):
-                if v and re.fullmatch(r"\d{12}", v):
-                    # 후보를 발효/발표로 추정
-                    # 단, 정확한 컬럼명을 알 수 없으니 window와 announce용으로 적절 배치
-                    pass
-            # 직접 지정 가능한 경우에 대비
+
         # 해제 계열 제외
         if cmd in {"3", "4", "7"}:
             continue
@@ -224,7 +225,6 @@ class AdvisoryNode:
         self.name = "advisory_node"
 
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        print("🧩 노드: 기상특보 데이터 수집")
         out: List[Dict[str, str]] = []
 
         # 1) 현재 특보 우선
@@ -236,7 +236,7 @@ class AdvisoryNode:
             hist_docs = fetch_wrn_history_window()
             out.extend(hist_docs)
 
-        # 상태에 저장 (지역 필터는 상위에서)
+        # 상태에 저장 (지역/기간 필터는 상위에서)
         state.setdefault("advisory_data", [])
         state["advisory_data"].extend(out)
 

@@ -40,7 +40,7 @@ from langgraph.graph import StateGraph, END
 load_dotenv()
 
 # =========[ 환경설정 ]=========
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "agri_disaster_docs")
@@ -121,6 +121,10 @@ def make_llm() -> ChatOpenAI:
 DRAFT_PROMPT = ChatPromptTemplate.from_template(
     """너는 농작물 재해 정보 전문가야.
 아래 문맥을 참고하여 질문에 대한 초안 답변을 작성해줘.
+**문맥에 표(pdf_table)가 있으면 이를 중심으로 답변해줘.**
+**문맥에 없는 정보는 절대 넣지마.**
+**질문에서 요청한 연도와 문맥의 연도가 다르면 반드시 "해당 연도의 정보를 찾을 수 없습니다"라고 답변해줘.**
+
 답변은 딱딱한 보고서 형식이 아닌, 대화하듯이 친절하게 설명하는 스타일로 작성해야 해.
 
 **답변 형식 규칙:**
@@ -146,9 +150,11 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
 )
 
 WEB_SEARCH_PROMPT = ChatPromptTemplate.from_template(
-    """너는 농업재해 및 농업 정보 전문가야.
+    """너는 농업재해 및 작물 재해대응 정보 전문가야.
 아래에는 로컬 인덱스 문맥과 웹 검색 결과가 함께 있어.
 이 모든 정보를 활용하여 초안 답변을 작성해줘. 답변은 대화체로, 친절하게 설명하는 스타일로 작성해야 해.
+
+**중요**: 질문에서 요청한 연도와 문맥의 연도가 다르면 반드시 "해당 연도의 정보를 찾을 수 없습니다"라고 답변해줘.
 
 **답변 형식 규칙:**
 - 시작, 개요, 상세 내용, 출처, 마무리 규칙은 로컬 인덱스 초안과 동일하게 적용해.
@@ -281,44 +287,55 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
     vectorstore = _vectorstore
 
     region = extract_region_from_question(q)
+    # ✅ 질문에서 연도 추출
+    year_match = re.search(r"(19|20)\d{2}", q)
+    year = int(year_match.group()) if year_match else None
+
     results_with_score = []
 
-    if region:
-        print(f"   - 지역명 '{region}'을(를) 사용하여 필터링된 검색 수행")
-        try:
-            expr = f"json_contains(regions, '\"{region}\"')"
-            filtered_results_with_score = vectorstore.similarity_search_with_score(q, k=5, expr=expr)
-            print(f"   - 필터링된 검색 결과: {len(filtered_results_with_score)}개")
-            results_with_score.extend(filtered_results_with_score)
-            if len(results_with_score) < 3:
-                print("   - 결과가 부족하여 일반 검색을 추가로 수행합니다.")
-                unfiltered_results_with_score = vectorstore.similarity_search_with_score(q, k=5)
+    try:
+        exprs = []
+        if region:
+            exprs.append(f"json_contains(regions, '\"{region}\"')")
+        if year:
+            exprs.append(f"json_contains(years, {year})")
+        expr = " and ".join(exprs) if exprs else None
+
+        if expr:
+            print(f"   - 필터 적용: {expr}")
+            results_with_score = vectorstore.similarity_search_with_score(q, k=30, expr=expr)
+            print(f"   - 필터링된 검색 결과: {len(results_with_score)}개")
+            if len(results_with_score) < 10:
+                print("   - 결과 부족 → 일반 검색 추가")
+                unfiltered = vectorstore.similarity_search_with_score(q, k=30)
                 existing_content = {doc.page_content for doc, _ in results_with_score}
-                for doc, score in unfiltered_results_with_score:
+                for doc, score in unfiltered:
                     if doc.page_content not in existing_content:
                         results_with_score.append((doc, score))
                         existing_content.add(doc.page_content)
-        except Exception as e:
-            print(f"   - ⚠️ 메타데이터 필터링 검색 실패, 일반 검색으로 대체: {e}")
-            results_with_score = vectorstore.similarity_search_with_score(q, k=8)
-    else:
-        print("   - 지역명이 없어 일반 유사도 검색 수행")
-        results_with_score = vectorstore.similarity_search_with_score(q, k=8)
+        else:
+            print("   - 필터 조건 없음 → 일반 검색 수행")
+            results_with_score = vectorstore.similarity_search_with_score(q, k=30)
+    except Exception as e:
+        print(f"   - ⚠️ 메타데이터 필터링 실패 → 일반 검색 사용: {e}")
+        results_with_score = vectorstore.similarity_search_with_score(q, k=30)
 
     results_with_score.sort(key=lambda x: x[1])
     docs = [doc for doc, score in results_with_score]
 
     ctx_parts = []
-    for d, score in results_with_score[:8]:
+    for d, score in results_with_score[:30]:
         meta = getattr(d, "metadata", {})
         fname = meta.get("file_name") or meta.get("source") or "unknown"
         page = meta.get("page")
         tag = meta.get("type") or "text"
-        header = f"[유사도:{score:.4f}][{tag}][{fname}{f' p.{page}' if page else ''}]"
+        years = meta.get("years") or []
+        header = f"[유사도:{score:.4f}][{tag}][{fname}{f' p.{page}' if page else ''}][years={years}]"
         ctx_parts.append(f"{header}\n{d.page_content}")
 
     context = "\n\n".join(ctx_parts) or "관련 문서를 찾을 수 없습니다."
     return {**state, "db_context": context, "retrieved_docs": docs}
+
 
 def combine_context_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 컨텍스트 결합")
@@ -350,7 +367,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         return {**state, "web_context": f"[웹 검색 실패: {e}]"}
 
 def generate_draft_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 초안 생성")
+    print("🧩 노드: 최종 답변 생성")
     if not state.get("context"):
         raise ValueError("context 누락")
     t = state.get("temporal") or {}
@@ -371,33 +388,9 @@ def generate_draft_node(state: GraphState) -> Dict[str, Any]:
         "question_raw": state.get("question", ""),
         "question_resolved": state.get("question_resolved", state.get("question", "")),
     })
-    return {**state, "answer_draft": ans.strip()}
-
-def refine_answer_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 답변 개선 및 최종 생성")
-    if not state.get("answer_draft"):
-        raise ValueError("answer_draft 누락")
-    t = state.get("temporal") or {}
-    use_web_prompt = _has_web_results(state.get("context", ""))
-    prompt = WEB_SEARCH_REFINE_PROMPT if use_web_prompt else REFINE_PROMPT
-    chain = (
-        {
-            "context": itemgetter("context"),
-            "question_raw": lambda s: s.get("question", ""),
-            "question_resolved": lambda s: s.get("question_resolved", s.get("question", "")),
-            "answer_draft": itemgetter("answer_draft"),
-        }
-        | prompt.partial(today=t.get("today", ""))
-        | make_llm()
-        | StrOutputParser()
-    )
-    ans = chain.invoke({
-        "context": state.get("context", ""),
-        "question_raw": state.get("question", ""),
-        "question_resolved": state.get("question_resolved", state.get("question", "")),
-        "answer_draft": state["answer_draft"],
-    })
     return {**state, "answer": ans.strip()}
+
+# refine_answer_node 제거됨 - 초안 답변을 그대로 최종 답변으로 사용
 
 # ===== LLM 기반 검증 노드들 =====
 # (삭제됨) MAX_RETRIES
@@ -449,7 +442,7 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         except json.JSONDecodeError:
             # JSON 파싱 실패 시 기존 방식으로 폴백
             result_clean = result.strip().upper()
-            is_sufficient = "SUFFICIENT" in result_clean
+            is_sufficient = "SUFFICIENT" in result_clean and "INSUFFICIENT" not in result_clean
             print(f"   - 📊 LLM 검증 결과 (폴백): {result.strip()}")
             print(f"   - 🎯 최종 판단: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
         
@@ -482,7 +475,7 @@ def build_graph():
     g.add_node("web_search", web_search_node)
     g.add_node("combine_context", combine_context_node)
     g.add_node("generate_draft", generate_draft_node)
-    g.add_node("refine_answer", refine_answer_node)
+    # refine_answer 노드 제거됨
     # 2차 검증/폴백 노드 제거
 
     g.set_entry_point("load_store")
@@ -498,25 +491,36 @@ def build_graph():
     )
     g.add_edge("web_search", "combine_context")
     g.add_edge("combine_context", "generate_draft")
-    g.add_edge("generate_draft", "refine_answer")
-    # 2차 검증 제거: 최종 답변 생성 후 바로 종료
-    g.add_edge("refine_answer", END)
+    # refine_answer 제거: generate_draft에서 바로 최종 답변 생성 후 종료
+    g.add_edge("generate_draft", END)
 
     # 2차 검증 흐름 제거에 따라 관련 분기 제거 (복구 가능)
     # 필요 시 추후 복구 가능
 
     app = g.compile()
-    try:
-        graph_image_path = "agent_workflow_openai.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_openai.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
     return app
 
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_disaster_app = None
+
+def _get_disaster_app():
+    """재해대응 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _disaster_app
+    if _disaster_app is None:
+        print("⚠️ 재해_agent 모듈 로딩 중...")
+        _disaster_app = build_graph()
+        print("✅ 재해_agent 모듈 로딩 완료")
+    return _disaster_app
+
 # =========[ OchestratorTest.py 호환 함수 ]=========
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
     OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
     
@@ -537,8 +541,8 @@ async def run(state: dict) -> dict:
         
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
         
-        # 그래프 빌드 및 실행
-        app = build_graph()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_disaster_app()
         
         # 그래프 실행
         result = app.invoke({"question": query})
@@ -548,7 +552,11 @@ async def run(state: dict) -> dict:
         
         print(f"[재해_agent_LLM] 답변 생성 완료: {len(answer)}자")
         
-        return {"agent_answer": answer}
+        # 전체 그래프 상태를 반환 (RAGAS 평가를 위해)
+        return {
+            "agent_answer": answer,
+            **result  # 그래프의 모든 상태 정보 포함
+        }
         
     except Exception as e:
         error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"

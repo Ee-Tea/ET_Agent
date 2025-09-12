@@ -1,24 +1,24 @@
 import re
 import json
 import time
+import logging
 from langgraph.graph import StateGraph, END
-
 from langchain_core.runnables import RunnableLambda
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
 from langchain_openai import ChatOpenAI
-from typing import TypedDict, Annotated, List, Dict, Optional
+from typing import Annotated, List, Dict, Optional
 import operator
 from langsmith import traceable
 from dotenv import load_dotenv
-import os, sys
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import traceback
 import signal
-from common.milvus_helpers import search_milvus_documents, search_milvus_documents_by_subject, get_milvus_retriever, create_context_from_documents
+
 load_dotenv()
+
+# 전역 로그 레벨 설정 (DEBUG, INFO, WARNING, ERROR)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 
 # 전역 인터럽트 플래그
 _interrupt_flag = threading.Event()
@@ -66,118 +66,237 @@ def merge_lists_unique(left: list, right: list) -> list:
             result.append(item)
     return result
 
-# RouterState 클래스를 Farmer 클래스 외부로 이동
-class RouterState(dict):
-    query: Annotated[List[str], operator.add] = None
-    selected_agents: Annotated[List[str], merge_lists_unique] = None
-    question_parts: Annotated[Dict[str, str], merge_dicts] = None
-    execution_order: Annotated[List[str], merge_lists_unique] = None
-    crop_info: Annotated[List[str], operator.add] = None
-    selected_crop: Annotated[List[str], merge_lists_unique] = None
-    agent_results: Annotated[Dict[str, str], merge_dicts] = None
-    output: Annotated[List[str], operator.add] = None
-    session: Annotated[Dict[str, any], merge_dicts] = None
-    artifacts: Annotated[Dict[str, any], merge_dicts] = None
-    routing: Annotated[Dict[str, any], merge_dicts] = None
-    error_info: Annotated[Dict[str, str], merge_dicts] = None
-    crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = None
-    milvus_context: Annotated[str, merge_dicts] = None
-    milvus_data: Annotated[Dict[str, any], merge_dicts] = None
 
-def signal_handler(signum, frame):
-    """키보드 인터럽트 시그널 핸들러"""
-    _interrupt_flag.set()
-    # KeyboardInterrupt 예외 발생으로 정상적인 종료 처리
-    raise KeyboardInterrupt()
+class LoggingConfig:
+    """로깅 설정 관리 클래스"""
+    
+    @staticmethod
+    def setup_logger(name: str, level: str = None) -> logging.Logger:
+        """로거 설정 및 반환"""
+        if level is None:
+            level = LOG_LEVEL  # 전역 로그 레벨 사용
+            
+        logger = logging.getLogger(name)
+        
+        # 이미 핸들러가 설정된 경우 중복 설정 방지
+        if logger.handlers:
+            return logger
+            
+        logger.setLevel(getattr(logging, level.upper()))
+        
+        # 포맷터 설정
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        # 콘솔 핸들러
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        return logger
+    
+    @staticmethod
+    def get_logger(name: str) -> logging.Logger:
+        """기존 로거 반환 또는 새로 생성"""
+        return LoggingConfig.setup_logger(name)
 
-class Farmer:
-    """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
+
+class FarmerConfig:
+    """Farmer 오케스트레이터 설정 클래스"""
     
-    def __init__(self, user_id: str = "default_user", service: str = "farmer", chat_id: str = "default_chat"):
-        """Farmer 클래스 초기화 - 지연 로딩 최적화"""
-        # 사용자 식별자 설정
-        self.user_id = user_id
-        self.service = service
-        self.chat_id = chat_id
-        
-        # LLM 설정 (필수 - 즉시 로딩)
-        self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
-        
-        # 메모리 시스템 초기화 (가벼운 작업)
-        self._init_memory_system()
-        
-        # 워크플로우 그래프 생성 (지연 로딩으로 변경)
-        self._graph = None  # 지연 로딩용
-        
-        # 병렬 처리용 스레드 풀 (필요시에만 생성)
-        self._thread_pool = None
-        
-        # 시그널 핸들러 등록 (메인 스레드에서만)
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGINT, signal_handler)
-        
-        print(f"✅ Farmer 초기화 완료 (지연 로딩 모드)")
+    # LLM 설정
+    LLM_MODEL = "gpt-4o-mini"
+    LLM_TEMPERATURE = 0.8
     
-    def _init_memory_system(self):
-        """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
-        print("📝 메모리 시스템: Main에서 중앙집중식 관리")
     
-    @property
-    def graph(self):
-        """워크플로우 그래프 지연 로딩"""
-        if self._graph is None:
-            print("🔄 Farmer 워크플로우 그래프 생성 중...")
-            self._graph = self.create_workflow()
-            print("✅ Farmer 워크플로우 그래프 생성 완료")
-        return self._graph
+    # 캐시 설정
+    LRU_CACHE_SIZE = 128
     
-    @property
-    def thread_pool(self):
-        """스레드 풀 지연 로딩"""
-        if self._thread_pool is None:
-            print("🔄 Farmer 스레드 풀 생성 중...")
-            self._thread_pool = ThreadPoolExecutor(max_workers=4)
-            print("✅ Farmer 스레드 풀 생성 완료")
-        return self._thread_pool
+    # 에이전트 설명
+    AGENT_DESCRIPTIONS = {
+        "작물추천_agent": (
+            "사용자의 재배 환경(계절, 토양, 기후 등), 목적, 특정 조건(수확 시기, 맛, 저장성 등)에 맞는 새로운 작물이나 품종을 추천합니다."
+            "※ 핵심 키워드: '어떤 작물을 심을까', '무엇을 재배하면 좋을까', '추천해주세요'"
+        ),
+        "작물재배_agent": (
+            "씨앗, 모종 심기부터 작물의 재배 방법, 심는 방법, 이랑을 만드는 방법, 솎음, 영양 관리(시비, 비료, 거름), 병해충 방제, 수확에 이르기까지 특정 작물을 키우는 데 필요한 일상적인 재배 관리 정보를 제공합니다."
+            "※ 핵심 키워드: '심는 방법', '키우는 법', '재배 방법', '이랑', '솎음', '거름', '비료', '영양 관리', '병해충', '수확', '어떻게'"
+        ),
+        "재해_agent": (
+            "폭염, 한파, 가뭄, 집중호우, 홍수 등 자연재해 및 이상기후로 인한 피해를 예방하고 대응하는 방법을 안내합니다. 재해 발생 전 대비, 재해 발생 중의 조치, 재해 후 작물 복구 및 피해 최소화 방안을 다룹니다."
+            "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
+        ),
+        "판매처_agent": (
+            "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 시세, 최근 가격 변동을 안내합니다."
+            "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
+        )
+    }
+    
+    # 에이전트 모듈 매핑
+    AGENT_MODULES = {
+        "작물추천_agent": "farmer.recommend.crop_recommendation_agent",
+        "작물재배_agent": "farmer.cultivation.New_CG_agent", 
+        "재해_agent": "farmer.disaster.DisasterAgent_LLM",
+        "날씨_agent": "farmer.weather.run_weather_agent_simple",
+        "판매처_agent": "farmer.sales.SalesAgent"
+    }
+    
+    @classmethod
+    def get_llm_config(cls):
+        """LLM 설정 반환"""
+        return {
+            "model_name": cls.LLM_MODEL,
+            "temperature": cls.LLM_TEMPERATURE,
+            "api_key": os.getenv("OPENAI_API_KEY")
+        }
+ 
+class AgentManager:
+    """에이전트 로딩 및 관리 클래스"""
+    
+    def __init__(self):
+        self._cache = _agent_functions_cache
+        self.logger = LoggingConfig.get_logger("AgentManager")
+    
+    def get_agent_function(self, agent_name: str):
+        """에이전트 함수를 지연 로딩으로 가져오기 (전역 캐시 사용)"""
+        # 해당 에이전트가 아직 로드되지 않은 경우에만 import
+        if agent_name not in self._cache:
+            self.logger.debug(f"{agent_name} 모듈 로딩 시작")
+            
+            try:
+                if agent_name == "작물추천_agent":
+                    from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
+                    self._cache[agent_name] = crop_recommend_run
+                elif agent_name == "작물재배_agent":
+                    from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
+                    self._cache[agent_name] = crop_cultivation_run
+                elif agent_name == "재해_agent":
+                    from farmer.disaster.DisasterAgent_LLM import run as disaster_run
+                    self._cache[agent_name] = disaster_run
+                elif agent_name == "날씨_agent":
+                    from farmer.weather.run_weather_agent_simple import run as weather_run
+                    self._cache[agent_name] = weather_run
+                elif agent_name == "판매처_agent":
+                    from farmer.sales.SalesAgent import run as market_run
+                    self._cache[agent_name] = market_run
+                else:
+                    self.logger.error(f"알 수 없는 에이전트: {agent_name}")
+                    return None
+                
+                self.logger.info(f"{agent_name} 모듈 로딩 완료")
+                
+            except Exception as e:
+                self.logger.error(f"{agent_name} 모듈 로딩 실패: {e}")
+                self._cache[agent_name] = None
+                return None
+        
+        return self._cache.get(agent_name)
     
     def clear_cache(self):
         """에이전트 함수 캐시 정리"""
-        global _agent_functions_cache
-        _agent_functions_cache.clear()
-        print("🧹 에이전트 함수 캐시 정리 완료")
+        self._cache.clear()
+        self.logger.info("에이전트 함수 캐시 정리 완료")
     
     def get_loaded_agents(self):
         """현재 로드된 에이전트 목록 반환"""
-        global _agent_functions_cache
-        return list(_agent_functions_cache.keys())
+        return list(self._cache.keys())
+
+class RouterState(dict):
+    """LangGraph 상태 클래스 - 적절한 기본값으로 초기화"""
     
-    def load_state(self, state: RouterState) -> RouterState:
+    # 사용자 입력 관련
+    query: Annotated[List[str], operator.add] = []
+    question_parts: Annotated[Dict[str, str], merge_dicts] = {}
+    
+    # 에이전트 관리 관련
+    selected_agents: Annotated[List[str], merge_lists_unique] = []
+    execution_order: Annotated[List[str], merge_lists_unique] = []
+    
+    # 작물 관련
+    crop_info: Annotated[List[str], operator.add] = []
+    selected_crop: Annotated[List[str], merge_lists_unique] = []
+    crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = []
+    
+    # 결과 및 출력
+    agent_results: Annotated[Dict[str, str], merge_dicts] = {}
+    output: Annotated[List[str], operator.add] = []
+    
+    # 세션 및 메타데이터
+    session: Annotated[Dict[str, any], merge_dicts] = {}
+    artifacts: Annotated[Dict[str, any], merge_dicts] = {}
+    routing: Annotated[Dict[str, any], merge_dicts] = {}
+    
+    # 에러 및 디버깅
+    error_info: Annotated[Dict[str, str], merge_dicts] = {}
+    
+    # 외부 데이터
+    milvus_context: Annotated[str, merge_dicts] = ""
+    milvus_data: Annotated[Dict[str, any], merge_dicts] = {}
+
+
+class ErrorHandler:
+    """통합 에러 처리 클래스"""
+    
+    def __init__(self):
+        self.logger = LoggingConfig.get_logger("ErrorHandler")
+    
+    def handle_error(self, state: RouterState, error: Exception, context: str = "") -> RouterState:
+        """에러 처리 및 상태 복구"""
+        error_info = {
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "context": context,
+            "timestamp": str(time.time())
+        }
+        
+        state["error_info"] = error_info
+        self.logger.error(f"에러 발생 [{context}]: {error}")
+        self.logger.debug(f"에러 상세: {error_info}")
+        
+        # 에러 복구 시도
+        try:
+            # 기본 응답으로 복구
+            state["output"] = [f"죄송합니다. {context} 처리 중 오류가 발생했습니다. 다시 시도해주세요."]
+            self.logger.info("기본 응답으로 복구 완료")
+        except Exception as recovery_error:
+            self.logger.critical(f"복구 실패: {recovery_error}")
+            state["output"] = ["시스템 오류가 발생했습니다. 관리자에게 문의해주세요."]
+        
+        return state
+    
+    @staticmethod
+    def safe_execute(func, *args, **kwargs):
+        """안전한 함수 실행 래퍼"""
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            # 로거를 직접 생성 (static method이므로)
+            logger = LoggingConfig.get_logger("ErrorHandler")
+            logger.error(f"함수 실행 중 오류: {e}")
+            return None
+
+
+class StateManager:
+    """상태 관리 클래스"""
+    
+    @staticmethod
+    def load_state(state: RouterState) -> RouterState:
         """그래프 시작 시 상태 초기화 - supervisor에서 query와 selected_crop만 받음"""
-        print(f"📋 상태 로딩 시작...")
+        logger = LoggingConfig.get_logger("StateManager")
+        logger.debug("상태 로딩 시작")
         
         # supervisor에서 전달받은 상태들 백업 (query, selected_crop, milvus_data)
         received_query = state.get("query", [])
         received_selected_crop = state.get("selected_crop", [])
         received_milvus_data = state.get("milvus_data", {})
         
-        print(f"📥 Supervisor에서 받은 상태들:")
-        print(f"  - query: {received_query}")
-        print(f"  - selected_crop: {received_selected_crop}")
-        print(f"  - milvus_data: {'연결됨' if received_milvus_data.get('connection_status') else '연결 안됨'}")
+        logger.debug(f"Supervisor에서 받은 상태들 - query: {received_query}, selected_crop: {received_selected_crop}")
+        logger.debug(f"milvus_data: {'연결됨' if received_milvus_data.get('connection_status') else '연결 안됨'}")
         
-        # 기본 상태 설정
+        # 세션 정보만 설정 (나머지는 RouterState 기본값 사용)
         state["session"] = {"loaded": True, "new_question": True}
-        state["selected_agents"] = []
-        state["question_parts"] = {}
-        state["execution_order"] = []
-        state["crop_info"] = []
-        state["agent_results"] = {}
-        state["output"] = []
-        state["routing"] = {}
-        state["error_info"] = {}
-        state["crop_recommendation_failed"] = []
-        state["artifacts"] = {}
-        state["milvus_context"] = ""
         
         # supervisor에서 받은 상태들 복원
         if received_query:
@@ -195,79 +314,215 @@ class Farmer:
         else:
             state["milvus_data"] = {}
         
-        print(f"✅ 상태 로딩 완료:")
-        print(f"  - query: {state['query']}")
-        print(f"  - selected_crop: {state['selected_crop']}")
-        print(f"  - milvus_data: {'연결됨' if state['milvus_data'].get('connection_status') else '연결 안됨'}")
+        logger.info("상태 로딩 완료")
+        logger.debug(f"최종 상태 - query: {state['query']}, selected_crop: {state['selected_crop']}")
         
         return state
+    
+    @staticmethod
+    def persist_state(state: RouterState) -> RouterState:
+        """그래프 종료 후 상태 저장"""
+        logger = LoggingConfig.get_logger("StateManager")
+        logger.debug("상태 저장 완료")
+        return state
+    
+    @staticmethod
+    def validate_state(state: RouterState) -> bool:
+        """상태 유효성 검증"""
+        logger = LoggingConfig.get_logger("StateManager")
+        required_fields = ["query", "selected_agents", "agent_results"]
+        
+        for field in required_fields:
+            if field not in state:
+                logger.error(f"상태 검증 실패: 필수 필드 '{field}' 누락")
+                return False
+        
+        return True
+
+
+class WorkflowBuilder:
+    """워크플로우 구성 클래스"""
+    
+    def __init__(self, orchestrator):
+        self.orchestrator = orchestrator
+    
+    def create_workflow(self):
+        """완전한 조건부 분기 워크플로우"""
+        workflow = StateGraph(RouterState)
+        
+        # 노드 추가
+        workflow.add_node("load_state", RunnableLambda(StateManager.load_state))
+        workflow.add_node("persist_state", RunnableLambda(StateManager.persist_state))
+        workflow.add_node("input", self.orchestrator.node_input)
+        workflow.add_node("agent_select", self.orchestrator.node_agent_select)
+        workflow.add_node("crop_recommend", self.orchestrator.node_crop_recommend)
+        
+        # 개별 에이전트 노드들 (LangGraph가 자동으로 병렬 처리)
+        workflow.add_node("crop_grow_agent", self.orchestrator.node_crop_grow_agent)
+        workflow.add_node("disaster_agent", self.orchestrator.node_disaster_agent)
+        workflow.add_node("weather_agent", self.orchestrator.node_weather_agent)
+        workflow.add_node("sales_agent", self.orchestrator.node_sales_agent)
+        
+        workflow.add_node("merge_output", self.orchestrator.node_merge_output)
+        
+        # 기본 엣지 - load_state → input → agent_select
+        workflow.add_edge("load_state", "input")
+        workflow.add_edge("input", "agent_select")
+        
+        # agent_select에서 조건부 분기 - 작물추천 우선 처리
+        def agent_select_branch_condition(state):
+            selected_agents = state.get("selected_agents", [])
+            
+            # 작물추천_agent가 선택된 경우 - 먼저 작물추천 실행
+            if "작물추천_agent" in selected_agents:
+                return "crop_recommend"
+            # 다른 에이전트만 선택된 경우 - 바로 병렬 처리
+            elif len(selected_agents) > 0:
+                return "parallel_agents"
+            # 아무것도 선택되지 않은 경우 - 작물추천으로 기본 설정
+            else:
+                return "crop_recommend"
+
+        workflow.add_conditional_edges(
+            "agent_select",
+            agent_select_branch_condition,
+            {
+                "crop_recommend": "crop_recommend",
+                "parallel_agents": "parallel_agents"
+            }
+        )
+        
+        # parallel_agents 노드 추가 (다른 에이전트들만 병렬 실행)
+        workflow.add_node("parallel_agents", self.orchestrator.node_parallel_agents)
+        
+        # parallel_agents에서 각 에이전트로 분기
+        workflow.add_edge("parallel_agents", "crop_grow_agent")
+        workflow.add_edge("parallel_agents", "disaster_agent")
+        workflow.add_edge("parallel_agents", "weather_agent")
+        workflow.add_edge("parallel_agents", "sales_agent")
+        
+        # crop_recommend에서 조건부 분기 - 작물추천 후 병렬 처리
+        def crop_recommend_branch_condition(state):
+            # 작물추천 실패 시 바로 종료
+            failed_list = state.get("crop_recommendation_failed", [])
+            if failed_list and True in failed_list:
+                return "persist_state"
+            
+            # 다른 에이전트가 있는지 확인
+            other_agents = [agent for agent in state.get("selected_agents", []) if agent != "작물추천_agent"]
+            if len(other_agents) > 0:
+                # 작물추천 완료 후 나머지 에이전트들을 병렬로 실행
+                return "parallel_agents"
+            else:
+                return "merge_output"
+        
+        workflow.add_conditional_edges(
+            "crop_recommend",
+            crop_recommend_branch_condition,
+            {
+                "parallel_agents": "parallel_agents",
+                "merge_output": "merge_output",
+                "persist_state": "persist_state"
+            }
+        )
+        
+        # LangGraph fan-in: 모든 에이전트 노드에서 병합 노드로
+        workflow.add_edge("crop_grow_agent", "merge_output")
+        workflow.add_edge("disaster_agent", "merge_output")
+        workflow.add_edge("weather_agent", "merge_output")
+        workflow.add_edge("sales_agent", "merge_output")
+
+        
+        # 병합 노드에서 종료
+        workflow.add_edge("merge_output", "persist_state")
+        workflow.add_edge("persist_state", END)
+        
+        workflow.set_entry_point("load_state")
+        
+        return workflow.compile()
+
+
+def signal_handler(signum, frame):
+    """키보드 인터럽트 시그널 핸들러"""
+    _interrupt_flag.set()
+    # KeyboardInterrupt 예외 발생으로 정상적인 종료 처리
+    raise KeyboardInterrupt()
+
+class Farmer:
+    """농업 오케스트레이터 - Supervisor에게 병합 가능한 구조"""
+    
+    def __init__(self, user_id: str = "default_user", service: str = "farmer", chat_id: str = "default_chat"):
+        """Farmer 클래스 초기화 - 지연 로딩 최적화"""
+        # 사용자 식별자 설정
+        self.user_id = user_id
+        self.service = service
+        self.chat_id = chat_id
+        
+        # 설정 클래스 사용
+        self.config = FarmerConfig()
+        
+        # LLM 설정 (필수 - 즉시 로딩)
+        llm_config = self.config.get_llm_config()
+        self.llm = ChatOpenAI(**llm_config)
+        
+        # 로거 초기화
+        self.logger = LoggingConfig.get_logger("Farmer")
+        
+        # 관리자 클래스들 초기화
+        self.agent_manager = AgentManager()
+        self.error_handler = ErrorHandler()
+        self.workflow_builder = WorkflowBuilder(self)
+        
+        # 메모리 시스템 초기화 (가벼운 작업)
+        self._init_memory_system()
+        
+        # 워크플로우 그래프 생성 (지연 로딩으로 변경)
+        self._graph = None  # 지연 로딩용
+        
+        
+        # 시그널 핸들러 등록 (메인 스레드에서만)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, signal_handler)
+        
+        self.logger.info("Farmer 초기화 완료 (지연 로딩 모드)")
+    
+    def _init_memory_system(self):
+        """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
+        self.logger.debug("메모리 시스템: Main에서 중앙집중식 관리")
+    
+    @property
+    def graph(self):
+        """워크플로우 그래프 지연 로딩"""
+        if self._graph is None:
+            self.logger.debug("Farmer 워크플로우 그래프 생성 중...")
+            self._graph = self.workflow_builder.create_workflow()
+            self.logger.info("Farmer 워크플로우 그래프 생성 완료")
+        return self._graph
+    
+    
+    def clear_cache(self):
+        """에이전트 함수 캐시 정리"""
+        self.agent_manager.clear_cache()
+    
+    def get_loaded_agents(self):
+        """현재 로드된 에이전트 목록 반환"""
+        return self.agent_manager.get_loaded_agents()
+    
+    def load_state(self, state: RouterState) -> RouterState:
+        """그래프 시작 시 상태 초기화 - StateManager 위임"""
+        return StateManager.load_state(state)
     
     def persist_state(self, state: RouterState) -> RouterState:
-        """그래프 종료 후 상태 저장"""
-        print("[상태 저장] 완료")
-        return state
-    
+        """그래프 종료 후 상태 저장 - StateManager 위임"""
+        return StateManager.persist_state(state)
     
     def _handle_error(self, state: RouterState, error: Exception, context: str = "") -> RouterState:
-        """에러 처리 및 상태 복구"""
-        error_info = {
-            "error_type": type(error).__name__,
-            "error_message": str(error),
-            "context": context,
-            "timestamp": str(os.time.time() if hasattr(os, 'time') else __import__('time').time())
-        }
-        
-        state["error_info"] = error_info
-        print(f"❌ 에러 발생 [{context}]: {error}")
-        print(f"🔍 에러 상세: {error_info}")
-        
-        # 에러 복구 시도
-        try:
-            # 기본 응답으로 복구
-            state["output"] = [f"죄송합니다. {context} 처리 중 오류가 발생했습니다. 다시 시도해주세요."]
-            print("🔄 기본 응답으로 복구 완료")
-        except Exception as recovery_error:
-            print(f"❌ 복구 실패: {recovery_error}")
-            state["output"] = ["시스템 오류가 발생했습니다. 관리자에게 문의해주세요."]
-        
-        return state
+        """에러 처리 및 상태 복구 - ErrorHandler 위임"""
+        return self.error_handler.handle_error(state, error, context)
     
     def _get_agent_function(self, agent_name: str):
-        """에이전트 함수를 지연 로딩으로 가져오기 (전역 캐시 사용)"""
-        global _agent_functions_cache
-        
-        # 해당 에이전트가 아직 로드되지 않은 경우에만 import
-        if agent_name not in _agent_functions_cache:
-            print(f"🔄 {agent_name} 모듈 로딩 중...")
-            
-            try:
-                if agent_name == "작물추천_agent":
-                    from farmer.recommend.crop_recommendation_agent import run as crop_recommend_run
-                    _agent_functions_cache[agent_name] = crop_recommend_run
-                elif agent_name == "작물재배_agent":
-                    from farmer.cultivation.New_CG_agent import run as crop_cultivation_run
-                    _agent_functions_cache[agent_name] = crop_cultivation_run
-                elif agent_name == "재해_agent":
-                    from farmer.disaster.DisasterAgent_LLM import run as disaster_run
-                    _agent_functions_cache[agent_name] = disaster_run
-                elif agent_name == "날씨_agent":
-                    from farmer.weather.run_weather_agent_simple import run as weather_run
-                    _agent_functions_cache[agent_name] = weather_run
-                elif agent_name == "판매처_agent":
-                    from farmer.sales.SalesAgent import run as market_run
-                    _agent_functions_cache[agent_name] = market_run
-                else:
-                    print(f"❌ 알 수 없는 에이전트: {agent_name}")
-                    return None
-                
-                print(f"✅ {agent_name} 모듈 로딩 완료")
-                
-            except Exception as e:
-                print(f"❌ {agent_name} 모듈 로딩 실패: {e}")
-                _agent_functions_cache[agent_name] = None
-                return None
-        
-        return _agent_functions_cache.get(agent_name)
+        """에이전트 함수를 지연 로딩으로 가져오기 - AgentManager 위임"""
+        return self.agent_manager.get_agent_function(agent_name)
     
     
     def invoke(self, state: dict, config: Optional[Dict] = None) -> dict:
@@ -310,7 +565,7 @@ class Farmer:
             else:
                 router_state["milvus_data"] = {}
             
-            print(f"🌾 Farmer 실행 시작: {state.get('query', '')}")
+            self.logger.info(f"Farmer 실행 시작: {state.get('query', '')}")
             
             # LangGraph 워크플로우를 따라 실행
             result = self.graph.invoke(router_state, config)
@@ -326,7 +581,7 @@ class Farmer:
             }
             
         except Exception as e:
-            print(f"❌ Farmer 오케스트레이터 실행 중 오류: {e}")
+            self.logger.error(f"Farmer 오케스트레이터 실행 중 오류: {e}")
             traceback.print_exc()
             return {
                 "output": f"Farmer 오케스트레이터 실행 중 오류가 발생했습니다: {e}",
@@ -342,26 +597,6 @@ class Farmer:
                 }
             }
 
-    # 에이전트 설명 정의
-    agent_descriptions = {
-        "작물추천_agent": (
-            "사용자의 재배 환경(계절, 토양, 기후 등), 목적, 특정 조건(수확 시기, 맛, 저장성 등)에 맞는 새로운 작물이나 품종을 추천합니다."
-            "※ 핵심 키워드: '어떤 작물을 심을까', '무엇을 재배하면 좋을까', '추천해주세요'"
-        ),
-        "작물재배_agent": (
-            "씨앗, 모종 심기부터 작물의 재배 방법, 심는 방법, 이랑을 만드는 방법, 솎음, 영양 관리(시비, 비료, 거름), 병해충 방제, 수확에 이르기까지 특정 작물을 키우는 데 필요한 일상적인 재배 관리 정보를 제공합니다."
-            "※ 핵심 키워드: '심는 방법', '키우는 법', '재배 방법', '이랑', '솎음', '거름', '비료', '영양 관리', '병해충', '수확', '어떻게'"
-        ),
-        "재해_agent": (
-            "폭염, 한파, 가뭄, 집중호우, 홍수 등 자연재해 및 이상기후로 인한 피해를 예방하고 대응하는 방법을 안내합니다. 재해 발생 전 대비, 재해 발생 중의 조치, 재해 후 작물 복구 및 피해 최소화 방안을 다룹니다."
-            "※ 핵심 키워드: '폭염', '한파', '가뭄', '홍수', '장마', '집중호우', '자연재해', '이상기후', '피해', '대응', '복구'"
-        ),
-        "판매처_agent": (
-            "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 시세, 최근 가격 변동을 안내합니다."
-            "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
-        )
-    }
-
     @lru_cache(maxsize=128)
     def simple_agent_selector(self, user_question):
         """
@@ -371,15 +606,15 @@ class Farmer:
         다음 질문을 분석하여 필요한 에이전트를 선택해주세요.
         
         [에이전트 역할 및 설명]
-        1) 작물추천_agent: {self.agent_descriptions["작물추천_agent"]}
+        1) 작물추천_agent: {self.config.AGENT_DESCRIPTIONS["작물추천_agent"]}
         
-        2) 작물재배_agent: {self.agent_descriptions["작물재배_agent"]}
+        2) 작물재배_agent: {self.config.AGENT_DESCRIPTIONS["작물재배_agent"]}
         
-        3) 재해_agent: {self.agent_descriptions["재해_agent"]}
+        3) 재해_agent: {self.config.AGENT_DESCRIPTIONS["재해_agent"]}
         
         4) 날씨_agent: '날씨', '기상' 이라는 키워드가 포함되어 있을 경우 선택 **태풍, 폭염 같은 재해는 재해_agent가 처리**
         
-        5) 판매처_agent: {self.agent_descriptions["판매처_agent"]}
+        5) 판매처_agent: {self.config.AGENT_DESCRIPTIONS["판매처_agent"]}
         
         질문: "{user_question}"
         
@@ -429,7 +664,7 @@ class Farmer:
                         return parsed_result
                     else:
                         # question_parts가 없는 경우 기본값 사용
-                        print(f"[⚠️ 질문 분류 누락 - 기본값 사용]")
+                        self.logger.warning("질문 분류 누락 - 기본값 사용")
                         question_parts = {agent: user_question for agent in selected_agents}
                         return {
                             "selected_agents": selected_agents,
@@ -451,7 +686,7 @@ class Farmer:
                     "execution_order": ["작물추천_agent"]
                 }
         except Exception as e:
-            print(f"에이전트 선택 실패: {e}")
+            self.logger.error(f"에이전트 선택 실패: {e}")
             return {
                 "selected_agents": ["작물추천_agent"],
                 "question_parts": None,
@@ -462,17 +697,17 @@ class Farmer:
     @traceable(name="node_input")
     def node_input(self, state: RouterState) -> RouterState:
         """사용자 질문에서 작물명을 추출하는 노드"""
-        print(f"\n=== 🌱 질문 분석 및 작물명 추출 ===")
+        self.logger.info("질문 분석 및 작물명 추출 시작")
         
         # 현재 상태에서 query 가져오기
         query = state.get("query", [])
         user_input = query[0] if query and len(query) > 0 else ""
         
         if not user_input:
-            print("❌ 질문이 없습니다.")
+            self.logger.error("질문이 없습니다")
             return state
         
-        print(f"📝 분석할 질문: {user_input}")
+        self.logger.debug(f"분석할 질문: {user_input}")
         
         # 새로운 질문 플래그 설정
         state.setdefault("session", {})
@@ -482,19 +717,19 @@ class Farmer:
         extracted_crop = self.extract_crop_from_question(user_input)
         
         if extracted_crop and extracted_crop.strip():
-            print(f"🌾 추출된 작물명: '{extracted_crop}'")
-            print(f"🔄 기존 작물 상태 '{state.get('selected_crop', [])}' → '{[extracted_crop.strip()]}' 대체")
+            self.logger.info(f"추출된 작물명: '{extracted_crop}'")
+            self.logger.debug(f"기존 작물 상태 '{state.get('selected_crop', [])}' → '{[extracted_crop.strip()]}' 대체")
             # 기존 selected_crop을 완전히 클리어하고 새 값으로 대체
             state["selected_crop"].clear()  # 기존 리스트 완전 클리어
             state["selected_crop"].append(extracted_crop.strip())  # 새 값만 추가
         else:
-            print("🔍 질문에서 구체적인 작물명을 찾을 수 없습니다.")
+            self.logger.debug("질문에서 구체적인 작물명을 찾을 수 없습니다")
             # 기존 selected_crop 유지 (있는 경우) 또는 빈 리스트
             if not state.get("selected_crop"):
                 state["selected_crop"] = []
         
-        print(f"📋 최종 작물 상태: {state['selected_crop']}")
-        print(f"[새로운 질문 처리 시작]")
+        self.logger.debug(f"최종 작물 상태: {state['selected_crop']}")
+        self.logger.info("새로운 질문 처리 시작")
         
         return state
     
@@ -509,7 +744,7 @@ class Farmer:
         Returns:
             추출된 작물명
         """
-        print(f"🤖 LLM으로 작물명 추출 중...")
+        self.logger.debug("LLM으로 작물명 추출 중...")
         
         if crop_recommendations:
             # 작물추천 결과에서 작물 선택
@@ -559,7 +794,7 @@ class Farmer:
             
             # "없음"이거나 빈 문자열인 경우 빈 문자열 반환
             if extracted_crop in ["없음", "", "None", "null"]:
-                print(f"❌ 추출 실패: 구체적인 작물명 없음")
+                self.logger.debug("추출 실패: 구체적인 작물명 없음")
                 return ""
             
             # 간단한 정리 (첫 번째 단어만, 줄바꿈/구두점 제거)
@@ -568,18 +803,18 @@ class Farmer:
             # 특정 작물명 정규화 (파 관련)
             if cleaned_crop in ["경량파", "파"]:
                 cleaned_crop = "대파"
-                print(f"🔄 작물명 정규화: '{extracted_crop}' → '{cleaned_crop}'")
+                self.logger.debug(f"작물명 정규화: '{extracted_crop}' → '{cleaned_crop}'")
             
-            print(f"✅ 작물명 추출 성공: '{cleaned_crop}'")
+            self.logger.info(f"작물명 추출 성공: '{cleaned_crop}'")
             return cleaned_crop
             
         except Exception as e:
-            print(f"❌ LLM 작물명 추출 실패: {e}")
+            self.logger.error(f"LLM 작물명 추출 실패: {e}")
             return ""
 
     @traceable(name="node_agent_select")
     def node_agent_select(self, state: RouterState) -> RouterState:
-        print(f"\n[에이전트 선택]")
+        self.logger.info("에이전트 선택 시작")
         
         # 안전하게 query 가져오기
         query = state.get("query", [])
@@ -593,9 +828,7 @@ class Farmer:
         state["question_parts"] = result.get("question_parts", {}) if result.get("question_parts") is not None else {}
         state["execution_order"] = result["execution_order"] if isinstance(result["execution_order"], list) else [result["execution_order"]]
         
-        print("\n[선택된 에이전트]")
-        for agent in state["selected_agents"]:
-            print(f"- {agent}")
+        self.logger.info(f"선택된 에이전트: {state['selected_agents']}")
         
         return state
 
@@ -604,23 +837,23 @@ class Farmer:
         if "작물추천_agent" not in state.get("selected_agents", []):
             return state
         
-        print("\n=== 작물추천_agent 실행 ===")
+        self.logger.info("작물추천_agent 실행 시작")
         
         # question_parts가 None인 경우 안전하게 처리
         question_parts = state.get("question_parts", {})
         if not question_parts:
             # 단일 에이전트인 경우 원본 질문 사용
             question_part = state["query"][0] if state["query"] else ""
-            print(f"[�� 단일 에이전트 - 원본 질문 사용] {question_part}")
+            self.logger.debug(f"단일 에이전트 - 원본 질문 사용")
         else:
             # 다중 에이전트인 경우 분류된 질문 사용
             question_part = question_parts.get("작물추천_agent", state["query"][0] if state["query"] else "")
-            print(f"[📝 다중 에이전트 - 분류된 질문 사용] {question_part}")
+            self.logger.debug(f"다중 에이전트 - 분류된 질문 사용")
         
-        print(f"담당 질문: {question_part}")
+        self.logger.debug(f"담당 질문: {question_part}")
         
         # 작물추천 에이전트 실행
-        print("🚀 작물추천_agent 실행 시작")
+        self.logger.info("작물추천_agent 실행")
         try:
             agent_func = self._get_agent_function("작물추천_agent")
             if agent_func:
@@ -635,7 +868,7 @@ class Farmer:
         except Exception as e:
             answer = f"작물추천_agent 실행 중 오류: {e}"
         
-        print(f"\n[작물추천_agent 원본 응답]\n{answer}")
+        self.logger.debug(f"응답 미리보기: {answer[:100]}...")
         
         # 작물추천 결과에서 하나의 작물 선택
         selected_crop = self.extract_crop_from_question(question_part, answer)
@@ -647,13 +880,12 @@ class Farmer:
         
         # 작물 추출 실패 시 fallback 플래그 설정
         if not selected_crop or selected_crop.strip() == "":
-            print(f"\n[⚠️ 작물 추출 실패] 다른 에이전트 실행을 건너뛰고 작물추천 결과만 출력합니다.")
+            self.logger.debug(f"\n작물 추출 실패")
             state["crop_recommendation_failed"] = [True]
             # 최종 출력을 작물추천 답변으로 설정
             state["output"] = [answer]
-            print(f"[📤 최종 출력 설정] 작물추천 결과를 그대로 출력합니다.")
         else:
-            print(f"[작물 추출 완료]")
+            self.logger.debug(f"작물 추출 완료")
             state["crop_recommendation_failed"] = []
         
         return state
@@ -664,10 +896,9 @@ class Farmer:
         """작물재배_agent 전용 노드 - LangGraph 병렬 처리"""
         selected_agents = state.get("selected_agents", [])
         if not selected_agents or "작물재배_agent" not in selected_agents:
-            print(f"[⏭️ 작물재배_agent 건너뜀] - 선택된 에이전트: {selected_agents}")
             return state
         
-        print(f"\n=== 🌱 작물재배_agent 실행 ===")
+        self.logger.info("작물재배_agent 실행")
         
         # 질문 부분 가져오기
         question_parts = state.get("question_parts", {})
@@ -676,13 +907,12 @@ class Farmer:
         else:
             question_part = state["query"][0] if state["query"] else ""
         
-        print(f"[📝 담당 질문] {question_part}")
         
         # 작물재배_agent 전용 작물명 처리
         selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
         if selected_crop and selected_crop not in question_part:
             question_part = f"{selected_crop} {question_part}"
-            print(f"[🔄 수정된 질문] {question_part}")
+            self.logger.debug(f"담당 질문: {question_part}")
 
         # 에이전트 실행
         try:
@@ -702,8 +932,8 @@ class Farmer:
         # 전용 키에 답변 저장
         state["agent_results"]["작물재배_agent"] = answer
         
-        print(f"[✅ 작물재배_agent 완료]")
-        print(f"[📤 응답 미리보기] {answer[:100]}...")
+        self.logger.info("작물재배_agent 완료")
+        self.logger.debug(f"응답 미리보기: {answer[:100]}...")
         return state
 
     @traceable(name="node_disaster_agent")
@@ -711,10 +941,9 @@ class Farmer:
         """재해_agent 전용 노드 - LangGraph 병렬 처리"""
         selected_agents = state.get("selected_agents", [])
         if not selected_agents or "재해_agent" not in selected_agents:
-            print(f"[⏭️ 재해_agent 건너뜀] - 선택된 에이전트: {selected_agents}")
             return state
         
-        print(f"\n=== ⚠️ 재해_agent 실행 ===")
+        self.logger.info("재해_agent 실행")
         
         # 질문 부분 가져오기
         question_parts = state.get("question_parts", {})
@@ -723,13 +952,12 @@ class Farmer:
         else:
             question_part = state["query"][0] if state["query"] else ""
         
-        print(f"[📝 담당 질문] {question_part}")
         
         # 재해_agent 전용 작물명 처리
         selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
         if selected_crop and selected_crop not in question_part:
             question_part = f"{selected_crop} 재배 중, {question_part}"
-            print(f"[🔄 수정된 질문] {question_part}")
+            self.logger.debug(f"담당 질문: {question_part}")
         
         # 에이전트 실행
         try:
@@ -749,8 +977,8 @@ class Farmer:
         # 전용 키에 답변 저장
         state["agent_results"]["재해_agent"] = answer
         
-        print(f"[✅ 재해_agent 완료]")
-        print(f"[📤 응답 미리보기] {answer[:100]}...")
+        self.logger.info("재해_agent 완료")
+        self.logger.debug(f"응답 미리보기: {answer[:100]}...")
         return state
 
     @traceable(name="node_sales_agent")
@@ -758,10 +986,9 @@ class Farmer:
         """판매처_agent 전용 노드 - LangGraph 병렬 처리"""
         selected_agents = state.get("selected_agents", [])
         if not selected_agents or "판매처_agent" not in selected_agents:
-            print(f"[⏭️ 판매처_agent 건너뜀] - 선택된 에이전트: {selected_agents}")
             return state
         
-        print(f"\n=== �� 판매처_agent 병렬 실행 ===")
+        self.logger.info("판매처_agent 실행")
         
         # 질문 부분 가져오기
         question_parts = state.get("question_parts", {})
@@ -770,13 +997,12 @@ class Farmer:
         else:
             question_part = state["query"][0] if state["query"] else ""
         
-        print(f"[📝 담당 질문] {question_part}")
         
         # 판매처_agent 전용 작물명 처리
         selected_crop = state.get("selected_crop", [""])[0] if state.get("selected_crop") else ""
         if selected_crop and selected_crop not in question_part:
             question_part = f"{selected_crop} {question_part}"
-            print(f"[🔄 수정된 질문 ] {question_part}")
+            self.logger.debug(f"담당 질문: {question_part}")
         
         # 에이전트 실행
         try:
@@ -796,8 +1022,8 @@ class Farmer:
         # 전용 키에 답변 저장
         state["agent_results"]["판매처_agent"] = answer
         
-        print(f"[✅ 판매처_agent 병렬 실행 완료]")
-        print(f"[📤 응답 원본] {answer[:200]}...")
+        self.logger.info("판매처_agent 완료")
+        self.logger.debug(f"응답 미리보기: {answer[:100]}...")
         return state
 
     @traceable(name="node_weather_agent")
@@ -805,10 +1031,9 @@ class Farmer:
         """날씨_agent 전용 노드 - LangGraph 병렬 처리"""
         selected_agents = state.get("selected_agents", [])
         if not selected_agents or "날씨_agent" not in selected_agents:
-            print(f"[⏭️ 날씨_agent 건너뜀] - 선택된 에이전트: {selected_agents}")
             return state
         
-        print(f"\n=== 🌤️ 날씨_agent 병렬 실행 ===")
+        self.logger.info("날씨_agent 실행")
         
         # 질문 부분 가져오기
         question_parts = state.get("question_parts", {})
@@ -817,7 +1042,7 @@ class Farmer:
         else:
             question_part = state["query"][0] if state["query"] else ""
         
-        print(f"[📝 담당 질문] {question_part}")
+        self.logger.debug(f"담당 질문: {question_part}")
         
         # 날씨_agent는 작물명 처리가 필요 없으므로 원본 질문 그대로 사용
         # (날씨는 지역과 시간이 중요하므로)
@@ -840,8 +1065,8 @@ class Farmer:
         # 전용 키에 답변 저장
         state["agent_results"]["날씨_agent"] = answer
         
-        print(f"[✅ 날씨_agent 병렬 실행 완료]")
-        print(f"[📤 응답 원본] {answer[:200]}...")
+        self.logger.info("날씨_agent 완료")
+        self.logger.debug(f"응답 미리보기: {answer[:100]}...")
         return state
 
     @traceable(name="node_parallel_agents")
@@ -851,11 +1076,10 @@ class Farmer:
         other_agents = [agent for agent in selected_agents if agent != "작물추천_agent"]
         
         if not other_agents:
-            print(f"[⏭️ 병렬 실행할 다른 에이전트 없음]")
             return state
         
-        print(f"\n=== 🚀 병렬 에이전트 실행 시작 ===")
-        print(f"[📋 실행될 에이전트] {other_agents}")
+        self.logger.info("병렬 에이전트 실행 시작")
+        self.logger.debug(f"실행될 에이전트: {other_agents}")
         
         # LangGraph가 자동으로 병렬 처리하므로 상태만 반환
         # 실제 에이전트 실행은 개별 노드들에서 처리됨
@@ -863,7 +1087,7 @@ class Farmer:
 
     @traceable(name="node_merge_output")
     def node_merge_output(self, state: RouterState) -> RouterState:
-        print("\n=== 최종 응답 병합 시작 ===")
+        self.logger.info("최종 응답 병합 시작")
         
         # 각 에이전트 결과 수집
         agent_results = {}
@@ -876,10 +1100,6 @@ class Farmer:
         
         # 실행 요약 출력
         selected_agents = state.get("selected_agents", [])
-        print(f"[ 실행 요약]")
-        print(f"  - 선택된 에이전트: {selected_agents}")
-        print(f"  - 선택된 작물: {state.get('selected_crop', [''])[0] if state.get('selected_crop') else ''}")
-        print(f"  - 실행된 에이전트: {list(agent_results.keys())}")
         
         output = ""
         
@@ -889,10 +1109,10 @@ class Farmer:
             if agent in agent_results:
                 result = agent_results[agent]
                 output = str(result)
-                print(f"[✅ 단일 에이전트 응답 완료] {agent}")
+                self.logger.info(f"단일 에이전트 응답 완료: {agent}")
             else:
                 output = f"{agent} 실행 결과를 찾을 수 없습니다."
-                print(f"[❌ {agent} 응답 없음]")
+                self.logger.error(f"{agent} 응답 없음")
         else:
             # 여러 에이전트가 있는 경우 기존 로직 유지
             # 작물추천 결과가 있으면 먼저 표시
@@ -902,7 +1122,7 @@ class Farmer:
                 # 선택된 작물 강조 표시
                 if state.get("selected_crop"):
                     output += f"\n[상세 분석 작물]\n{state['selected_crop']}\n"
-                    print(f"[ 상세 분석 작물] {state['selected_crop']}")
+
             
             # 다른 에이전트들의 답변 표시
             for agent, answer in agent_results.items():
@@ -916,162 +1136,56 @@ class Farmer:
         # 에이전트가 하나뿐인 경우 LLM 요약 생략
         if len(selected_agents) == 1:
             state["output"] = [merged_output]
-            print("\n=== 🎯 최종 응답(단일 에이전트) ===")
-            print("=" * 50)
-            print(state["output"][0] if state["output"] else "")
-            print("=" * 50)
             return state
         
         # 여러 에이전트가 있는 경우에만 LLM 요약
-        print("\n[🤖 LLM 요약 시작...]")
+        self.logger.info("LLM 요약 시작...")
         summary_prompt = (
-            """
-            아래는 여러 농업 에이전트의 답변입니다. 답변 외의 정보는 제외해줘. 답변으로 받은 **정보는 하나도 변경하지도, 빼먹지도 말고 출력**해줘.
-            "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답해.
-            **이나 ##같은 마크다운 형식은 제외해줘.
+            f"""
+            아래는 여러 농업 agent의 답변입니다.
+            사용자는 농작물을 키우는 입장으로 당신에게 조언을 구하고 있습니다.
             사용자에게 최대한 자세하고 상세하게 한국어로 알려주세요.
-            작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent, 날씨_agent 순으로 자연스럽게 연결해서 답변해줘. **없는 내용은 생략**
-            내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답해줘.
-            사용자는 농작물을 키우는 입장이야. 농작물의 직매장 등을 찾는다면 판매하려 한다는 것을 알아둬.
-            마지막에는 사용자에게 다른 질문을 유도하는 문장을 넣어줘.
-            \n\n"""
-            f"{merged_output}\n\n"
+            작물 추천, 재배 방법, 재해, 판매처, 날씨 순으로 자연스럽게 대화하듯 연결해주세요. (**실행되지 않은 agent는 생략**)
+            \n\n
+            {merged_output}
+            \n\n
+            [중요 규칙 - 반드시 지켜주세요]
+            - 답변으로 받은 정보는 변경하거나 빼먹지 말고 출력
+            - "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답
+            - 내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답
+            - 농작물의 직매장 등을 찾는다면 판매하려 한다는 것을 알아둬
+            - **절대 마크다운 형식을 사용하지 마세요**: **, ##, ###, *, -, [], (), ``` 등 모든 마크다운 문법 금지
+            - **순수한 텍스트만 사용하세요**: 굵은 글씨, 제목, 리스트, 코드 블록 등 모두 일반 텍스트로 변환
+            - 마지막에는 사용자에게 다른 질문을 유도하는 문장 추가
+            """
         )
         
         try:
             summary = self.llm.invoke(summary_prompt)
-            print(f"[✅ LLM 요약 완료] {len(summary.content)}자")
+            self.logger.info(f"LLM 요약 완료")
         except Exception as e:
             summary = f"요약 중 오류: {e}"
-            print(f"[❌ LLM 요약 실패] {e}")
+            self.logger.error(f"LLM 요약 실패: {e}")
         
-        state["output"] = [summary.content.strip() if hasattr(summary, 'content') else summary.strip()]
+        # 마크다운 제거 후처리
+        raw_content = summary.content.strip() if hasattr(summary, 'content') else summary.strip()
+        cleaned_content = self._remove_markdown(raw_content)
         
-        # 최종 요약된 응답만 출력 (중복 제거)
-        print("\n=== 🎯 최종 응답(요약) ===")
-        print(f"[📊 요약 길이] {len(state['output'][0]) if state['output'] else 0}자")
-        print("=" * 50)
-        print(state["output"][0] if state["output"] else "")
-        print("=" * 50)
-        
+        state["output"] = [cleaned_content]
+        self.logger.debug(f"--- 최종 응답 --- \n{state['output']}")
+
         return state
+    
+    def _remove_markdown(self, text: str) -> str:
+        """마크다운 형식을 제거하는 함수"""
 
-    # 워크플로우 그래프
-    def create_workflow(self):
-        """완전한 조건부 분기 워크플로우"""
-        workflow = StateGraph(RouterState)
-        
-        # 노드 추가
-        workflow.add_node("load_state", RunnableLambda(self.load_state))
-        workflow.add_node("persist_state", RunnableLambda(self.persist_state))
-        workflow.add_node("input", self.node_input)
-        workflow.add_node("agent_select", self.node_agent_select)
-        workflow.add_node("crop_recommend", self.node_crop_recommend)
-        
-        # 개별 에이전트 노드들 (LangGraph가 자동으로 병렬 처리)
-        workflow.add_node("crop_grow_agent", self.node_crop_grow_agent)
-        workflow.add_node("disaster_agent", self.node_disaster_agent)
-        workflow.add_node("weather_agent", self.node_weather_agent)
-        workflow.add_node("sales_agent", self.node_sales_agent)
-        
-        workflow.add_node("merge_output", self.node_merge_output)
-        
-        # 기본 엣지 - load_state → input → agent_select
-        workflow.add_edge("load_state", "input")
-        workflow.add_edge("input", "agent_select")
-        
-        # agent_select에서 조건부 분기 - 작물추천 우선 처리
-        def agent_select_branch_condition(state):
-            selected_agents = state.get("selected_agents", [])
-            
-            # 작물추천_agent가 선택된 경우 - 먼저 작물추천 실행
-            if "작물추천_agent" in selected_agents:
-                return "crop_recommend"
-            # 다른 에이전트만 선택된 경우 - 바로 병렬 처리
-            elif len(selected_agents) > 0:
-                return "parallel_agents"
-            # 아무것도 선택되지 않은 경우 - 작물추천으로 기본 설정
-            else:
-                return "crop_recommend"
+        text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)  # 코드 블록 제거 (```...```)
+        text = re.sub(r'`([^`]+)`', r'\1', text)  # 인라인 코드 제거 (`...`)
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # 굵은 글씨 제거 (**...**)
+        text = re.sub(r'__([^_]+)__', r'\1', text)  # 굵은 글씨 제거 (__...__)
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)  # 기울임 글씨 제거 (*...*)
+        text = re.sub(r'_([^_]+)_', r'\1', text)  # 기울임 글씨 제거 (_..._)
+        text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # 제목 제거 (# ## ###)
+        text = re.sub(r'^[-*]{3,}$', '', text, flags=re.MULTILINE)  # 수평선 제거 (--- ***)
 
-        workflow.add_conditional_edges(
-            "agent_select",
-            agent_select_branch_condition,
-            {
-                "crop_recommend": "crop_recommend",
-                "parallel_agents": "parallel_agents"
-            }
-        )
-        
-        # parallel_agents 노드 추가 (다른 에이전트들만 병렬 실행)
-        workflow.add_node("parallel_agents", self.node_parallel_agents)
-        
-        # parallel_agents에서 각 에이전트로 분기
-        workflow.add_edge("parallel_agents", "crop_grow_agent")
-        workflow.add_edge("parallel_agents", "disaster_agent")
-        workflow.add_edge("parallel_agents", "weather_agent")
-        workflow.add_edge("parallel_agents", "sales_agent")
-        
-        # crop_recommend에서 조건부 분기 - 작물추천 후 병렬 처리
-        def crop_recommend_branch_condition(state):
-            # 작물추천 실패 시 바로 종료
-            failed_list = state.get("crop_recommendation_failed", [])
-            if failed_list and True in failed_list:
-                return "persist_state"
-            
-            # 다른 에이전트가 있는지 확인
-            other_agents = [agent for agent in state.get("selected_agents", []) if agent != "작물추천_agent"]
-            if len(other_agents) > 0:
-                # 작물추천 완료 후 나머지 에이전트들을 병렬로 실행
-                return "parallel_agents"
-            else:
-                return "merge_output"
-        
-        workflow.add_conditional_edges(
-            "crop_recommend",
-            crop_recommend_branch_condition,
-            {
-                "parallel_agents": "parallel_agents",
-                "merge_output": "merge_output",
-                "persist_state": "persist_state"
-            }
-        )
-        
-        # LangGraph fan-in: 모든 에이전트 노드에서 병합 노드로
-        workflow.add_edge("crop_grow_agent", "merge_output")
-        workflow.add_edge("disaster_agent", "merge_output")
-        workflow.add_edge("weather_agent", "merge_output")
-        workflow.add_edge("sales_agent", "merge_output")
-
-        
-        # 병합 노드에서 종료
-        workflow.add_edge("merge_output", "persist_state")
-        workflow.add_edge("persist_state", END)
-        
-        workflow.set_entry_point("load_state")
-        
-        # try:
-        #     app = workflow.compile()
-        #     graph_image_path = "ochestrator_workflow.png"
-        #     with open(graph_image_path, "wb") as f:
-        #         f.write(app.get_graph().draw_mermaid_png())
-        #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-        # except Exception as e:
-        #     print(f"그래프 시각화 중 오류 발생: {e}")
-        return workflow.compile()
-
-    def run_standalone(self):
-        """독립 실행용 함수 (기존 방식과 호환)"""
-        while True:
-            try:
-                state = RouterState()
-                config = {"configurable": {"thread_id": f"{self.user_id}_{self.chat_id}"}}
-                result = self.graph.invoke(state, config)
-                
-            except KeyboardInterrupt:
-                print("\n\n프로그램을 종료합니다.")
-                break
-            except Exception as e:
-                print(f"\n오류가 발생했습니다: {e}")
-                traceback.print_exc()
-                continue
+        return text

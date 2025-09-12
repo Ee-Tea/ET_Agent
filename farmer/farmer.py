@@ -18,7 +18,7 @@ import signal
 load_dotenv()
 
 # 전역 로그 레벨 설정 (DEBUG, INFO, WARNING, ERROR)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 
 # 전역 인터럽트 플래그
 _interrupt_flag = threading.Event()
@@ -622,7 +622,7 @@ class Farmer:
         
         3) 재해_agent: {self.config.AGENT_DESCRIPTIONS["재해_agent"]}
         
-        4) 날씨_agent: '날씨', '기상' 이라는 키워드가 포함되어 있을 경우 선택 **태풍, 폭염 같은 재해는 재해_agent가 처리**
+        4) 날씨_agent: **'날씨', '기상' 이라는 키워드가 포함되어 있을 경우에만 선택**
         
         5) 판매처_agent: {self.config.AGENT_DESCRIPTIONS["판매처_agent"]}
         

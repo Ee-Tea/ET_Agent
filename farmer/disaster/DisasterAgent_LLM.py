@@ -13,7 +13,6 @@ import os
 import re
 import json
 import time
-import asyncio
 import threading
 from typing import TypedDict, Optional, Any, Dict, List
 from operator import itemgetter
@@ -522,7 +521,7 @@ def _get_disaster_app():
 # =========[ OchestratorTest.py 호환 함수 ]=========
 def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
+    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리

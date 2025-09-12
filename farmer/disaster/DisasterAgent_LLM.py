@@ -13,7 +13,6 @@ import os
 import re
 import json
 import time
-import asyncio
 import threading
 from typing import TypedDict, Optional, Any, Dict, List
 from operator import itemgetter
@@ -442,7 +441,7 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         except json.JSONDecodeError:
             # JSON 파싱 실패 시 기존 방식으로 폴백
             result_clean = result.strip().upper()
-            is_sufficient = "SUFFICIENT" in result_clean
+            is_sufficient = "SUFFICIENT" in result_clean and "INSUFFICIENT" not in result_clean
             print(f"   - 📊 LLM 검증 결과 (폴백): {result.strip()}")
             print(f"   - 🎯 최종 판단: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
         
@@ -508,9 +507,9 @@ def build_graph():
     return app
 
 # =========[ OchestratorTest.py 호환 함수 ]=========
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
+    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리

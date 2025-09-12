@@ -1,0 +1,928 @@
+{
+    "overall_average": {
+        "faithfulness": 0.5756340522222875,
+        "answer_relevancy": 0.5909531477650738,
+        "context_recall": 0.765,
+        "context_precision": 0.31489072784990557,
+        "overall_average_score": 0.5616194819593168,
+        "pass_fail": "PASS"
+    },
+    "questions": [
+        {
+            "question": "비가 많이 오는 여름철에 작은 텃밭에서 잘 자랄 수 있는 작물 추천 부탁드립니다.",
+            "answer": "여름철 비가 많이 오는 환경에서도 잘 자랄 수 있는 작물로는 상추, 배추, 고구마, 콩, 시금치를 추천드립니다. 상추는 빠른 생육 속도로 인해 짧은 기간 내에 수확할 수 있으며, 배추는 습한 환경에서도 잘 자랍니다. 고구마는 비가 많이 와도 뿌리가 부패하지 않도록 잘 자라는 특성이 있으며, 콩은 비에 강하고 토양의 질을 개선하는 효과도 있습니다. 시금치는 특히 수분이 많은 여름철에 잘 자라며, 영양가도 풍부하여 다양한 요리에 활용될 수 있습니다. 이 작물들은 여름철의 기후에 잘 적응하며 텃밭에서 쉽게 기를 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.7252203675249338,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.43130509188123345
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "초보자로서 작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "상추, 대파, 방울토마토를 추천드립니다. 상추는 초보자가 기르기 쉬운 작물로, 햇빛만 잘 받으면 빠르게 자라며 지속적으로 잎을 수확할 수 있는 장점이 있습니다. 대파는 뿌리 부분만 심으면 계속 자라며, 관리가 간편하여 초보자에게 적합합니다. 방울토마토는 작은 공간에서도 잘 자라며, 수확량이 많고 관리가 비교적 쉬워 초보자에게 좋은 선택입니다. 이 세 가지 작물은 관리가 간단하면서도 수확의 재미를 느낄 수 있어 작은 텃밭에서 기르기에 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6867670024614231,
+                "context_recall": 0.75,
+                "context_precision": 0.5661564625769461,
+                "average": 0.7507308662595923
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "저는 초보자로서 작은 텃밭을 가꾸고 싶은데, 이 환경에 적합한 작물 추천 부탁드립니다.",
+            "answer": "초보자로서 작은 텃밭을 가꾸고 싶으시다면, 상추, 쑥갓, 방울토마토, 오이, 부추를 추천드립니다. 상추는 재배가 간단하고 성장 속도가 빨라 초보자에게 적합합니다. 쑥갓은 병충해가 적고 잘 자라며, 다양한 요리에 활용될 수 있습니다. 방울토마토는 수확량이 많고 관리가 쉽기 때문에 텃밭에서 키우기 좋은 작물입니다. 오이는 여름철에 시원한 맛을 제공하며, 덩굴성 식물로 공간 활용이 용이합니다. 부추는 여러 해 동안 지속적으로 수확할 수 있어 경제적입니다. 이 작물들은 초보자도 쉽게 재배할 수 있으며, 텃밭 가꾸기의 즐거움을 느낄 수 있도록 도와줄 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6164206333965037,
+                "context_recall": 1.0,
+                "context_precision": 0.7347222222130383,
+                "average": 0.8377857139023855
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "장마철에 적합한 작물 추천 부탁드립니다.",
+            "answer": "장마철에 적합한 작물로는 쌀, 고구마, 감자 및 콩을 추천드립니다. 쌀은 물빠짐이 좋은 토양에서도 잘 자라며, 장마철의 비와 습기에 적응력이 뛰어납니다. 고구마는 습한 환경에서도 생육이 가능하고, 비가 많이 오는 시기에 강한 내습성을 보입니다. 감자는 땅 속에서 자라기 때문에 비에 의한 직접적인 피해가 적고, 장마철에도 안정적으로 재배할 수 있습니다. 마지막으로 콩은 비가 많이 오는 환경에서도 잘 자라며, 기후 변화에 대한 적응력이 뛰어나 장마철 재배에 적합합니다. 이 작물들은 장마철의 기후 조건에 잘 적응하여 성공적인 수확을 도와줄 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.5121571635999996,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.1280392908999999
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "겨울철에 하우스에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "겨울철 하우스에서 재배하기 좋은 작물로는 시금치, 쪽파, 마늘, 양파 및 강낭콩을 추천드립니다. 시금치는 내한성이 뛰어나 겨울에도 잘 자라며, 여러 번 수확할 수 있어 효율적입니다. 쪽파는 추위에 강해 겨울철에도 생육이 가능하며, 봄에 수확하여 맛있게 즐길 수 있습니다. 마늘은 추위에 견디는 능력이 뛰어나며, 겨울철에 심어 봄에 수확할 수 있습니다. 양파 또한 겨울철에 심어 봄에 수확할 수 있는 작물로, 다양한 요리에 활용할 수 있습니다. 마지막으로 강낭콩은 비교적 낮은 온도에서도 잘 자라며, 겨울철 하우스에서 건강하게 재배할 수 있습니다. 이 작물들은 겨울철 하우스 재배에 적합하여 좋은 선택이 될 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.5384615384615384,
+                "answer_relevancy": 0.4490220275034458,
+                "context_recall": 1.0,
+                "context_precision": 0.35297619046736606,
+                "average": 0.5851149391080877
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 작은 텃밭에서 기르기 좋은 작물로는 상추, 청경채, 오이, 방울토마토, 그리고 깻잎을 추천드립니다. 상추는 빠르게 자라며 반복 수확이 가능하고, 청경채는 고온에서도 잘 자라며 다양한 요리에 활용할 수 있습니다. 오이는 여름 햇빛을 좋아하고 수분만 잘 공급해주면 빠르게 성장하여 수확할 수 있습니다. 방울토마토는 수확의 재미가 있으며, 어린이들이 좋아하는 작물이기도 합니다. 깻잎은 향긋한 맛으로 다양한 요리에 활용할 수 있어 매우 유용합니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.8571428571428571,
+                "answer_relevancy": 0.6512614484381122,
+                "context_recall": 1.0,
+                "context_precision": 0.57543290042468,
+                "average": 0.7709593015014122
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "비가 많이 오는 남부 지방에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "비가 많이 오는 남부 지방에서 재배하기 좋은 작물로는 감자, 배추, 무, 쪽파, 시금치를 추천드립니다. 감자는 봄과 가을에 재배할 수 있으며, 다양한 기후에서 잘 자라므로 남부 지방의 강수량이 많은 환경에서도 적합합니다. 배추와 무는 김장 채소로 인기가 높으며, 남부 지방의 습한 기후에서 잘 자라므로 쉽게 재배할 수 있습니다. 쪽파는 생육이 빠르며, 비가 많이 오는 환경에서 잘 자라는 특성을 가지고 있습니다. 시금치는 영양가가 높고, 월동 시금치로 겨울철에도 재배가 가능하여 남부 지방에서 잘 자랄 수 있습니다. 이 작물들은 남부 지방의 기후에 잘 적응하며 재배가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.6428571428571429,
+                "answer_relevancy": 0.47832449121740656,
+                "context_recall": 0.75,
+                "context_precision": 0.6222222222097777,
+                "average": 0.6233509640710818
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철 고온기에도 잘 자라는 작물 추천 부탁드립니다.",
+            "answer": "여름철 고온기에도 잘 자라는 작물로는 상추, 고추, 청경채, 오이, 방울토마토를 추천드립니다. 상추는 여름에도 반복 수확이 가능하며, 특히 내서성 품종을 선택하면 더욱 잘 자랍니다. 고추는 여름의 강한 햇빛과 고온을 좋아하며, 초보자도 쉽게 재배할 수 있습니다. 청경채는 빠르게 자라며 더위에 강해 다양한 요리에 활용할 수 있는 장점이 있습니다. 오이는 수분만 잘 공급하면 고속 성장하여 빠른 수확이 가능하고, 방울토마토는 달콤한 맛으로 인기가 높아 여름철 텃밭에 적합합니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하여, 초보자에게도 좋은 선택이 될 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6376465513505073,
+                "context_recall": 1.0,
+                "context_precision": 0.7035714285613776,
+                "average": 0.8353044949779712
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "충남 지역에서 재배하기에 적합한 작물 추천 부탁드립니다.",
+            "answer": "충남 지역에서 재배하기에 적합한 작물로는 고구마, 오이, 공심채, 그리고 마늘을 추천드립니다. \n\n고구마는 기후 변화에 잘 적응하며 수익성이 높아 많은 농가에서 선호하는 작물입니다. 오이는 충남에서 재배면적이 넓고 생산액이 높아 주 소득작물로 자리잡고 있습니다. 공심채는 최근 기후변화 대응 작물로 각광받고 있으며, 건강에 좋은 성분이 풍부하여 소비자들에게 인기가 많습니다. 마늘은 충남 서북부 지역에서 주 소득 작물로 재배되고 있으며, 양념 채소로 수요가 높은 편입니다. \n\n이 작물들은 충남의 기후와 재배 조건에 적합하여 안정적인 생산이 가능하므로 좋은 선택이 될 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.7692307692307693,
+                "answer_relevancy": 0.45808391957308436,
+                "context_recall": 0.75,
+                "context_precision": 0.7293019480428318,
+                "average": 0.6766541592116714
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "비가림시설을 설치할 계획인데, 이 조건에 맞는 작물 추천 부탁드립니다.",
+            "answer": "비가림시설을 설치할 계획이라면, 토마토, 파프리카, 오이고추를 추천드립니다. 이들은 비가 많이 오는 장마철에 특히 잘 자라지 않기 때문에 비가림시설의 혜택을 받을 수 있습니다. 토마토는 햇빛을 많이 받아야 잘 자라며, 다양한 요리에 활용될 수 있어 인기가 높습니다. 또한 파프리카는 고온다습한 환경에 잘 적응하며, 영양가가 풍부하여 소비자에게 많이 선호됩니다. 오이고추는 여름철 기후에 강하고, 비교적 재배가 쉬워 초보자에게도 적합합니다. 이 작물들은 비가림시설을 통해 보호받으며 건강하게 자랄 수 있는 최적의 선택입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.5,
+                "answer_relevancy": 0.7049436104552212,
+                "context_recall": 1.0,
+                "context_precision": 0.6427579364999021,
+                "average": 0.7119253867387808
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "비가 많이 오는 여름철에 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 비가 많이 오는 시기에는 공심채, 열무, 청경채, 쑥갓, 그리고 방울토마토를 추천드립니다. \n\n공심채는 장마철에도 잘 자라며, 꾸준한 수확이 가능합니다. 열무는 빠르게 자라며, 비 오는 날에도 수분 관리가 용이하여 부드러운 잎을 얻을 수 있습니다. 청경채는 고온과 습기에 강해 다양한 요리에 사용할 수 있습니다. 쑥갓은 다양한 요리에 활용할 수 있고, 비가 자주 오는 시기에도 잘 자라기 때문에 적합합니다. 마지막으로 방울토마토는 햇빛을 좋아하지만, 수분만 잘 공급된다면 여름철에도 잘 자랍니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.8571428571428571,
+                "answer_relevancy": 0.571730737519598,
+                "context_recall": 0.5,
+                "context_precision": 0.417893217886253,
+                "average": 0.586691703137177
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "망간 결핍이 우려되는 지역에서 밀 농사를 계획하고 있는데, 이와 같은 조건에 맞는 작물 추천 부탁드립니다.",
+            "answer": "망간 결핍이 우려되는 지역에서 밀 농사를 계획하고 계신다면, 수수와 기장, 그리고 보리 등을 추천드립니다. 수수는 탁월한 내건성과 적은 영양 요구량으로 다양한 토양에서 잘 자라며, 기장은 가뭄에 강하고 토양의 영양 상태에 대한 적응력이 뛰어납니다. 보리는 빠른 생육과 저온에 대한 저항성을 가지고 있어 이 지역에서도 잘 자랄 수 있습니다. 이 작물들은 망간 결핍이 우려되는 환경에서도 비교적 잘 자생할 수 있는 특성을 가지고 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.5800317383274937,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.39500793458187344
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 자생적인 병해충으로부터 보호할 수 있는 작물 추천 부탁드립니다.",
+            "answer": "여름철에 작은 텃밭에서 자생적인 병해충으로부터 보호할 수 있는 작물로는 고추, 가지, 그리고 상추를 추천드립니다. 고추는 강한 향으로 인해 많은 해충을 쫓아내는 효과가 있으며, 여름철의 고온다습한 환경에서 잘 자라기 때문에 재배가 용이합니다. 가지도 기후에 잘 적응하며, 그늘을 제공함으로써 다른 작물들에게 도움이 될 수 있습니다. 상추는 빠른 생육으로 인해 병해충 피해를 줄일 수 있는 작물로, 텃밭에서 쉽게 기를 수 있습니다. 이 작물들은 여름철 기후에 적합하고, 자생적인 병해충으로부터 비교적 잘 보호될 수 있는 특성을 가지고 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.62769199024505,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.1569229975612625
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "직파재배를 고려하고 있는데, 비용 절감을 위해 어떤 방법을 추천해 주실 수 있나요?",
+            "answer": "직파재배를 고려하고 계신다면, 벼를 추천드립니다. 벼 직파재배는 기존 이앙법에 비해 생산비용을 10% 이상 절감할 수 있으며, 육묘과 모내기 과정이 생략되어 노동력과 농자재 비용을 크게 줄일 수 있습니다. 특히, 드론을 활용한 직파재배는 노동력과 경영비를 각각 최대 85%와 83%까지 절감할 수 있는 효과가 있습니다. 또한, 무논점파 방식은 종자와 비료를 동시에 뿌리는 방법으로 노동력을 더욱 절감할 수 있는 장점이 있습니다. 이러한 이유로 벼 직파재배는 경제적 성과를 극대화할 수 있는 방법으로 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.875,
+                "answer_relevancy": 0.5567137434855621,
+                "context_recall": 1.0,
+                "context_precision": 0.7980122655042854,
+                "average": 0.8074315022474619
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "겨울철에 작은 텃밭에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "겨울철 작은 텃밭에서 재배하기 좋은 작물로는 상추, 시금치, 대파, 바질, 그리고 부추를 추천드립니다. 상추는 겨울철 저온에 강하며, 남부 지역에서는 노지에서도 잘 자라므로 적합합니다. 시금치는 추위에 잘 견디며, 간이 보온처리를 통해 겨울과 봄에 수확할 수 있습니다. 대파는 물이나 흙 어느 환경에서도 쉽게 자라며, 재배 기간이 짧고 지속적으로 수확할 수 있는 장점이 있습니다. 바질은 실내에서 키우기 좋은 허브로, 요리에 활용도가 높아 수확 후 바로 사용할 수 있습니다. 마지막으로 부추는 추위에 강하여 겨울철에도 잘 자라므로 텃밭에서 유용하게 활용할 수 있습니다. 이 작물들은 겨울철에도 신선한 채소를 제공하며, 관리가 비교적 쉬워 초보자에게도 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.75,
+                "answer_relevancy": 0.6054152512219741,
+                "context_recall": 0.75,
+                "context_precision": 0.8083900226641886,
+                "average": 0.7284513184715407
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 작은 텃밭에서 기르기 좋은 작물로는 상추, 청경채, 쑥갓, 방울토마토, 바질을 추천드립니다. 상추는 발아와 생장이 빠르며 여러 번 수확할 수 있어 초보자에게 적합합니다. 청경채는 무더운 날씨에도 잘 견디고, 수확이 빠르며 다양한 요리에 활용 가능합니다. 쑥갓은 건강한 나물로 인기가 있으며, 방울토마토는 아이들이 좋아하는 작물로 수확의 재미를 더해줍니다. 바질은 다양한 요리에 활용할 수 있는 향신채소로 여름철에 특히 잘 자라기 때문에 기르기 좋습니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6512614484381122,
+                "context_recall": 1.0,
+                "context_precision": 0.57543290042468,
+                "average": 0.806673587215698
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 고온다습한 환경에서 잘 자랄 수 있는 작물 추천 부탁드립니다.",
+            "answer": "여름철 고온다습한 환경에서 잘 자랄 수 있는 작물로는 콩, 팥, 상추, 방울토마토 및 바질을 추천드립니다. 콩과 팥은 관리가 수월하고 여름철 기후에 잘 적응하며, 상추는 햇빛이 적어도 비교적 잘 자라기 때문에 덥고 습한 환경에서도 재배가 용이합니다. 방울토마토는 여름철 햇빛을 많이 받아야 잘 자라며, 다양한 요리에 활용될 수 있어 인기가 많습니다. 마지막으로 바질은 고온다습한 환경을 선호하는 허브로, 여름철 텃밭에서 기르기 적합합니다. 이 작물들은 여름철 기후에 잘 적응하며 수확의 기쁨을 맛볼 수 있게 도와줍니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.6666666666666666,
+                "answer_relevancy": 0.731001281296543,
+                "context_recall": 1.0,
+                "context_precision": 0.3333333333,
+                "average": 0.6827503203158024
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 작은 텃밭 재배에는 옥수수, 깻잎, 쑥갓, 여름상추 및 방울토마토를 추천드립니다. 옥수수는 초보자도 쉽게 재배할 수 있으며, 햇빛을 많이 받아야 잘 자라는 특성이 있어 여름철에 적합합니다. 깻잎은 다양한 요리에 활용 가능하고, 쑥갓은 나물과 쌈으로 많이 쓰여 여름철에 인기가 많습니다. 여름상추는 더운 날씨에도 잘 자라는 여름 품종을 선택하면 빠른 수확이 가능하며, 방울토마토는 수확의 재미가 크고 아이들이 좋아하는 작물입니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하므로, 작은 텃밭에서 즐거운 농사를 경험하시길 바랍니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.9230769230769231,
+                "answer_relevancy": 0.6580766989891446,
+                "context_recall": 1.0,
+                "context_precision": 0.49186147185163465,
+                "average": 0.7682537734794256
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "봄에 작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "봄에 작은 텃밭에서 기르기 좋은 작물로는 상추, 열무, 브로콜리, 대파, 그리고 시금치를 추천드립니다. 상추는 빠르게 자라며 관리가 쉬워 초보자에게 적합합니다. 열무는 봄철에 쉽게 재배할 수 있고, 신선한 나물로 활용할 수 있습니다. 브로콜리는 다양한 기후 조건에서 잘 자라며 영양가가 높습니다. 대파는 서리에도 강하고 수확이 용이하여 텃밭에 적합합니다. 마지막으로, 시금치는 빠른 성장 속도를 지니고 있어 짧은 시간 안에 수확할 수 있는 장점이 있습니다. 이 작물들은 봄철 텃밭에서 기르기에 아주 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6638540852557722,
+                "context_recall": 0.5,
+                "context_precision": 0.0,
+                "average": 0.540963521313943
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "겨울철 저온 지역에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "겨울철 저온 지역에서 재배하기 좋은 작물로는 시금치, 마늘, 양파, 봄동 및 쑥갓을 추천드립니다. \n\n시금치는 추위에 강하며, 겨울철에도 잘 자라기 때문에 월동 작물로 적합합니다. 마늘은 내한성이 뛰어나고, 12월에도 심을 수 있어 겨울 동안 자라는 것이 가능하며, 양파 역시 추위에 강해 늦가을에 심어 겨울철 생육이 가능합니다. 봄동은 추위에 강하고 맛이 우수하여 겨울철 재배에 적합하며, 쑥갓은 추위에 잘 견디고 효능이 뛰어나서 겨울철에 수확할 수 있는 좋은 선택입니다. \n\n이 작물들은 겨울철 저온 환경에서도 잘 자라고 맛과 영양이 풍부하여 텃밭 재배에 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6281207550829596,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.6570301887707399
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "양파 재배를 고려하고 있는데, 비가 많이 오는 지역에서 재배하기 좋은 품종 추천 부탁드립니다.",
+            "answer": "비가 많이 오는 지역에서 양파 재배를 고려하시고 계신다면, 수분에 강한 품종을 추천드립니다. 특히, '금타'라는 품종은 습기와 비를 잘 견디며, 기후 변화에도 강한 특성을 가지고 있어 적합합니다. 또한, '홍콩양파' 품종도 비와 습기에 대한 저항력이 높아 재배에 유리합니다. 이 두 품종은 비가 많이 오는 환경에서도 안정적인 수확이 가능하므로 추천드립니다. 양파 재배가 성공적으로 이루어지길 바랍니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.42019167295630583,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.35504791823907644
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "저희 작은 텃밭에서 자가상토를 만들고 싶은데, 어떤 재료를 추천해주실 수 있을까요?",
+            "answer": "자가상토를 만들기 위해서는 여러 가지 재료를 사용할 수 있습니다. 부식이 잘 되는 유기물인 퇴비, 그리고 식물의 뿌리 성장에 도움을 주는 마사토를 추천드립니다. 또한, 물빠짐이 좋고 공기 순환이 용이한 펄라이트도 좋은 선택입니다. 마지막으로, 미세한 입자의 모래를 추가하면 배수성을 높여 식물이 건강하게 자랄 수 있는 환경을 조성할 수 있습니다. 이 재료들은 자가상토의 품질을 높이고, 다양한 작물의 재배에 적합한 기초를 제공합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.3983221262498989,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.09958053156247472
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "여름철에 자주 관수하는 작은 텃밭에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 텃밭 재배에는 오이, 토마토, 고추, 상추, 바질 등을 추천드립니다. 오이는 더위에 강하고 수확량이 풍부하여 여름철에 잘 자라며, 토마토는 햇빛을 많이 받아야 잘 자라 다양한 요리에 활용될 수 있습니다. 고추는 고온다습한 환경에 잘 적응하고, 상추는 생육이 빨라 텃밭에서 쉽게 기를 수 있는 작물입니다. 바질은 여름철에 자주 사용되는 허브로, 향이 뛰어나 다양한 요리에 활용 가능하여 텃밭에서 재배하기에 적합합니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하여 텃밭에서 즐거운 가드닝 경험을 제공합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.5547324862116888,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.3886831215529222
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "바람이 많이 부는 지역에서 방풍수 재배를 고려하고 있는데, 적절한 밀폐도로 추천해 주실 수 있나요?",
+            "answer": "바람이 많이 부는 지역에서 방풍수 재배를 고려하고 계신다면, 밀폐도에 적합한 작물로는 대추, 고구마, 그리고 메밀을 추천드립니다. 대추는 강한 바람에 잘 견디며, 생육이 양호하여 수확량도 높은 편입니다. 고구마는 뿌리 작물로서 바람의 영향을 적게 받으며, 건강한 생육을 위해 비교적 건조한 환경에서도 잘 자랍니다. 메밀은 강한 바람과 저온에 잘 적응하여 재배가 용이하며, 토양의 질을 개선하는 데도 도움이 됩니다. 이들 작물은 바람이 많이 부는 환경에서도 안정적으로 재배할 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.5398915892655771,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.3849728973163943
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "남부 지방의 작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "남부 지방의 작은 텃밭에서 기르기 좋은 작물로는 방울토마토, 고추, 가지, 감자, 쪽파를 추천드립니다. 방울토마토는 화분에서도 잘 자라고, 지속적으로 수확할 수 있어 실용적입니다. 고추는 여름철 기온에 잘 적응하며 관리가 쉬운 작물입니다. 가지도 햇빛을 잘 받아 많은 열매를 맺고, 수확이 간편합니다. 감자는 심어 놓기만 해도 잘 자라며, 수확의 재미도 있습니다. 마지막으로 쪽파는 물을 자주 주지 않아도 잘 자라며 병해충에 강해 초보자에게 적합합니다. 이 작물들은 남부 지역의 기후에서 효과적으로 재배할 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.9230769230769231,
+                "answer_relevancy": 0.6098867605834015,
+                "context_recall": 1.0,
+                "context_precision": 0.6239022881790897,
+                "average": 0.7892164929598535
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "저온기에도 잘 자라는 작물 추천 부탁드립니다.",
+            "answer": "저온기에도 잘 자라는 작물로는 양배추, 브로콜리, 시금치, 당근, 그리고 무를 추천드립니다. 양배추와 브로콜리는 서늘한 기온에서 잘 자라며, 특히 겨울철에도 수확이 가능합니다. 시금치는 추위에 강하고 빠르게 자라기 때문에 텃밭에서 쉽게 키울 수 있습니다. 당근과 무는 서늘한 날씨에서 맛이 더욱 좋아지므로 저온기 재배에 적합합니다. 이 작물들은 저온기에서도 건강하게 자랄 수 있어 농업에 유리한 선택이 될 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.4995360365049836,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.1248840091262459
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 작은 텃밭 재배에는 옥수수, 깻잎, 쑥갓, 여름상추, 방울토마토를 추천드립니다. 옥수수는 햇빛을 좋아하고 관리가 쉬우며, 수확 후 바로 먹는 맛이 일품입니다. 깻잎은 다양한 요리에 활용할 수 있는 향긋한 잎채소로, 벌레 피해를 주의하며 재배할 수 있습니다. 쑥갓은 빠르게 자라나 다양한 요리에 활용 가능하여 주방에서 유용하게 쓰입니다. 여름상추는 더운 날씨에도 잘 자라며 반복 수확이 가능해 초보자에게 적합합니다. 방울토마토는 수확의 재미를 느낄 수 있는 작물로, 햇빛을 충분히 받아야 건강하게 자랍니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하여, 작은 텃밭에서 기르기에 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.9411764705882353,
+                "answer_relevancy": 0.6580766989891446,
+                "context_recall": 1.0,
+                "context_precision": 0.5904626623302816,
+                "average": 0.7974289579769154
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 작은 텃밭 재배에는 옥수수, 깻잎, 쑥갓, 여름상추, 방울토마토 등을 추천드립니다. 옥수수는 햇빛을 좋아하고 초보자도 쉽게 키울 수 있어 여름철에 적합합니다. 깻잎은 향긋한 잎채소로 다양한 요리에 활용할 수 있으며, 쑥갓은 빠르게 자라고 나물로 활용하기 좋습니다. 여름상추는 여름 품종을 선택하면 고온에서도 잘 자라며, 방울토마토는 수확의 재미가 있어 아이들에게도 인기가 많습니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하므로, 텃밭에서의 성공적인 수확을 도와줄 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6580766989891446,
+                "context_recall": 1.0,
+                "context_precision": 0.44924242423119315,
+                "average": 0.7768297808050845
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 노지에서 재배하는 작물 추천 부탁드립니다.",
+            "answer": "여름철 노지에서 재배하기에 적합한 작물로는 오이, 옥수수, 깻잎, 열무, 쑥갓을 추천드립니다. 오이는 여름철 고온에 잘 자라며 수확량이 풍부하고, 옥수수는 초보자도 쉽게 기를 수 있어 수확의 기쁨을 누리기 좋습니다. 깻잎은 다양한 요리에 활용할 수 있는 향긋한 작물로, 여름철에 잘 자라기 때문에 인기가 높습니다. 열무는 생육 기간이 짧고 더위에 강해 여름철에도 쉽게 재배할 수 있으며, 쑥갓은 다양한 요리에 활용할 수 있어 다용도로 활용할 수 있습니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하므로, 텃밭에 심기 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.4862970357613281,
+                "context_recall": 1.0,
+                "context_precision": 0.4499999999775,
+                "average": 0.734074258934707
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "습기가 많은 여름철에 작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 습기가 많은 작은 텃밭에서 기르기 좋은 작물로는 청경채, 상추, 고추, 오이 및 방울토마토를 추천드립니다. 청경채는 더운 날씨에도 잘 자라며, 빠른 성장 속도로 수확이 용이합니다. 상추는 관리가 간편하고 반복 수확이 가능하여 초보자에게 적합합니다. 고추는 여름철 고온다습한 환경에서 잘 적응하고, 오이는 햇빛을 많이 받아야 하지만 수분만 충분히 공급하면 빠르게 자라며 많은 열매를 맺습니다. 방울토마토는 작은 공간에서도 잘 자라며, 지속적으로 수확이 가능하여 텃밭에서 기르기에 매우 유익합니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하니, 재미있는 텃밭 경험을 하실 수 있을 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6077704183002669,
+                "context_recall": 1.0,
+                "context_precision": 0.46464646463872056,
+                "average": 0.7681042207347468
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "고온 다습한 여름철에 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 고온 다습한 환경에서 재배하기 좋은 작물로는 열무, 청경채, 애호박, 들깨, 강낭콩을 추천드립니다. 열무는 빠른 수확이 가능하여 여름 김치로 인기가 높고, 청경채는 고온에서도 잘 자라며 식감이 우수합니다. 애호박은 짧은 생육 기간 덕분에 텃밭 재배에 적합하며, 들깨는 고온과 다습한 환경에서도 강한 내성을 보여 수확 후 가공 활용도 높습니다. 마지막으로 강낭콩은 직파가 가능하고 재배가 쉬워 초보자에게도 적합합니다. 이 작물들은 여름철 기후에 잘 적응하며 관리가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6949570218834652,
+                "context_recall": 1.0,
+                "context_precision": 0.4761904761746032,
+                "average": 0.7927868745145171
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "고랭지에서 재배 가능한 작물을 추천해 주세요.",
+            "answer": "고랭지에서 재배 가능한 작물로는 상추, 배추, 무, 당근, 그리고 감자를 추천드립니다. 상추는 차가운 기후에서 잘 자라며, 빠른 생육 속도로 수확이 용이합니다. 배추는 고랭지의 시원한 날씨에서 맛이 좋아지고, 무와 당근은 뿌리 작물로서 저온에 잘 적응하여 품질이 우수합니다. 감자는 고랭지에서의 재배가 적합하며, 맛과 생산성이 뛰어나 다양한 요리에 활용될 수 있습니다. 이들 작물은 고랭지의 기후와 토양 조건에 적합하여 성공적인 재배가 가능합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.43558248371875813,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.3588956209296895
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "여름철에 햇볕이 잘 드는 작은 텃밭에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 햇볕이 잘 드는 작은 텃밭에서 재배하기 좋은 작물로는 상추, 고추, 방울토마토, 깻잎, 오이를 추천드립니다. 상추는 생육이 빠르며, 아침 햇살을 받는 장소에서도 잘 자라기 때문에 초보자에게 적합합니다. 고추는 여름의 고온다습한 환경에 잘 적응하며, 꾸준히 수확할 수 있어 인기가 높습니다. 방울토마토는 수확의 재미가 있으며, 햇빛을 좋아하는 특성 덕분에 텃밭에서 잘 자랍니다. 깻잎은 생명력이 강해 관리가 쉬우며, 오이는 여름 햇빛을 좋아하고 수분만 잘 공급하면 빠르게 성장합니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하므로, 실패 확률을 줄일 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6487236128691848,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.6621809032172962
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "고온 다습한 여름철에 잘 자라는 작물 추천 부탁드립니다.",
+            "answer": "여름철 고온 다습한 환경에서 잘 자라는 작물로는 열무, 청경채, 애호박, 들깨, 강낭콩을 추천드립니다. 열무는 빠른 수확이 가능하고 여름 김치로 인기가 높으며, 청경채는 고온에서도 잘 자라며 식감이 좋습니다. 애호박은 짧은 생육 기간으로 텃밭 재배에 적합하고, 들깨는 고온과 다습한 환경에서도 강한 생명력을 보여줍니다. 마지막으로 강낭콩은 직파가 가능하며 재배가 쉬워 초보자에게도 적합합니다. 이 작물들은 여름철 기후에 잘 적응하며 재배가 용이하므로 여름철 텃밭에 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6561702345850223,
+                "context_recall": 0.25,
+                "context_precision": 0.8124999999796875,
+                "average": 0.6796675586411774
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "작은 텃밭에서 자주 재배할 수 있는 작물 추천 부탁드립니다.",
+            "answer": "작은 텃밭에서 자주 재배할 수 있는 작물로는 상추, 시금치, 무, 당근, 부추를 추천드립니다. 상추는 생육이 빠르고 쉽게 기를 수 있으며, 시금치는 영양가가 높고 다양한 요리에 활용됩니다. 무는 뿌리 작물로 수확이 간편하고, 당근은 비타민이 풍부하여 건강에 좋습니다. 부추는 재배가 쉬우며 지속적으로 수확할 수 있어 텃밭에 적합합니다. 이 작물들은 비교적 적은 공간에서도 잘 자라며, 다양한 요리에 활용할 수 있어 유용합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.5793528934671587,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.39483822336678964
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "지금 기후가 건조한 지역에서 재배할 수 있는 작물 추천 부탁드립니다.",
+            "answer": "고온건조한 기후에서 재배할 수 있는 작물로는 상추, 케일, 바질, 민트, 고구마를 추천드립니다. 상추와 케일은 빠른 생육 속도로 30일 이내에 수확할 수 있으며, 물을 적게 필요로 해 건조한 환경에서 잘 자랍니다. 바질과 민트 같은 허브는 향기로운 특성으로 많은 요리에 활용되며, 물과 공간이 적게 필요하여 수경재배에 적합합니다. 고구마는 뿌리가 깊고 강인하게 자라 물이 부족한 환경에서도 생존력이 뛰어나며, 다양한 기후 조건에서 안정적으로 수확할 수 있습니다. 이러한 작물들은 건조한 지역에서 재배하기에 유리한 특성을 지니고 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.875,
+                "answer_relevancy": 0.7187001354786648,
+                "context_recall": 1.0,
+                "context_precision": 0.45846560845796736,
+                "average": 0.7630414359841581
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "여름철에 작은 텃밭에서 키우기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 작은 텃밭에서 키우기 좋은 작물로는 옥수수, 깻잎, 쑥갓, 여름상추, 방울토마토를 추천드립니다. 옥수수는 햇빛을 많이 받아야 잘 자라며, 초보자도 쉽게 기를 수 있는 작물입니다. 깻잎은 다양한 요리에 활용 가능하고, 쑥갓은 나물이나 쌈으로 사용할 수 있어 다용도로 유용합니다. 여름상추는 생육이 빠르고 반복 수확이 가능하여 관리가 용이합니다. 방울토마토는 수확의 재미를 주며, 귀여운 외모로 아이들에게도 인기가 많습니다. 이 작물들은 여름철의 고온과 햇빛에 잘 적응하여 건강하게 자랄 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.6522200274210541,
+                "context_recall": 1.0,
+                "context_precision": 0.5280972995183267,
+                "average": 0.7950793317348452
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "남부 지방에서 소규모 텃밭을 가꾸고 싶은데, 어떤 작물을 추천해 주실 수 있나요?",
+            "answer": "남부 지방에서 소규모 텃밭을 가꾸고 싶으시다면 상추, 쑥갓, 당근, 배추, 그리고 무를 추천드립니다. 상추는 재배가 매우 용이하고 생육이 빠르며, 쑥갓은 기온이 적당할 때 잘 자라기 때문에 초보자에게 적합합니다. 당근은 서늘한 기후를 좋아해 봄과 가을에 재배할 수 있으며, 배추와 무는 김장철에 필요한 작물로서 가을철에 심으면 좋습니다. 이들 작물은 소규모 텃밭에서 공간을 효율적으로 활용할 수 있으며, 가족들이 즐겨 먹는 식재료로도 적합합니다. 따라서 이 작물들을 통해 풍성한 수확을 기대하실 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.25,
+                "answer_relevancy": 0.6344810794686904,
+                "context_recall": 0.0,
+                "context_precision": 0.249999999975,
+                "average": 0.2836202698609226
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "겨울철에 실내에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "겨울철에 실내에서 기르기 좋은 작물로는 상추, 치커리, 바질, 그리고 미나리를 추천드립니다. 상추는 비교적 빠르게 자라고, 실내에서도 재배하기 용이하여 신선한 샐러드를 즐길 수 있습니다. 치커리는 내한성이 강하여 추운 계절에도 잘 자라며, 다양한 요리에 활용할 수 있습니다. 바질은 향이 뛰어나고 실내에서 기르면 언제든지 신선한 허브를 사용할 수 있는 장점이 있습니다. 미나리는 생육이 빠르고 수확 후에도 오랫동안 신선함을 유지할 수 있어 요리에 다양하게 활용될 수 있습니다. 이 작물들은 겨울철 실내 환경에서도 잘 적응하며 재배가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.47651554502376486,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.3691288862559412
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2)"
+        },
+        {
+            "question": "여름철 집중폭우가 잦은 지역에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "여름철 집중폭우가 잦은 지역에서 재배하기 좋은 작물로는 고구마, 감자, 그리고 배추를 추천드립니다. 고구마는 장마철에 물을 좋아하고, 침수에 강하여 여름철 재배에 적합합니다. 감자는 여름에 심고 가을에 수확할 수 있는 저장성이 좋으며, 집중호우로 인한 피해를 최소화할 수 있습니다. 배추는 여름철에 심어 가을에 수확할 수 있으며, 기후에 적응력이 뛰어나고 병해충 방제를 통해 안정적인 수확이 가능합니다. 이 작물들은 여름철 집중호우의 영향을 받으면서도 잘 자랄 수 있는 특성을 가지고 있어 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.2857142857142857,
+                "answer_relevancy": 0.5986034524774713,
+                "context_recall": 0.75,
+                "context_precision": 0.19999999998,
+                "average": 0.4585794345429392
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "겨울철에 난방비 절감을 위해 시설에서 어떤 피복 방법을 추천해 주실 수 있나요?",
+            "answer": "겨울철에 난방비 절감을 위해 시설에서 사용할 수 있는 피복 방법으로는 비닐 피복과 보온재 피복을 추천드립니다. 비닐 피복은 온실 효과를 통해 내부 온도를 높이고, 외부의 찬 공기를 차단하여 작물을 보호하는 데 효과적입니다. 보온재 피복은 열 손실을 최소화하고, 온도를 일정하게 유지하는 데 도움을 줍니다. 이 두 가지 방법은 겨울철 낮은 온도에서도 작물의 생육을 도와줄 수 있습니다. \n\n또한, 복합적인 피복 방법을 사용할 경우 더욱 효과적으로 난방비를 절감할 수 있습니다. 이러한 피복 방법을 통해 겨울철에도 안정적인 재배 환경을 유지할 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.6689532906122811,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.1672383226530703
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "비닐하우스에서 어린잎채소를 기르고 싶은데, 어떤 작물이 추천되는지 알고 싶습니다. 부탁드립니다.",
+            "answer": "비닐하우스에서 어린잎채소를 기르고 싶으시다면, 시금치, 상추, 갓, 쑥갓, 그리고 봄동을 추천드립니다. 이 작물들은 저온에 잘 견디며, 겨울철에도 재배가 가능하여 신선한 채소를 수확할 수 있습니다. 특히 시금치와 상추는 생육이 빠르고, 다양한 요리에 활용될 수 있어 매우 유용합니다. 갓과 쑥갓은 향긋한 맛을 더해주고, 봄동은 부드러운 식감을 가지고 있어 식탁을 풍성하게 만들어 줍니다. 이와 같은 잎채소는 겨울철에도 관리가 용이하여 안정적으로 수확할 수 있는 장점이 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.5,
+                "answer_relevancy": 0.8706104492836383,
+                "context_recall": 0.5,
+                "context_precision": 0.408333333323125,
+                "average": 0.5697359456516908
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "건조한 남부 지방에서 재배할 수 있는 작물 추천 부탁드립니다.",
+            "answer": "남부 지방에서 재배할 수 있는 작물로는 당근, 비트, 상추, 시금치 및 완두콩을 추천드립니다. 당근은 서늘한 기후를 좋아하지만 남부 지역에서는 봄과 가을 두 번 재배가 가능해 적합합니다. 비트는 봄과 가을에 두 차례 파종할 수 있어 다양한 시기에 재배할 수 있습니다. 상추는 추위에 강하고 성장 속도가 빨라 초보자도 쉽게 기를 수 있는 작물입니다. 시금치는 서늘한 기온을 좋아하며, 남부 지방에서는 겨울철에도 재배가 가능합니다. 마지막으로 완두콩은 추위에 강하여 남부 지역에서도 일찍 파종할 수 있어 좋은 선택입니다. 이 작물들은 남부 지방의 기후에 잘 적응하며 재배가 용이합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.8666666666666667,
+                "answer_relevancy": 0.44690724755831407,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.5783934785562452
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "가을철 안개가 자주 발생하는 지역에서 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "가을철 안개가 자주 발생하는 지역에서 재배하기 좋은 작물로는 상추, 시금치, 쑥갓, 배추, 그리고 대파를 추천드립니다. 이들 작물은 서늘한 기후에서 잘 자라며, 특히 가을철의 기온 변화에 잘 적응할 수 있습니다. 상추와 시금치는 생육이 빠르고 병충해에 강하여 초보자도 쉽게 재배할 수 있습니다. 쑥갓은 잎이 풍성하고 다양한 요리에 활용할 수 있어 인기가 높습니다. 배추와 대파는 서리에도 잘 견디며, 가을철 수확에 적합한 작물입니다. 이 작물들은 가을철 안개가 자주 발생하는 환경에서도 안정적으로 자랄 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.75,
+                "answer_relevancy": 0.4219432953481948,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.5429858238370486
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "중북부 지역에서 여름철에 적합한 작물 추천 부탁드립니다.",
+            "answer": "여름철 중북부 지역에서 적합한 작물로는 상추, 시금치, 열무, 쑥갓, 들깨를 추천드립니다. 상추는 여름 전용 품종을 선택하면 생육이 빠르며, 수확도 용이합니다. 시금치는 여름철에 심으면 40~50일 정도면 수확할 수 있어 빠른 수확이 가능합니다. 열무는 재배 기간이 짧고 발아율이 높아 초보자도 쉽게 기를 수 있는 작물입니다. 쑥갓은 다양한 요리에 활용할 수 있어 매우 유용하며, 들깨는 장마철에 잘 자라는 특징이 있어 여름철 재배에 적합합니다. 이 작물들은 중북부 지역의 여름철 기후에 잘 적응하며, 수확의 기쁨을 누리실 수 있습니다.",
+            "ragas_metrics": {
+                "faithfulness": 1.0,
+                "answer_relevancy": 0.578656086832613,
+                "context_recall": 1.0,
+                "context_precision": 0.2142857142785714,
+                "average": 0.6982354502777961
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "유기 재배를 고려하고 있는 초보자로서, 적합한 작물 추천 부탁드립니다.",
+            "answer": "초보자로서 유기 재배를 고려하신다면 상추, 쑥갓, 방울토마토, 옥수수, 깻잎을 추천드립니다. 상추는 재배가 간단하고 빠르게 자라며, 쑥갓은 병충해가 적어 초보자에게 매우 적합합니다. 방울토마토는 관리가 용이하고 수확량이 많아 재미를 느끼실 수 있습니다. 옥수수는 햇빛을 잘 받아야 하며 초보자도 쉽게 수확할 수 있습니다. 마지막으로 깻잎은 향긋한 맛을 더해줄 수 있어 다양한 요리에 활용할 수 있습니다. 이 작물들은 모두 유기 재배에 적합하고 관리가 쉬워 초보자에게 좋은 선택이 될 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.8181818181818182,
+                "answer_relevancy": 0.6514452396192475,
+                "context_recall": 1.0,
+                "context_precision": 0.6683333333199667,
+                "average": 0.7844900977802581
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "저희 작은 텃밭에서 마그네슘이 부족한지 걱정인데, 이런 상황에서 어떤 작물을 추천해 주실 수 있나요?",
+            "answer": "마그네슘이 부족한 상황에서는 수박, 오이, 토마토 및 양배추를 추천드립니다. 수박은 마그네슘 요구도가 높아 결핍이 나타나기 쉬운 작물로, 관리가 잘 되면 좋은 수확을 기대할 수 있습니다. 오이는 여름철에 잘 자라고 수확량이 많으며, 토마토는 햇빛을 많이 받아야 잘 자라 다양한 요리에 활용되기 때문에 유용합니다. 양배추는 마그네슘 결핍 시 생육에 문제가 발생할 수 있지만, 적절한 관리로 건강하게 재배할 수 있습니다. 이 작물들은 마그네슘 결핍 문제를 해결하는 데 도움이 될 것입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.5,
+                "answer_relevancy": 0.4988524410498832,
+                "context_recall": 0.75,
+                "context_precision": 0.7980122655042854,
+                "average": 0.6367161766385421
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "작은 텃밭에서 기르기 좋은 작물 추천 부탁드립니다.",
+            "answer": "작은 텃밭에서 기르기 좋은 작물로는 상추, 시금치, 오이, 고추, 감자를 추천드립니다. 상추는 다양한 품종이 있어 관리가 쉽고, 빠르게 자라며 수확할 수 있습니다. 시금치는 선호 온도가 다양해 초보자도 쉽게 키울 수 있고, 빠른 수확이 가능한 장점이 있습니다. 오이는 여름철에 적합한 작물로, 수분만 잘 공급하면 빠르게 성장하여 수확할 수 있습니다. 고추는 여름철 고온다습한 환경에서 잘 자라며, 적은 공간에서도 생산성이 높습니다. 마지막으로 감자는 다양한 품종이 있어 많은 수확량을 기대할 수 있으며, 비교적 쉽게 기를 수 있습니다. 이 작물들은 작은 텃밭에서 기르기에 적합하여 신선한 채소를 즐길 수 있는 좋은 선택입니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.6923076923076923,
+                "answer_relevancy": 0.6379451513776732,
+                "context_recall": 1.0,
+                "context_precision": 0.0,
+                "average": 0.5825632109213413
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "PASS",
+                "answer_relevancy": "PASS",
+                "context_recall": "PASS",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "PASS"
+        },
+        {
+            "question": "고온 건조한 여름철에 재배하기 좋은 작물 추천 부탁드립니다.",
+            "answer": "고온 건조한 여름철에 재배하기 좋은 작물로는 고추, 가지, 수박, 멜론, 그리고 옥수수를 추천드립니다. 고추는 더위에 잘 적응하고, 수확량이 풍부하여 여름철에 인기가 많습니다. 가지는 고온에서도 잘 자라며 다양한 요리에 활용될 수 있습니다. 수박과 멜론은 여름철의 더위를 잘 이기고 수분을 많이 포함하고 있어 시원한 간식으로 좋습니다. 마지막으로 옥수수는 여름철 햇빛을 많이 받아야 잘 자라며, 수확 후 간편하게 요리할 수 있는 장점이 있습니다. 이 작물들은 고온 건조한 환경에서 잘 자라므로 여름철 재배에 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.52408123740245,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.1310203093506125
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        },
+        {
+            "question": "비가림시설을 활용할 수 있는 작은 텃밭에서 재배할 작물을 추천해주세요.",
+            "answer": "비가림시설을 활용할 수 있는 작은 텃밭에서 재배할 작물로는 상추, 시금치, 방울토마토, 오이 및 고추를 추천드립니다. 상추와 시금치는 생육 기간이 짧아 빠른 수확이 가능하며, 물빠짐이 좋은 비가림시설에서 잘 자랍니다. 방울토마토는 햇빛을 많이 받아야 잘 자라므로 비가림시설에서 관리하면 좋은 결과를 얻을 수 있습니다. 오이는 여름철 더위에 강해 비가림시설에서 재배 시 수확량이 많아집니다. 고추 또한 고온다습한 환경에 적합하여 비가림시설에서 잘 자랄 수 있습니다. 이 작물들은 비가림시설의 장점을 최대한 활용하여 재배하기에 적합합니다.",
+            "ragas_metrics": {
+                "faithfulness": 0.0,
+                "answer_relevancy": 0.526429993581571,
+                "context_recall": 0.0,
+                "context_precision": 0.0,
+                "average": 0.13160749839539276
+            },
+            "ragas_pass_fail": {
+                "faithfulness": "FAIL",
+                "answer_relevancy": "PASS",
+                "context_recall": "FAIL",
+                "context_precision": "PASS"
+            },
+            "pass_fail": "FAIL",
+            "fail_reason": "기준 미달: faithfulness (점수: 0.0000, 기준: 0.2), context_recall (점수: 0.0000, 기준: 0.1)"
+        }
+    ]
+}

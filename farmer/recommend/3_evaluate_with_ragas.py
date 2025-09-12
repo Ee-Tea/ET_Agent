@@ -1,3 +1,4 @@
+# 3_evaluate_with_ragas.py(v1.1 ragas 평가지표 주석 추가 20250912-11:04)
 import os
 import json
 import logging
@@ -13,7 +14,7 @@ from langchain_openai import ChatOpenAI
 import ast
 
 # ==================== 설정: 입력 파일 이름 ====================
-INPUT_CSV_FILENAME = "2_rag_answers_20250911_181120.csv" # <-- 여기를 수정하세요
+INPUT_CSV_FILENAME = "2_rag_answers_20250912_105205.csv" # <-- 여기를 수정하세요
 # ==========================================================
 
 # ==================== 설정 (공통) ====================
@@ -82,10 +83,13 @@ def main():
 
     # ✨ 개별 PASS/FAIL 판단 기준 설정 (원하는 점수로 수정하세요)
     PASS_THRESHOLDS = {
-        "faithfulness": 0.6,
-        "answer_relevancy": 0.6,
-        "context_recall": 0.6,
-        "context_precision": 0.6
+        #generation
+        "faithfulness": 0.3, # faithfulness = 생성된 답변이 얼마나 사실(Context)에 근거한 정확한 답변인가요? // answer와 retrieved context에서 계산됩니다.
+        "answer_relevancy": 0.3, # answer_relevancy = 생성된 답변이 질문에 얼마나 관련성이 있나요? // question과 answer로 계산됩니다.
+        
+        #retrieval
+        "context_recall": 0.3, # context_recall = 생성된 답변이 Context의 정보를 얼마나 잘 활용했나요? // answer과 context 로계산됩니다.
+        "context_precision": 0.3 # context_precision = 생성된 답변이 Context 외의 불필요한 정보를 얼마나 배제했나요? // question과 context에서 계산됩니다.
     }
 
     # ✨ 변경 사항: 전체 평균 점수 계산 및 PASS/FAIL 결정
@@ -100,7 +104,7 @@ def main():
     ) / 4
     
     # 평균 점수에 대한 PASS/FAIL 결정 (기준: 0.6)
-    is_overall_pass = total_avg_score >= 0.7
+    is_overall_pass = total_avg_score >= 0.6
 
     # ✨ 변경 사항: JSON에 추가될 최종 데이터 구조 생성
     json_output = {

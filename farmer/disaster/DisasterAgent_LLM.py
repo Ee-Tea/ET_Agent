@@ -442,7 +442,7 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         except json.JSONDecodeError:
             # JSON 파싱 실패 시 기존 방식으로 폴백
             result_clean = result.strip().upper()
-            is_sufficient = "SUFFICIENT" in result_clean
+            is_sufficient = "SUFFICIENT" in result_clean and "INSUFFICIENT" not in result_clean
             print(f"   - 📊 LLM 검증 결과 (폴백): {result.strip()}")
             print(f"   - 🎯 최종 판단: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
         

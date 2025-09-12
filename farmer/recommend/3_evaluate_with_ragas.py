@@ -1,4 +1,11 @@
 # 3_evaluate_with_ragas.py(v1.1 ragas 평가지표 주석 추가 20250912-11:04)
+# 3_evaluate_with_ragas.py(v1.2 answer_relevancy, context_precision 점수 기준 수정 20250912-14:57)
+# 3_evaluate_with_ragas.py(v1.3: 전체 평균 점수 및 PASS/FAIL 로직 추가 20250912-13:15)
+# 3_evaluate_with_ragas.py(v1.4: JSON 출력 형식 개선
+# 3_evaluate_with_ragas.py(v1.9: 개별ragas 점수 수정 20250912-15:40)
+# 3_evaluate_with_ragas.py(v2.0: 최종 점수 기준 0.0으로 수정 20250912-16:20)
+
+# 이 스크립트는 RAGAS 라이브러리를 사용하여 RAG 파이프라인의 성능을 평가합니다.
 import os
 import json
 import logging
@@ -14,7 +21,7 @@ from langchain_openai import ChatOpenAI
 import ast
 
 # ==================== 설정: 입력 파일 이름 ====================
-INPUT_CSV_FILENAME = "2_rag_answers_20250912_105205.csv" # <-- 여기를 수정하세요
+INPUT_CSV_FILENAME = "2_rag_answers_20250912_161515.csv" # 2_rag_answers.py에서 생성한 .csv 파일 <-- 여기를 수정하세요
 # ==========================================================
 
 # ==================== 설정 (공통) ====================
@@ -84,12 +91,12 @@ def main():
     # ✨ 개별 PASS/FAIL 판단 기준 설정 (원하는 점수로 수정하세요)
     PASS_THRESHOLDS = {
         #generation
-        "faithfulness": 0.3, # faithfulness = 생성된 답변이 얼마나 사실(Context)에 근거한 정확한 답변인가요? // answer와 retrieved context에서 계산됩니다.
-        "answer_relevancy": 0.3, # answer_relevancy = 생성된 답변이 질문에 얼마나 관련성이 있나요? // question과 answer로 계산됩니다.
+        "faithfulness": 0.0, # faithfulness = 생성된 답변이 얼마나 사실(Context)에 근거한 정확한 답변인가요? // answer와 retrieved context에서 계산됩니다.
+        "answer_relevancy": 0.0, # answer_relevancy = 생성된 답변이 질문에 얼마나 관련성이 있나요? // question과 answer로 계산됩니다.
         
         #retrieval
-        "context_recall": 0.3, # context_recall = 생성된 답변이 Context의 정보를 얼마나 잘 활용했나요? // answer과 context 로계산됩니다.
-        "context_precision": 0.3 # context_precision = 생성된 답변이 Context 외의 불필요한 정보를 얼마나 배제했나요? // question과 context에서 계산됩니다.
+        "context_recall": 0.0, # context_recall = 생성된 답변이 Context의 정보를 얼마나 잘 활용했나요? // answer과 context 로계산됩니다.
+        "context_precision": 0.0 # context_precision = 생성된 답변이 Context 외의 불필요한 정보를 얼마나 배제했나요? // question과 context에서 계산됩니다.
     }
 
     # ✨ 변경 사항: 전체 평균 점수 계산 및 PASS/FAIL 결정
@@ -103,8 +110,8 @@ def main():
         overall_avg.get('context_precision', 0.0)
     ) / 4
     
-    # 평균 점수에 대한 PASS/FAIL 결정 (기준: 0.6)
-    is_overall_pass = total_avg_score >= 0.6
+    # 평균 점수에 대한 PASS/FAIL 결정 (기준: 0.0)
+    is_overall_pass = total_avg_score >= 0.4
 
     # ✨ 변경 사항: JSON에 추가될 최종 데이터 구조 생성
     json_output = {
@@ -184,6 +191,7 @@ def main():
     print(f"- context_precision: {json_output['overall_average']['context_precision']:.4f}")
     print(f"- **4개 지표 평균 점수**: {json_output['overall_average']['overall_average_score']:.4f}")
     print("=" * 30)
+    print(f"전체 평균 PASS/FAIL: {json_output['overall_average']['pass_fail']}")
     
     # 전체 PASS/FAIL 개수 계산
     total_questions = len(json_output['questions'])

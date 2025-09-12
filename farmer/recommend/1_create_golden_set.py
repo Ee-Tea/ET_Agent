@@ -1,3 +1,8 @@
+# 1_create_golden_set.py (v1.0: 초안 작성 완료)
+# 1_create_golden_set.py (v2.0: 프롬프트 수정 및 청크 추출 로직 개선 20250912-11:30)
+# 1_create_golden_set.py (v3.0: 질문 생성 프롬프트 및 로직 개선 20250912-13:20)
+# 1_create_golden_set.py (v4.0: 모범 답안 생성
+# 1_create_golden_set.py (v5.0: 프롬프트 및 로직 최종 수정 20250912-14:00)
 # 1_create_golden_set.py (v6.0: 최종 로직 수정 버전)
 
 import os

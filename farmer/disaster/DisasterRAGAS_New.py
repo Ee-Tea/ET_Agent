@@ -55,7 +55,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from DisasterAgent_LLM import run
 
 class DisasterRAGASEvaluator:
-    def __init__(self, csv_path="./golden_dataset_open_multi_20250912_154951.csv", config=None):
+    def __init__(self, csv_path="./farmer/disaster/data/golden_dataset_open_single_20250912_171334.csv", config=None):
         """DisasterAgent_LLM RAGAS 평가기 초기화"""
         print(f"🔧 DisasterRAGAS 평가기 초기화 시작...")
         print(f"📁 CSV 파일 경로: {csv_path}")
@@ -136,6 +136,16 @@ class DisasterRAGASEvaluator:
             return self._load_csv_data()
         else:
             print(f"⚠️ CSV 파일이 존재하지 않음: {self.csv_path}")
+            # farmer/disaster/data 폴더에서 최신 CSV 파일 찾기
+            data_dir = "./farmer/disaster/data"
+            if os.path.exists(data_dir):
+                csv_files = [f for f in os.listdir(data_dir) if f.startswith("golden_dataset_open") and f.endswith(".csv")]
+                if csv_files:
+                    # 최신 파일 선택
+                    latest_file = max(csv_files, key=lambda x: os.path.getctime(os.path.join(data_dir, x)))
+                    self.csv_path = os.path.join(data_dir, latest_file)
+                    print(f"🔄 최신 CSV 파일 사용: {self.csv_path}")
+                    return self._load_csv_data()
             return []
 
     def _load_csv_data(self):

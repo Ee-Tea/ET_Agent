@@ -8,8 +8,8 @@ import os
 import re
 import json
 import numpy as np
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
@@ -89,8 +89,6 @@ def load_region_map():
             if code not in code_to_name:
                 code_to_name[code] = name
             elif code_to_name[code] != name:
-                # 동일 코드가 다른 이름으로 등장하는 경우 -> 데이터 정제 필요
-                # print(f"⚠️ 코드 충돌: {code} -> '{code_to_name[code]}' vs '{name}' (첫 값 유지)")
                 pass
             
             # 2) name -> [codes] (1:多)
@@ -186,48 +184,43 @@ def search_similar_documents(query: str, documents: List[Dict[str, str]], top_k:
     if not documents:
         return []
     
-    # 문서 텍스트 추출
     human_texts = [doc["human"] for doc in documents]
-    
-    # 임베딩 계산
     doc_embeddings = embed_texts(human_texts)
     query_embedding = embed_texts([query])
-    
-    # FAISS 인덱스 생성
     index = faiss.IndexFlatIP(doc_embeddings.shape[1])
     index.add(doc_embeddings)
-    
-    # 유사도 검색
     scores, indices = index.search(query_embedding, min(top_k, len(documents)))
-    
-    # 결과 반환
     results = []
     for score, idx in zip(scores[0], indices[0]):
         if idx == -1:
             continue
         results.append((float(score), documents[idx]))
-    
     return results
 
 def combine_weather_data(state: Dict[str, Any], max_docs_per_type: int = 3) -> str:
-    """날씨 데이터 통합 (토큰 제한 고려)"""
+    """날씨 데이터 통합 (토큰 제한 고려)
+       - 주간 질의(이번 주/다음 주 등)인 경우, max_docs_per_type를 자동 해제(=큰 값)"""
     context_parts = []
-    
-    # 기상특보 데이터 (최대 3개)
+
+    # 주간 요청 여부 플래그
+    weekly_mode = bool(state.get("is_weekly_request", False))
+    _limit = (999 if weekly_mode else max_docs_per_type)
+
+    # 기상특보 데이터
     if "advisory_data" in state and state["advisory_data"]:
-        for doc in state["advisory_data"][:max_docs_per_type]:
+        for doc in state["advisory_data"][:_limit]:
             formatted = _format_for_llm("live_advisory", doc["json"], doc["human"])
             context_parts.append(formatted)
     
-    # 단기예보 데이터 (최대 3개)
+    # 단기예보 데이터
     if "short_forecast_data" in state and state["short_forecast_data"]:
-        for doc in state["short_forecast_data"][:max_docs_per_type]:
+        for doc in state["short_forecast_data"][:_limit]:
             formatted = _format_for_llm("live_forecast", doc["json"], doc["human"])
             context_parts.append(formatted)
     
-    # 중기예보 데이터 (최대 3개)
+    # 중기예보 데이터
     if "mid_forecast_data" in state and state["mid_forecast_data"]:
-        for doc in state["mid_forecast_data"][:max_docs_per_type]:
+        for doc in state["mid_forecast_data"][:_limit]:
             formatted = _format_for_llm("region_forecast", doc["json"], doc["human"])
             context_parts.append(formatted)
     
@@ -237,51 +230,127 @@ def combine_weather_data(state: Dict[str, Any], max_docs_per_type: int = 3) -> s
         return "NO_DATA_AVAILABLE"
 
 # 지역 매핑 (CSV 파일에서 로드)
-REGION_MAP = {}
+REGION_MAP = {}  # NOTE: 위에서 이미 정의했지만, 기존 코드 호환 위해 유지
+def match_region_with_default(target_region: str, region_name: str, region_from_default: bool) -> bool:
+    """
+    지역 매칭 유틸 함수
+    - target_region: 사용자가 선택한 지역 (예: "서울")
+    - region_name: API 응답의 지역명
+    - region_from_default: True면 지역 미지정으로 자동 기본값("서울") 적용된 경우, False면 사용자가 명시적으로 입력한 경우
+    """
+    if target_region == "서울":
+        if region_from_default:
+            # ✅ 지역 미지정 → 수도권까지 허용
+            return any(k in region_name for k in ["서울", "경기", "인천", "수도권"])
+        else:
+            # ✅ 명시적으로 "서울" 입력 → 서울만
+            return "서울" in region_name
+    else:
+        return target_region in region_name
 
-# 중복된 load_region_map 함수 제거됨
+# ========= 날짜/기간 추출 유틸 =========
 
-def extract_region_from_question(question: str) -> str:
-    """질문에서 지역 추출 (CSV 기반)"""
-    if not question:
-        return "서울"
-    
-    # CSV에서 로드된 지역 매핑 사용
-    if REGION_MAP:
-        # 질문에서 지역 코드나 지역명 찾기
-        for code, name in REGION_MAP.items():
-            if code in question or name in question:
-                return name
-    
-    # CSV가 없으면 기본값 반환
-    return "서울"
+def normalize_spaces(s: str) -> str:
+    """문자열의 공백을 정규화"""
+    return re.sub(r'\s+', ' ', (s or "").strip())
 
-# def extract_date_from_question(question: str) -> datetime:
-#     """질문에서 날짜 추출 (간단한 버전) - LLM이 처리하도록 주석처리"""
-#     if not question:
-#         return datetime.now(tz=KST)
-#     
-#     now = datetime.now(tz=KST)
-#     
-#     if "오늘" in question or "현재" in question or "지금" in question:
-#         return now
-#     elif "내일" in question:
-#         return now + timedelta(days=1)
-#     elif "모레" in question:
-#         return now + timedelta(days=2)
-#     elif "3일" in question:
-#         return now + timedelta(days=3)
-#     elif "4일" in question:
-#         return now + timedelta(days=4)
-#     elif "5일" in question:
-#         return now + timedelta(days=5)
-#     elif "6일" in question:
-#         return now + timedelta(days=6)
-#     elif "7일" in question:
-#         return now + timedelta(days=7)
-#     elif "1주" in question or "일주일" in question:
-#         return now + timedelta(days=7)
-#     elif "2주" in question:
-#         return now + timedelta(days=14)
-#     
-#     return now  # 기본값
+def now_kst() -> datetime:
+    """현재 KST 시간 반환"""
+    return datetime.now(tz=KST)
+
+WEEKDAY_IDX = {"월":0,"화":1,"수":2,"목":3,"금":4,"토":5,"일":6}
+
+def _week_range_containing(d: date) -> Tuple[date, date]:
+    """일요일~토요일 주간 범위로 맞춤"""
+    # 일요일=6? 파이썬 weekday(): 월=0 ... 일=6
+    # '이번 주: 일요일~토요일' 요구에 맞추기 위해, 해당 주의 '일요일'을 구함
+    # 현재 날짜 d 기준: d_weekday (월0~일6)
+    wd = d.weekday()  # 월=0 ... 일=6
+    # 우리 기준: 주 시작은 '일요일'이므로, d가 월(0)이면 -1일, ... 일(6)이면 0일
+    days_from_sun = (wd + 1) % 7  # 일요일이면 0, 월요일이면 1, ...
+    start = d - timedelta(days=days_from_sun)
+    end = start + timedelta(days=6)
+    return (start, end)
+
+
+
+def REGION_extract_date_range_from_question(q: str) -> Optional[Tuple[datetime, datetime, bool]]:
+    """
+    질문에서 날짜 '범위'를 파싱.
+    반환: (start_dt, end_dt, is_weekly_request)
+      - is_weekly_request=True면 '이번 주/다음 주' 같은 포괄 질의
+    """
+    qn = normalize_spaces(q)
+    now = now_kst()
+
+    # "이번 주"
+    if "이번주" in qn or "이번 주" in qn:
+        s, e = _week_range_containing(now.date())
+        sdt = datetime.combine(s, datetime.min.time(), tzinfo=KST)
+        edt = datetime.combine(e, datetime.max.time(), tzinfo=KST)
+        return (sdt, edt, True)
+
+    # "다음 주"
+    if "다음주" in qn or "다음 주" in qn:
+        # 이번 주의 끝 + 1일 → 다음 주의 시작
+        s, e = _week_range_containing(now.date())
+        next_start = e + timedelta(days=1)
+        next_end = next_start + timedelta(days=6)
+        sdt = datetime.combine(next_start, datetime.min.time(), tzinfo=KST)
+        edt = datetime.combine(next_end, datetime.max.time(), tzinfo=KST)
+        return (sdt, edt, True)
+
+    # "오늘/내일/모레"는 단일 날짜 → 동일 start/end
+    if any(k in qn for k in ["오늘", "현재", "지금"]):
+        sdt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        edt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        return (sdt, edt, False)
+    if "내일" in qn:
+        tgt = (now + timedelta(days=1))
+        sdt = tgt.replace(hour=0, minute=0, second=0, microsecond=0)
+        edt = tgt.replace(hour=23, minute=59, second=59, microsecond=0)
+        return (sdt, edt, False)
+    if "모레" in qn:
+        tgt = (now + timedelta(days=2))
+        sdt = tgt.replace(hour=0, minute=0, second=0, microsecond=0)
+        edt = tgt.replace(hour=23, minute=59, second=59, microsecond=0)
+        return (sdt, edt, False)
+
+    # M월D일 패턴 (단일 날짜)
+    m2 = re.search(r"(\d{1,2})월(\d{1,2})일", qn)
+    if m2:
+        M, D = int(m2.group(1)), int(m2.group(2))
+        try:
+            tgt = datetime(now.year, M, D, tzinfo=KST)
+            sdt = tgt.replace(hour=0, minute=0, second=0, microsecond=0)
+            edt = tgt.replace(hour=23, minute=59, second=59, microsecond=0)
+            return (sdt, edt, False)
+        except ValueError:
+            pass
+
+    # N일/주/달/년 뒤 → 단일 날짜 취급
+    m = re.search(r"(\d+)(일|주|달|년)(뒤|후)", qn)
+    if m:
+        num, unit = int(m.group(1)), m.group(2)
+        if unit == "일":
+            tgt = now + timedelta(days=num)
+        elif unit == "주":
+            tgt = now + timedelta(weeks=num)
+        elif unit == "달":
+            tgt = now + timedelta(days=30*num)
+        else:
+            tgt = now + timedelta(days=365*num)
+        sdt = tgt.replace(hour=0, minute=0, second=0, microsecond=0)
+        edt = tgt.replace(hour=23, minute=59, second=59, microsecond=0)
+        return (sdt, edt, False)
+
+    # 못 찾으면 None
+    return None
+
+# (기존) 단일 datetime 추출 함수(하위 호환)
+def REGION_extract_datetime_from_question(q: str) -> Optional[datetime]:
+    rng = REGION_extract_date_range_from_question(q)
+    if not rng:
+        return None
+    sdt, _, _ = rng
+    return sdt

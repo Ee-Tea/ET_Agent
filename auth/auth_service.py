@@ -9,10 +9,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
 from .config import settings
-from .models.user import User, OAuthAccount
-from .schemas import GoogleUserInfo, Token, TokenData, AuthResponse
+from .models.user import User
+from .schemas import GoogleUserInfo, NaverUserInfo, Token, TokenData, AuthResponse
 
 class GoogleOAuthError(Exception):
+    def __init__(self, message: str, status: int | None = None, payload: dict | None = None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload or {}
+
+
+class NaverOAuthError(Exception):
     def __init__(self, message: str, status: int | None = None, payload: dict | None = None):
         super().__init__(message)
         self.status = status
@@ -32,6 +39,19 @@ class AuthService:
     @property
     def google_redirect_uri(self) -> str:
         return settings.GOOGLE_REDIRECT_URI
+
+    # NAVER
+    @property
+    def naver_client_id(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_ID
+
+    @property
+    def naver_client_secret(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_SECRET
+
+    @property
+    def naver_redirect_uri(self) -> Optional[str]:
+        return settings.NAVER_REDIRECT_URI
 
     @property
     def secret_key(self) -> str:
@@ -207,39 +227,45 @@ class AuthService:
             )
 
     def get_or_create_user(self, db: Session, google_user: GoogleUserInfo) -> tuple[User, bool]:
-        oauth = db.query(OAuthAccount).filter(
-            and_(OAuthAccount.provider == "google", OAuthAccount.provider_account_id == google_user.id)
+        # OAuth 계정으로 사용자 찾기
+        existing = db.query(User).filter(
+            and_(User.provider == "google", User.provider_account_id == google_user.id)
         ).first()
-        if oauth:
-            user = oauth.user
-            user.email = google_user.email
-            user.name = google_user.name
-            user.updated_at = datetime.utcnow()
-            db.commit(); db.refresh(user)
-            return user, False
-
-        existing = db.query(User).filter(User.email == google_user.email).first()
         if existing:
-            db.add(OAuthAccount(
-                user_id=existing.id, provider="google", provider_account_id=google_user.id,
-                access_token=None, refresh_token=None, expires_at=None, scope="openid email profile"
-            ))
+            existing.email = google_user.email
+            existing.name = google_user.name
+            existing.updated_at = datetime.utcnow()
             db.commit()
+            db.refresh(existing)
             return existing, False
 
-        new_user = User(email=google_user.email, name=google_user.name, is_active=True)
-        db.add(new_user); db.flush()
-        db.add(OAuthAccount(
-            user_id=new_user.id, provider="google", provider_account_id=google_user.id,
-            access_token=None, refresh_token=None, expires_at=None, scope="openid email profile"
-        ))
-        db.commit(); db.refresh(new_user)
+        # 이메일로 기존 사용자 찾기
+        existing_by_email = db.query(User).filter(User.email == google_user.email).first()
+        if existing_by_email:
+            existing_by_email.provider = "google"
+            existing_by_email.provider_account_id = google_user.id
+            existing_by_email.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing_by_email)
+            return existing_by_email, False
+
+        new_user = User(
+            email=google_user.email, 
+            name=google_user.name, 
+            is_active=True,
+            provider="google",
+            provider_account_id=google_user.id,
+            scope="openid email profile"
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
         return new_user, True
 
     async def authenticate_google(self, db: Session, code: str) -> AuthResponse:
         google_user = await self.get_google_user_info(code)
         user, is_new = self.get_or_create_user(db, google_user)
-        token = self.create_access_token(data={"sub": str(user.id)})
+        token = self.create_access_token(data={"sub": str(user.user_id)})
         
         
         return AuthResponse(
@@ -248,6 +274,239 @@ class AuthService:
             is_new_user=is_new
         )
 
+
+class NaverOAuthService:
+    @property
+    def client_id(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_ID
+
+    @property
+    def client_secret(self) -> Optional[str]:
+        return settings.NAVER_CLIENT_SECRET
+
+    @property
+    def redirect_uri(self) -> Optional[str]:
+        return settings.NAVER_REDIRECT_URI
+
+    async def exchange_token(self, code: str, state: Optional[str]) -> dict:
+        if not (self.client_id and self.client_secret and self.redirect_uri):
+            raise NaverOAuthError("Missing NAVER_* settings (client_id/secret/redirect_uri)")
+        token_url = "https://nid.naver.com/oauth2.0/token"
+        # Naver 권장: x-www-form-urlencoded 로 POST 전송 (GET도 지원하나 환경에 따라 실패 사례 존재)
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "code": code,
+            "state": state or "",
+            "redirect_uri": self.redirect_uri,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.post(
+                token_url,
+                data=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            try:
+                payload = res.json()
+            except Exception:
+                payload = {"raw": res.text}
+            # access_token 미포함 또는 오류 필드가 있으면 명확히 에러 반환
+            if res.status_code != 200 or (isinstance(payload, dict) and payload.get("error")):
+                # 디버그에 도움 되도록 전체 payload 동봉
+                raise NaverOAuthError("Naver token exchange failed", status=res.status_code, payload=payload)
+            return payload
+
+    async def fetch_userinfo(self, access_token: str) -> NaverUserInfo:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(
+                "https://openapi.naver.com/v1/nid/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if res.status_code != 200:
+                try:
+                    payload = res.json()
+                except Exception:
+                    payload = {"raw": res.text}
+                raise NaverOAuthError("Naver userinfo fetch failed", status=res.status_code, payload=payload)
+            ud = res.json() or {}
+            response = (ud or {}).get("response", {})
+            return NaverUserInfo(
+                id=str(response.get("id", "")),
+                email=response.get("email"),
+                name=response.get("name"),
+                nickname=response.get("nickname"),
+                profile_image=response.get("profile_image"),
+                mobile=response.get("mobile"),
+            )
+
+    def get_or_create_user(self, db: Session, naver_user: NaverUserInfo) -> tuple[User, bool]:
+        # OAuth 계정으로 사용자 찾기
+        existing = db.query(User).filter(
+            and_(User.provider == "naver", User.provider_account_id == naver_user.id)
+        ).first()
+        if existing:
+            if naver_user.email:
+                existing.email = naver_user.email
+            existing.name = naver_user.name or naver_user.nickname or existing.name
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing, False
+
+        email = naver_user.email
+        if email:
+            existing_by_email = db.query(User).filter(User.email == email).first()
+            if existing_by_email:
+                existing_by_email.provider = "naver"
+                existing_by_email.provider_account_id = naver_user.id
+                existing_by_email.updated_at = datetime.utcnow()
+                db.commit()
+                db.refresh(existing_by_email)
+                return existing_by_email, False
+
+        new_user = User(
+            email=email, 
+            name=naver_user.name or naver_user.nickname or "", 
+            is_active=True,
+            provider="naver",
+            provider_account_id=naver_user.id,
+            scope="profile"
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        return new_user, True
+
+    async def authenticate(self, db: Session, code: str, state: Optional[str]) -> AuthResponse:
+        token_json = await self.exchange_token(code, state)
+        access_token = token_json.get("access_token")
+        if not access_token:
+            raise NaverOAuthError("No access_token in Naver token response", payload=token_json)
+        userinfo = await self.fetch_userinfo(access_token)
+        user, is_new = self.get_or_create_user(db, userinfo)
+        jwt_token = auth_service.create_access_token(data={"sub": str(user.user_id)})
+        return AuthResponse(
+            user=user,
+            token=Token(access_token=jwt_token, token_type="bearer", expires_in=auth_service.access_token_expire_minutes * 60),
+            is_new_user=is_new,
+        )
+
+
+# Kakao OAuth
+class KakaoOAuthService:
+    @property
+    def client_id(self) -> Optional[str]:
+        return settings.KAKAO_CLIENT_ID
+
+    @property
+    def client_secret(self) -> Optional[str]:
+        return settings.KAKAO_CLIENT_SECRET
+
+    @property
+    def redirect_uri(self) -> Optional[str]:
+        return settings.KAKAO_REDIRECT_URI
+
+    async def exchange_token(self, code: str) -> dict:
+        if not (self.client_id and self.redirect_uri):
+            raise GoogleOAuthError("Missing KAKAO_* settings (client_id/redirect_uri)")
+        token_url = "https://kauth.kakao.com/oauth/token"
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": self.client_id,
+            "code": code,
+            "redirect_uri": self.redirect_uri,
+        }
+        if self.client_secret:
+            form["client_secret"] = self.client_secret
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.post(token_url, data=form, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            try:
+                payload = res.json()
+            except Exception:
+                payload = {"raw": res.text}
+            if res.status_code != 200 or (isinstance(payload, dict) and payload.get("error")):
+                raise GoogleOAuthError("Kakao token exchange failed", status=res.status_code, payload=payload)
+            return payload
+
+    async def fetch_userinfo(self, access_token: str) -> dict:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(
+                "https://kapi.kakao.com/v2/user/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if res.status_code != 200:
+                try:
+                    payload = res.json()
+                except Exception:
+                    payload = {"raw": res.text}
+                raise GoogleOAuthError("Kakao userinfo fetch failed", status=res.status_code, payload=payload)
+            return res.json()
+
+    def get_or_create_user(self, db: Session, ud: dict) -> tuple[User, bool]:
+        kid = str(ud.get("id"))
+        kakao_account = (ud or {}).get("kakao_account", {})
+        email = kakao_account.get("email")
+        profile = kakao_account.get("profile") or {}
+        name = profile.get("nickname") or ""
+
+        existing = db.query(User).filter(and_(User.provider == "kakao", User.provider_account_id == kid)).first()
+        if existing:
+            if email:
+                existing.email = email
+            if name:
+                existing.name = name
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing, False
+
+        if email:
+            existing_by_email = db.query(User).filter(User.email == email).first()
+            if existing_by_email:
+                existing_by_email.provider = "kakao"
+                existing_by_email.provider_account_id = kid
+                existing_by_email.updated_at = datetime.utcnow()
+                db.commit()
+                db.refresh(existing_by_email)
+                return existing_by_email, False
+
+        new_user = User(
+            email=email,
+            name=name,
+            is_active=True,
+            provider="kakao",
+            provider_account_id=kid,
+            scope="profile",
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        return new_user, True
+
+    async def authenticate(self, db: Session, code: str) -> AuthResponse:
+        token_json = await self.exchange_token(code)
+        access_token = token_json.get("access_token")
+        if not access_token:
+            raise GoogleOAuthError("No access_token in Kakao token response", payload=token_json)
+        userinfo = await self.fetch_userinfo(access_token)
+        user, is_new = self.get_or_create_user(db, userinfo)
+        jwt_token = auth_service.create_access_token(data={"sub": str(user.user_id)})
+        return AuthResponse(
+            user=user,
+            token=Token(access_token=jwt_token, token_type="bearer", expires_in=auth_service.access_token_expire_minutes * 60),
+            is_new_user=is_new,
+        )
 # 전역 인스턴스
 auth_service = AuthService()
-__all__ = ["AuthService", "auth_service", "GoogleOAuthError"]
+naver_oauth_service = NaverOAuthService()
+kakao_oauth_service = KakaoOAuthService()
+__all__ = [
+    "AuthService",
+    "auth_service",
+    "GoogleOAuthError",
+    "NaverOAuthError",
+    "NaverOAuthService",
+    "naver_oauth_service",
+    "kakao_oauth_service",
+]

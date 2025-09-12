@@ -6,7 +6,7 @@ from typing import Literal
 class UserPublic(BaseModel):
     id: str
     name: str
-    email: EmailStr
+    email: Optional[EmailStr] = None
     picture: str | None = None
     provider: Literal["google", "kakao", "naver"] = "google"
 
@@ -23,7 +23,7 @@ class UserUpdate(UserBase):
     pass
 
 class User(UserBase):
-    id: str
+    user_id: str
     created_at: datetime
     updated_at: datetime
     
@@ -70,6 +70,15 @@ class GoogleUserInfo(BaseModel):
 class GoogleAuthRequest(BaseModel):
     code: str
     state: Optional[str] = None
+
+# Naver schemas
+class NaverUserInfo(BaseModel):
+    id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    nickname: Optional[str] = None
+    profile_image: Optional[str] = None
+    mobile: Optional[str] = None
 
 # Response schemas
 class AuthResponse(BaseModel):

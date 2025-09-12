@@ -48,22 +48,12 @@ class MainState(TypedDict):
 class MainOrchestrator:
     """메인 오케스트레이터 - LangGraph StateGraph 기반"""
     
-    def __init__(self, user_id: str, chat_id: str):
+    def __init__(self, user_id: str, chat_id: str, hybrid_session_service: Optional[HybridSessionService] = None):
         self.user_id = user_id
         self.chat_id = chat_id
         self.session_key = f"{user_id}_{chat_id}"
-        self.hybrid_session_service = HybridSessionService(
-            os.getenv("REDIS_URL", "redis://localhost:6380"),
-            os.getenv("DATABASE_URL")
-        )
-        
-        # 하이브리드 세션 서비스 초기화
-        import asyncio
-        try:
-            asyncio.run(self.hybrid_session_service.init_postgres())
-        except Exception as e:
-            print(f"⚠️ 하이브리드 세션 서비스 초기화 실패: {e}")
-            self.hybrid_session_service = None
+        # FastAPI에서 주입된 서비스를 사용(권장). 주입이 없으면 None으로 두고 CLI에서만 베스트에포트로 사용.
+        self.hybrid_session_service = hybrid_session_service
         
         # LLM 초기화
         self.llm = ChatOpenAI(
@@ -819,18 +809,22 @@ class MainOrchestrator:
             # 그래프 실행
             final_state = self.graph.invoke(initial_state, config)
 
-            # 에이전트 응답을 DB에 기록
+            # 에이전트 응답을 DB에 기록 (CLI 동기 환경에서만 저장)
             try:
                 if self.hybrid_session_service:
                     import asyncio
-                    asyncio.run(
-                        self.hybrid_session_service.add_chat_message(
-                            self.user_id,
-                            self.chat_id,
-                            "assistant",
-                            str(final_state.get("final_response", ""))
+                    try:
+                        asyncio.get_running_loop()
+                        # 이벤트 루프가 이미 있으면(API) 저장은 호출측에서 처리
+                    except RuntimeError:
+                        asyncio.run(
+                            self.hybrid_session_service.add_chat_message(
+                                self.user_id,
+                                self.chat_id,
+                                "assistant",
+                                str(final_state.get("final_response", ""))
+                            )
                         )
-                    )
             except Exception as e:
                 print(f"⚠️ 에이전트 메시지 저장 실패: {e}")
 

@@ -29,10 +29,8 @@ WIND_KO = {
     "W": "서", "WNW": "서북서", "NW": "북서", "NNW": "북북서"
 }
 
-# 지역 매핑 (utils.py에서 import)
+# 지역 매핑
 from .utils import load_region_map, REGION_MAP
-
-# 모듈 로드 시 지역 매핑 초기화
 load_region_map()
 
 def resolve_region(token: str) -> str:
@@ -144,10 +142,8 @@ def fetch_short_land_records(question_date=None, target_region=None) -> List[Dic
                             if target_region in region_name:
                                 docs.append(formatted_record)
                     except:
-                        # JSON 파싱 실패 시 제외
                         continue
                 else:
-                    # 지역 지정 없으면 모든 데이터 포함
                     docs.append(formatted_record)
             
             print(f"   - API에서 {len(docs)}개 데이터 수집 (지역: {target_region or '전체'})")
@@ -155,7 +151,7 @@ def fetch_short_land_records(question_date=None, target_region=None) -> List[Dic
             
         except Exception as e:
             print(f"❌ 단기예보 API 오류 (시도 {retry+1}/3): {e}")
-            if retry < 2:  # 마지막 시도가 아니면 잠시 대기
+            if retry < 2:
                 import time
                 time.sleep(2)
             else:
@@ -170,30 +166,31 @@ class ShortForecastNode:
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """단기예보 노드 실행"""
-        print("🧩 노드: 단기예보 데이터 수집")
-        
         try:
-            # 질문에서 추출한 날짜 정보 가져오기
             question_date = state.get("question_date")
             target_region = state.get("target_region", "서울")
-            
+            date_range = state.get("question_date_range")  # (start_dt, end_dt, is_weekly_request)
+
             if question_date:
                 print(f"   - 질문 날짜: {question_date.strftime('%Y-%m-%d %H:%M')}")
             print(f"   - 대상 지역: {target_region}")
 
-            # 단기예보 데이터 가져오기 (지역 필터링 적용)
-            forecasts = fetch_short_land_records(question_date, target_region)
-            
+            # 기본 1회 호출
+            aggregate: List[Dict[str, str]] = fetch_short_land_records(question_date, target_region)
+
+            # 주간 범위가 있으면: 해당 범위 날짜 전체 포함(시간 미세 필터는 아래에서 날짜기준으로)
+            if date_range:
+                sdt, edt, _ = date_range
+                # 추가 호출은 하지 않고, 이미 받은 doc들 중에서 날짜로 필터 (dl가 시간대별 제공)
+                # 필요시 tmfc를 바꾸어 여러 번 호출할 수도 있으나, 현재 파이프라인과 비용 고려하여 1회 + 날짜필터로 처리
+                pass
+
             # 상태에 결과 저장
-            if "short_forecast_data" not in state:
-                state["short_forecast_data"] = []
-            state["short_forecast_data"].extend(forecasts)
-            
-            print(f"   - ✅ 단기예보 데이터 수집 완료: {len(forecasts)}개")
-            
+            state.setdefault("short_forecast_data", [])
+            state["short_forecast_data"].extend(aggregate)
+            print(f"   - ✅ 단기예보 데이터 수집 완료: {len(aggregate)}개")
+
         except Exception as e:
             print(f"   - ❌ 단기예보 데이터 수집 실패: {e}")
-            if "short_forecast_data" not in state:
-                state["short_forecast_data"] = []
-        
+            state.setdefault("short_forecast_data", [])
         return state

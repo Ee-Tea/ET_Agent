@@ -1,17 +1,22 @@
+# =========[ 표준/외부 라이브러리 ]=========
 import os
 import re
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, TypedDict
 
-# Langchain 및 LangGraph 관련 라이브러리
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Milvus as LangChainMilvus
+# =========[ LangChain / LangGraph / LLM ]=========
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
-from langchain_community.tools.tavily_search import TavilySearchResults
+
+# =========[ 공통 모듈 ]=========
 from common.milvus_helpers import search_milvus_documents, create_context_from_documents
+
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_rag_app = None
+_llm_instance = None
+_tavily_tool = None
 
 # --- 1. 환경 설정 ---
 load_dotenv()
@@ -31,11 +36,31 @@ MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME_INFO = "crop_info"
 COLLECTION_NAME_GROW = "crop_grow"
 
-# --- 2. LLM 및 프롬프트 설정 ---
-llm = ChatOpenAI(
-    model_name="gpt-4o-mini",
-    temperature=0.7
-)
+# =========[ 지연 로딩 함수들 ]=========
+def _get_llm():
+    """LLM 인스턴스를 지연 로딩으로 가져오기"""
+    global _llm_instance
+    if _llm_instance is None:
+        print("🤖 LLM 모듈 로딩 중...")
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY가 .env에 설정되어야 합니다.")
+        _llm_instance = ChatOpenAI(
+            model_name="gpt-4o-mini",
+            temperature=0.7,
+            api_key=OPENAI_API_KEY
+        )
+        print("✅ LLM 모듈 로딩 완료")
+    return _llm_instance
+
+def _get_tavily_tool():
+    """Tavily 도구를 지연 로딩으로 가져오기"""
+    global _tavily_tool
+    if _tavily_tool is None:
+        print("🔍 Tavily 도구 로딩 중...")
+        from langchain_community.tools.tavily_search import TavilySearchResults
+        _tavily_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
+        print("✅ Tavily 도구 로딩 완료")
+    return _tavily_tool
 
 # ❗ DB 정보만 사용할 때의 답변 프롬프트
 DB_ONLY_PROMPT_TEMPLATE = """
@@ -55,7 +80,9 @@ DB_ONLY_PROMPT_TEMPLATE = """
 질문: {question}
 답변:
 """
-db_only_prompt = ChatPromptTemplate.from_template(DB_ONLY_PROMPT_TEMPLATE)
+def _get_db_only_prompt():
+    """DB 전용 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(DB_ONLY_PROMPT_TEMPLATE)
 
 # ❗ 웹 검색 정보만 사용할 때의 답변 프롬프트 
 WEB_ONLY_PROMPT_TEMPLATE = """
@@ -75,7 +102,9 @@ WEB_ONLY_PROMPT_TEMPLATE = """
 질문: {question}
 답변:
 """
-web_only_prompt = ChatPromptTemplate.from_template(WEB_ONLY_PROMPT_TEMPLATE)
+def _get_web_only_prompt():
+    """웹 전용 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(WEB_ONLY_PROMPT_TEMPLATE)
 
 VALIDATION_PROMPT = """
 주어진 맥락만 사용하여 다음 질문에 대한 완전하고 상세한 답변을 생성할 수 있는지 여부를 '네' 또는 '아니오'로만 답변하세요.
@@ -83,9 +112,9 @@ VALIDATION_PROMPT = """
 맥락: {db_context}
 답변:
 """
-validation_prompt = ChatPromptTemplate.from_template(VALIDATION_PROMPT)
-
-tavily_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
+def _get_validation_prompt():
+    """검증 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(VALIDATION_PROMPT)
 
 # --- 3. LangGraph 상태 정의 ---
 class GraphState(TypedDict):
@@ -167,6 +196,8 @@ def process_topics_and_retrieve_content_node(state: GraphState) -> Dict[str, Any
     is_sufficient = "no"
     if db_context.strip():
         print("🔍 DB 내용 충분성 검증 중...")
+        llm = _get_llm()
+        validation_prompt = _get_validation_prompt()
         validation_chain = validation_prompt | llm | StrOutputParser()
         validation_result = validation_chain.invoke({"question": question, "db_context": db_context})
         is_sufficient = "yes" if "네" in validation_result.strip() else "no"
@@ -179,6 +210,7 @@ def retrieve_from_web_node(state: GraphState) -> Dict[str, Any]:
     question = state["question"]
 
     print("🌐 웹 검색으로 답변 생성 중...")
+    tavily_tool = _get_tavily_tool()
     search_results = tavily_tool.invoke({"query": question})
     web_sources = [{"url": res["url"], "content": res["content"]} for res in search_results]
     print("✅ 웹 검색 완료.")
@@ -193,11 +225,14 @@ def generate_final_answer_node(state: GraphState) -> Dict[str, Any]:
     web_sources = state.get("web_sources", [])
     web_search_results = "웹 검색 결과가 없습니다." if not web_sources else "\n".join([str(res) for res in web_sources])
 
+    llm = _get_llm()
     if is_sufficient == "yes":
         db_context = state.get("db_context", "내부 DB에서 검색된 정보가 없습니다.")
+        db_only_prompt = _get_db_only_prompt()
         final_chain = db_only_prompt | llm | StrOutputParser()
         inputs = {"question": question, "db_context": db_context}
     else:
+        web_only_prompt = _get_web_only_prompt()
         final_chain = web_only_prompt | llm | StrOutputParser()
         inputs = {"question": question, "web_search_results": web_search_results}
 
@@ -233,9 +268,6 @@ def build_query_graph():
     query_builder.add_edge("generate_answer", END)
 
     return query_builder.compile()
-
-# --- 7. 지연 로딩을 위한 전역 변수 ---
-_rag_app = None
 
 def _get_rag_app():
     """RAG 애플리케이션을 지연 로딩으로 가져오기"""
@@ -329,7 +361,7 @@ if __name__ == "__main__":
     print("🌱 농작물 챗봇 에이전트 시작...")
     print("--------------------------------------------------")
 
-    rag_app = build_query_graph()
+    rag_app = _get_rag_app()
 
     print("이제 질문을 입력하세요. (종료하려면 'exit' 또는 'quit' 입력)")
     print("--------------------------------------------------")

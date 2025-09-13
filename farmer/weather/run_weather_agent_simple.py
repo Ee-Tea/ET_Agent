@@ -5,6 +5,7 @@
 - 지역 미지정 시 서울 + 오늘 기본값
 """
 
+# =========[ 표준/외부 라이브러리 ]=========
 import os
 import sys
 import re
@@ -14,18 +15,25 @@ from typing import TypedDict, Optional, Any, Dict, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from tavily import TavilyClient
 
 # 프로젝트 루트를 sys.path에 추가
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(current_dir, '..', '..')
 sys.path.insert(0, project_root)
 
-# LangChain / LLM
+# =========[ LangChain / LangGraph / LLM ]=========
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+
+# =========[ 외부 서비스 ]=========
+from tavily import TavilyClient
+
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_weather_app = None
+_llm_instance = None
+_tavily_client = None
 
 # 모듈화된 노드들 import (절대 import)
 from farmer.weather.advisory_node import AdvisoryNode
@@ -110,17 +118,33 @@ class GraphState(TypedDict):
     is_weekly_request: Optional[bool]
     region_from_default: Optional[bool]
 
-def make_llm() -> ChatOpenAI:
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY가 .env에 없습니다.")
-    return ChatOpenAI(
-        model_name=OPENAI_MODEL,
-        temperature=TEMPERATURE,
-        api_key=OPENAI_API_KEY
-    )
+def _get_llm() -> ChatOpenAI:
+    """LLM 인스턴스를 지연 로딩으로 가져오기"""
+    global _llm_instance
+    if _llm_instance is None:
+        print("🤖 LLM 모듈 로딩 중...")
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY가 .env에 없습니다.")
+        _llm_instance = ChatOpenAI(
+            model_name=OPENAI_MODEL,
+            temperature=TEMPERATURE,
+            api_key=OPENAI_API_KEY
+        )
+        print("✅ LLM 모듈 로딩 완료")
+    return _llm_instance
 
-# LLM: 어떤 데이터가 필요한지(특보/단기/중기)만 판별
-SIMPLE_ANALYSIS_PROMPT = ChatPromptTemplate.from_template(
+def _get_tavily_client():
+    """Tavily 클라이언트를 지연 로딩으로 가져오기"""
+    global _tavily_client
+    if _tavily_client is None:
+        print("🔍 Tavily 클라이언트 로딩 중...")
+        _tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+        print("✅ Tavily 클라이언트 로딩 완료")
+    return _tavily_client
+
+def _get_simple_analysis_prompt():
+    """단순 분석 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
     """다음 질문을 분석해서 어떤 기상 데이터가 필요한지 판단하세요.
 
 질문: {question}
@@ -161,10 +185,12 @@ SIMPLE_ANALYSIS_PROMPT = ChatPromptTemplate.from_template(
     "reason": "판단 이유"
 }}
 """
-)
+    )
 
-# 답변 생성 프롬프트
-ANSWER_PROMPT = ChatPromptTemplate.from_template(
+def _get_answer_prompt():
+    """답변 생성 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
+
     """기상청 예보관으로서 다음 데이터를 바탕으로 종합적인 답변을 작성하세요.
 
 현재 날짜: {current_date}
@@ -219,8 +245,8 @@ def simple_analyze_question_node(state: GraphState) -> Dict[str, Any]:
 
     chain = (
         {"question": lambda x: x["question"]}
-        | SIMPLE_ANALYSIS_PROMPT
-        | make_llm()
+        | _get_simple_analysis_prompt()
+        | _get_llm()
         | StrOutputParser()
     )
     analysis = chain.invoke({"question": question})
@@ -546,7 +572,7 @@ JSON만:
     chain = (
         {"question": lambda x: x["question"], "context": lambda x: x["context"]}
         | prompt
-        | make_llm()
+        | _get_llm()
         | StrOutputParser()
     )
 
@@ -585,7 +611,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     try:
         search_query = f"{target_region} {date_str} 날씨 기상예보"
         print(f"   - 웹검색 쿼리: {search_query}")
-        tavily = TavilyClient(api_key=TAVILY_API_KEY)
+        tavily = _get_tavily_client()
         results = tavily.search(query=search_query, max_results=TAVILY_MAX_RESULTS)
         if not results or not results.get("results"):
             print("   - ⚠️ 웹검색 결과가 없습니다.")
@@ -635,8 +661,8 @@ def generate_answer_node(state: GraphState) -> Dict[str, Any]:
 
     chain = (
         {"context": lambda x: x["context"], "question": lambda x: x["question"], "current_date": lambda x: current_date}
-        | ANSWER_PROMPT
-        | make_llm()
+        | _get_answer_prompt()
+        | _get_llm()
         | StrOutputParser()
     )
 
@@ -722,9 +748,6 @@ def build_simple_graph():
     #     print(f"그래프 시각화 중 오류: {e}")
     return app
 
-# 지연 로딩을 위한 전역 변수
-_weather_app = None
-
 def _get_weather_app():
     """날씨 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
     global _weather_app
@@ -763,7 +786,7 @@ def main():
     args = parser.parse_args()
 
     print("💬 단순화된 기상 전문가 그래프")
-    app = build_simple_graph()
+    app = _get_weather_app()
 
     if args.question:
         q = args.question.strip()

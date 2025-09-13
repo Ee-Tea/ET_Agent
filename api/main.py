@@ -208,7 +208,7 @@ async def lifespan(app: FastAPI):
     # 하이브리드 세션 서비스 초기화
     try:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
-        postgres_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/postgres")
+        postgres_url = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@langgraph-postgres:5433/postgres")
         
         hybrid_session_service = HybridSessionService(redis_url, postgres_url)
         await hybrid_session_service.init_postgres()

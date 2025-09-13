@@ -22,7 +22,7 @@ Edit `.env` with your actual values:
 
 ```env
 # Database Configuration
-DATABASE_URL=postgresql+psycopg://appuser:apppw@langgraph-postgres:5432/postgres
+DATABASE_URL=postgresql://appuser:apppw@langgraph-postgres:5433/postgres
 
 ***REMOVED*** Configuration
 GOOGLE_CLIENT_ID=REDACTED
@@ -211,7 +211,7 @@ uvicorn main:app --host 0.0.0.0 --port 8123 --reload
 Make sure to set these environment variables in production:
 
 ```env
-DATABASE_URL=postgresql+psycopg://appuser:apppw@langgraph-postgres:5432/postgres
+DATABASE_URL=postgresql://appuser:apppw@langgraph-postgres:5433/postgres
 GOOGLE_CLIENT_ID=REDACTED
 GOOGLE_CLIENT_SECRET=REDACTED
 GOOGLE_REDIRECT_URI=https://yourdomain.com/auth/google/callback

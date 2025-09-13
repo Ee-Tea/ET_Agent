@@ -3,8 +3,8 @@ uvicorn[standard]
 pydantic
 python-dotenv
 sqlalchemy
-psycopg[binary]
 passlib[bcrypt]
+psycopg[binary]
 python-jose[cryptography]
 pydantic_settings
 datetime

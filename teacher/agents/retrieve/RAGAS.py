@@ -1,211 +1,231 @@
 # -*- coding: utf-8 -*-
 """
-Milvus(concepts) 코퍼스 기반 RAGAS 골든셋 생성기 (ragas 0.3.3 호환)
-- PDF/OCR/표 파싱 제거
-- Milvus 'concepts' 컬렉션을 코퍼스로 활용
-- ragas TestsetGenerator로 (question, ground_truth, contexts) 생성
+RAGAS 평가 스크립트 (retrieve_agent 전용)
+- 입력: 골든셋 JSONL (각 줄: {"question","ground_truth","contexts"})
+- 절차: 골든셋 로드 → retrieve_agent로 예측(answer) & 컨텍스트 추출 → RAGAS 평가 → 결과 저장
+- 참고: retrieve_agent.invoke(input) -> {"retrieve_answer": str, "retrieval": {"merged_context": str, ...}}
 """
 
-import os
-import sys
-import re
-import json
-import pandas as pd
-from dotenv import load_dotenv
-import asyncio
+import os, json, argparse, time, re
+from typing import List, Dict, Any, Optional
 from datetime import datetime
-from typing import List, Iterable
+from tqdm import tqdm
 
-from langchain.schema import Document
-from ragas.testset import TestsetGenerator
+# ================== (1) 에이전트 로드 ==================
+# 프로젝트 경로에 맞게 import 우선 시도
+try:
+    from teacher.agents.retrieve.retrieve_agent import retrieve_agent as RetrieveAgent
+except Exception:
+    # 같은 디렉토리에 파일이 있는 경우
+    from retrieve_agent import retrieve_agent as RetrieveAgent
+
+# ================== (2) RAGAS 준비물 ==================
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_precision,
+    context_recall,
+    answer_correctness,
+)
 from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import embedding_factory
-from ragas.testset.persona import Persona
-from ragas.testset.transforms.splitters import HeadlineSplitter
-from ragas.testset.transforms.extractors.llm_based import NERExtractor
-from ragas.testset.synthesizers import SingleHopSpecificQuerySynthesizer
+from ragas.embeddings import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 
-# 🔌 Milvus helper (프로젝트 공용 헬퍼)
-# - get_milvus_connection_info / search_milvus_documents 사용
-from common.milvus_helpers import get_milvus_connection_info, search_milvus_documents
 
-# ===================== 환경설정 =====================
-load_dotenv()
-OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED not OPENAI_API_KEY=REDACTED("❌ OPENAI_API_KEY=REDACTED(1)
+# ---------- 유틸: JSONL 로드 ----------
+def load_jsonl(path: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = (line or "").strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            q  = obj.get("question") or obj.get("user_input") or ""
+            gt = obj.get("ground_truth") or obj.get("reference") or ""
+            # gold contexts는 평가지표에 직접 쓰지 않고 참고/디버그 용도로만 저장
+            ctx = obj.get("contexts") or obj.get("reference_contexts") or []
+            if isinstance(ctx, str):
+                ctx = [ctx]
+            rows.append({"question": q, "ground_truth": gt, "gold_contexts": ctx})
+    return rows
 
-# 생성 파라미터
-TARGET_QUESTIONS = int(os.getenv("RAGAS_TARGET_Q", "50"))
-DEFAULT_COLLECTION = os.getenv("MILVUS_COLLECTION", "concepts")
-PER_TERM_K = int(os.getenv("MILVUS_PER_TERM_K", "30"))   # seed term 당 가져올 문서 수
-MAX_DOCS = int(os.getenv("MILVUS_MAX_DOCS", "1000"))      # 전체 상한
 
-# seed terms: 쉼표로 구분하여 환경변수로 주입 가능
-# 예) RAGAS_SEED_TERMS="정의,원리,구성요소,장점,단점,비교,사례"
-SEED_TERMS = [s.strip() for s in os.getenv("RAGAS_SEED_TERMS", "정의, 원리, 특징, 구성요소, 장단점, 비교, 사례, 적용").split(",") if s.strip()]
-
-def clean_text(text: str) -> str:
-    text = str(text or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-# ===================== Milvus → Documents =====================
-def milvus_corpus_to_documents(
-    milvus_data: dict,
-    collection_name: str = DEFAULT_COLLECTION,
-    seed_terms: Iterable[str] = SEED_TERMS,
-    per_term_k: int = PER_TERM_K,
-    max_docs: int = MAX_DOCS,
-) -> List[Document]:
+# ---------- 유틸: agent의 merged_context 문자열 → 리스트 ----------
+def split_contexts_from_merged(merged: str) -> List[str]:
     """
-    seed_terms 로 Milvus 유사도검색을 여러 번 돌려 코퍼스를 수집한다.
-    - 프로젝트 공용 helper: search_milvus_documents(milvus_data, collection_name, query, k) 사용
-    - 반환: LangChain Document 리스트(중복 제거)
+    retrieve_agent는 병합 컨텍스트를 큰 문자열로 반환하므로
+    - 두 줄 공백 기준 블록 분리
+    - "[문서 i]" 마커가 있으면 추가 분할
+    - 너무 짧은 블록 제거
+    - 상한 10개로 잘라 RAGAS 비용 제어
     """
-    if not milvus_data:
-        raise RuntimeError("milvus_data 없음. get_milvus_connection_info() 또는 환경변수 설정을 확인하세요.")
+    if not merged:
+        return []
+    parts = [p.strip() for p in re.split(r"\n\s*\n", merged) if p.strip()]
+    refined: List[str] = []
+    for p in parts:
+        if "[문서" in p:
+            refined += [c.strip() for c in p.split("[문서") if c.strip()]
+        else:
+            refined.append(p)
+    refined = [c for c in refined if len(c) > 20]
+    return refined[:10] or [""]  # 최소 1개 보장
 
-    docs: List[Document] = []
-    seen = set()
 
-    for term in seed_terms:
+# ---------- 유틸: Milvus 연결 정보 구성 (환경변수 기반) ----------
+def build_milvus_data_from_env() -> Dict[str, Any]:
+    """
+    다른 에이전트 RAGAS 코드 스타일을 따라 환경변수에서 연결 정보 수집.
+    (retrieve_agent 안의 Milvus 검색 노드는 milvus_data를 그대로 넘겨 사용함)
+    """
+    d = {
+        "connection_status": True,
+        "host": os.getenv("MILVUS_HOST", "localhost"),
+        "port": os.getenv("MILVUS_PORT", "19530"),
+        "embedding_model_name": os.getenv("EMB_MODEL", "intfloat/multilingual-e5-large"),
+        # 필요시 token/username/password 등 추가
+    }
+    return d
+
+
+# ---------- 유틸: RAGAS 직전 최소 안전화 ----------
+_END_PUNCT_RE = re.compile(r"(?:[\.!?…]+(?:\s*)|[\.!?…]+[”’'\")\]\}]+\s*|\s*[”’'\")\]\}]+\s*)$")
+def _normalize_unicode_space(s: str) -> str:
+    s = str(s or "")
+    for z in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        s = s.replace(z, "")
+    s = s.replace("\xa0", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+def _min_sanitize(s: Any, hint: str = "") -> str:
+    t = _normalize_unicode_space(str(s or "")).strip() or _normalize_unicode_space(str(hint or "")).strip()
+    if not t:
+        t = "."
+    if not _END_PUNCT_RE.search(t):
+        m = re.search(r"[”’'\")\]\}]+$", t)
+        if m:
+            closers = m.group(0)
+            core = t[:m.start()].rstrip()
+            t = (core + "." + closers) if core and core[-1] not in ".!?…" else (core + closers)
+        else:
+            t = t.rstrip() + "."
+    return t
+
+
+# ---------- 메인 평가 파이프라인 ----------
+def run_evaluation(
+    goldenset_path: str,
+    out_dir: str,
+    limit: Optional[int] = None,
+    sleep_sec: float = 0.0,
+    openai_model: str = "gpt-4o-mini",
+    embedding_model: str = "intfloat/multilingual-e5-large",
+):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(out_dir, f"ragas_eval_{ts}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    rows = load_jsonl(goldenset_path)
+    if limit:
+        rows = rows[:limit]
+
+    # 1) 에이전트 인스턴스
+    agent = RetrieveAgent()  # invoke({"retrieval_question": "...", "milvus_data": {...}}) 사용.  # :contentReference[oaicite:2]{index=2}
+
+    # 2) 예측 생성
+    predictions: List[Dict[str, Any]] = []
+    for r in tqdm(rows, ncols=100, desc="Answering with retrieve_agent"):
+        q = r["question"]
+        gt = r["ground_truth"]
+        milvus_data = build_milvus_data_from_env()  # 다른 RAGAS 코드 스타일 참조  # :contentReference[oaicite:3]{index=3}
+
         try:
-            results = search_milvus_documents(
-                milvus_data=milvus_data,
-                collection_name=collection_name,
-                query=term,
-                k=per_term_k
-            )
+            res = agent.invoke({"retrieval_question": q, "milvus_data": milvus_data})
+            ans = res.get("retrieve_answer", "")
+            merged = (res.get("retrieval") or {}).get("merged_context", "")
+            pred_ctx = split_contexts_from_merged(merged)
         except Exception as e:
-            print(f"❌ Milvus 검색 실패(term='{term}'): {e}")
-            continue
+            ans = ""
+            pred_ctx = [""]
+            merged = f"(error: {e})"
 
-        for d in results or []:
-            # d 는 Document 로 가정 (retrieve_agent와 동일 패턴)
-            # 중복 제거 키: 내용 + (선택) 일부 메타
-            key = (clean_text(getattr(d, "page_content", ""))[:200], json.dumps(getattr(d, "metadata", {}), sort_keys=True))
-            if key in seen:
-                continue
-            seen.add(key)
-
-            content = clean_text(getattr(d, "page_content", ""))
-            if not content or len(content) < 50:
-                continue
-
-            # 메타데이터에 컬렉션/seed 항목 부여
-            meta = dict(getattr(d, "metadata", {}) or {})
-            meta.setdefault("source", f"milvus:{collection_name}")
-            meta.setdefault("seed_term", term)
-            docs.append(Document(page_content=content, metadata=meta))
-
-        print(f"✅ term='{term}' → {len(results or [])}개 수집, 누적={len(docs)}")
-
-        if len(docs) >= max_docs:
-            print(f"⛔ MAX_DOCS({max_docs}) 도달. 수집 중단.")
-            break
-
-    print(f"📚 최종 코퍼스 문서 수: {len(docs)}")
-    return docs
-
-# ===================== 페르소나 (concepts 특화) =====================
-def get_concept_persona() -> list[Persona]:
-    return [
-        Persona(
-            name="ConceptSeeker",
-            role_description=(
-                "나는 소프트웨어/컴퓨터공학/데이터/인공지능 등의 '개념'을 체계적으로 학습하려는 학습자다. "
-                "핵심 정의, 원리, 특징, 구성요소, 장단점, 유사 개념과의 비교, 적용 사례 등을 구체적으로 알고 싶어 한다. "
-                "질문과 정답은 반드시 제공된 컨텍스트 내 사실에 근거해야 하며, "
-                "문서의 출처를 묻는 질문이 아니라 개념 그 자체의 내용에 대한 질문만 생성하라."
-            )
-        )
-    ]
-
-# ===================== 골든셋 생성 =====================
-def generate_golden_set_from_docs(documents: List[Document]):
-    generator_llm = LangchainLLMWrapper(ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.4,
-        max_tokens=2000,
-    ))
-    generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")
-
-    personas = get_concept_persona()
-    transforms = [HeadlineSplitter(), NERExtractor()]
-
-    generator = TestsetGenerator(
-        llm=generator_llm,
-        embedding_model=generator_embeddings,
-        persona_list=personas,
-    )
-
-    # 안정성: SingleHop 전용
-    query = SingleHopSpecificQuerySynthesizer(llm=generator_llm)
-    prompts = asyncio.run(query.adapt_prompts("ko", llm=generator_llm))
-    query.set_prompts(**prompts)
-
-    dataset = generator.generate_with_langchain_docs(
-        documents,
-        testset_size=TARGET_QUESTIONS,
-        transforms=transforms,
-        query_distribution=[(query, 1.0)],
-    )
-
-    eval_dataset = dataset.to_evaluation_dataset()
-
-    results = []
-    for i, sample in enumerate(eval_dataset[:TARGET_QUESTIONS]):
-        print(f"\n질문 {i+1}")
-        print("  Question:", sample.user_input)
-        print("  Ground Truth:", sample.reference)
-        print("  Contexts:", sample.reference_contexts)
-        results.append({
-            "question": sample.user_input,
-            "ground_truth": sample.reference,
-            "contexts": sample.reference_contexts,
+        predictions.append({
+            "question": q,
+            "answer": ans,
+            "contexts": pred_ctx,
+            "ground_truth": gt,
+            "_agent_ctx_merged": merged,      # 디버그
+            "_gold_contexts": r["gold_contexts"],
         })
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_file = f"golden_dataset_milvus_{timestamp}.csv"
-    jsonl_file = f"golden_dataset_milvus_{timestamp}.jsonl"
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
 
-    df = pd.DataFrame(results)
-    df.to_csv(csv_file, index=False, encoding="utf-8-sig")
-    with open(jsonl_file, "w", encoding="utf-8") as f:
-        for row in results:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    # 3) RAGAS 입력 Dataset 구성 (최소 안전화)
+    data = {
+        "question":      [_min_sanitize(p["question"]) for p in predictions],
+        "answer":        [_min_sanitize(p["answer"], hint=p["question"]) for p in predictions],
+        "contexts":      [[_min_sanitize(c, hint=p["question"]) for c in (p["contexts"] or [""])] for p in predictions],
+        "ground_truths": [[_min_sanitize(p["ground_truth"], hint=p["question"])] for p in predictions],
+        "reference":     [_min_sanitize(p["ground_truth"], hint=p["question"]) for p in predictions],
+    }
+    ds = Dataset.from_dict(data)
 
-    print(f"\n✅ {csv_file} / {jsonl_file} 저장 완료")
-    print(f"📊 생성된 골든셋 개수: {len(results)}")
+    # 4) RAGAS 평가기
+    eval_llm = LangchainLLMWrapper(ChatOpenAI(model=openai_model, temperature=0.0, max_tokens=2048))
+    eval_emb = HuggingFaceEmbeddings(model=embedding_model)
 
-# ===================== 실행 진입점 =====================
-def run_milvus_mode():
-    print("\n🔌 Milvus(concepts) 코퍼스 모드")
-    # 연결정보: 프로젝트 공용 함수 사용 (환경변수/설정에서 로드)
-    milvus_data = get_milvus_connection_info()
-    docs = milvus_corpus_to_documents(
-        milvus_data=milvus_data,
-        collection_name=DEFAULT_COLLECTION,
-        seed_terms=SEED_TERMS,
-        per_term_k=PER_TERM_K,
-        max_docs=MAX_DOCS,
+    metrics = [
+        faithfulness,        # 답변-컨텍스트 충실성
+        answer_relevancy,    # 질문-답변 관련성
+        context_precision,   # 제공 컨텍스트의 정밀도
+        context_recall,      # 필요한 정보가 컨텍스트에 포함되었는가
+        answer_correctness,  # 정답/레퍼런스와의 일치도
+    ]
+
+    res = evaluate(ds, metrics=metrics, llm=eval_llm, embeddings=eval_emb, raise_exceptions=False)
+
+    # 5) 저장
+    # 전체 점수 요약
+    with open(os.path.join(run_dir, "overall_scores.json"), "w", encoding="utf-8") as f:
+        json.dump(res.scores, f, ensure_ascii=False, indent=2)
+
+    # 샘플별 점수 + 예측/디버그
+    import pandas as pd
+    per_sample = res.dataset.to_pandas()
+    per_sample.to_csv(os.path.join(run_dir, "per_sample_scores.csv"), index=False, encoding="utf-8-sig")
+    with open(os.path.join(run_dir, "predictions.jsonl"), "w", encoding="utf-8") as f:
+        for p in predictions:
+            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+
+    print("\n✅ RAGAS 평가 완료")
+    print(f" - 전체 점수: {os.path.join(run_dir, 'overall_scores.json')}")
+    print(f" - 샘플별 점수: {os.path.join(run_dir, 'per_sample_scores.csv')}")
+    print(f" - 예측/디버그: {os.path.join(run_dir, 'predictions.jsonl')}")
+
+
+# ---------- CLI ----------
+def main():
+    input_path = "teacher/agents/retrieve/out/goldenset_20250913_141611.jsonl"
+    # input_path = "teacher/agents/retrieve/out/goldenset_20250913_154620.jsonl"
+    out_dir = "./ragas_out"
+    limit = None
+    sleep_sec = 0.0
+    openai_model = "gpt-4o-mini"
+    embedding_model = "intfloat/multilingual-e5-large"
+
+    run_evaluation(
+        goldenset_path=input_path,
+        out_dir=out_dir,
+        limit=limit,
+        sleep_sec=sleep_sec,
+        openai_model=openai_model,
+        embedding_model=embedding_model,
     )
-    if not docs:
-        print("❌ Milvus로부터 수집된 문서가 없습니다.")
-        return
-    generate_golden_set_from_docs(docs)
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("🔧 RAGAS 골든셋 생성기 (Milvus 모드 포함)")
-    print("=" * 50)
-    print("2: Milvus(concepts) 코퍼스에서 생성")
-    print("=" * 50)
-
-    # 인터랙티브 없이 곧바로 2번 실행해도 됨
-    mode = os.getenv("RAGAS_MODE", "2").strip()
-    if mode == "2":
-        run_milvus_mode()
-    else:
-        # 안전하게 디폴트를 Milvus로
-        run_milvus_mode()
+    main()

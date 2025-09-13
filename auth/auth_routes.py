@@ -66,15 +66,32 @@ def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
+    # 표준 세션 쿠키 (HTTPOnly)
+    auth_session: Optional[str] = Cookie(default=None),
+    # 하위 호환/폴백
     access_token: Optional[str] = Cookie(default=None),
+    access_token_web: Optional[str] = Cookie(default=None),
 ) -> UserModel:
     # 디버그(임시): 실제로 쿠키/헤더가 들어오는지 로그
     print("[AUTH] dep Cookie exists:", bool(access_token))
     print("[AUTH] raw Cookie header:", request.headers.get("cookie"))
 
-    token = access_token
+    # 1) 표준 세션 쿠키 우선
+    token = auth_session
+    # 2) 하위 호환: access_token(HTTPOnly)
+    if not token:
+        token = access_token
     if not token:
         token = _get_cookie_from_header(request, "access_token")
+    if not token:
+        token = request.cookies.get("auth_session")
+    if not token:
+        token = _get_cookie_from_header(request, "auth_session")
+    # fallback: JS 접근 가능한 토큰도 허용 (동일한 JWT를 복제 저장)
+    if not token and access_token_web:
+        token = access_token_web
+    if not token:
+        token = _get_cookie_from_header(request, "access_token_web")
     if not token and authorization:
         parts = authorization.strip().split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
@@ -138,15 +155,29 @@ async def google_callback(
 </html>"""
 
     resp = HTMLResponse(content=html, status_code=200)
+    # 표준 세션 쿠키
     resp.set_cookie(
-        key="access_token",
+        key="auth_session",
         value=auth_response.token.access_token,
         httponly=True,
-        secure=False,     # 로컬 http
-        samesite="lax",   # 8124 ↔ 3000 이동 OK
+        secure=False,     # 로컬 http (운영 True)
+        samesite="lax",
         path="/",
         max_age=auth_response.token.expires_in,
     )
+    # 하위 호환: access_token 유지(HTTPOnly)
+    try:
+        resp.set_cookie(
+            key="access_token",
+            value=auth_response.token.access_token,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=auth_response.token.expires_in,
+        )
+    except Exception:
+        pass
     # 프론트 디버깅/폴백용(로컬 개발): JS에서 읽을 수 있는 토큰 복제 쿠키
     try:
         resp.set_cookie(
@@ -211,7 +242,7 @@ async def kakao_callback(
     resp = HTMLResponse(content=html, status_code=200)
     resp.delete_cookie("kakao_oauth_state", path="/")
     resp.set_cookie(
-        key="access_token",
+        key="auth_session",
         value=auth_response.token.access_token,
         httponly=True,
         secure=False,
@@ -219,6 +250,18 @@ async def kakao_callback(
         path="/",
         max_age=auth_response.token.expires_in,
     )
+    try:
+        resp.set_cookie(
+            key="access_token",
+            value=auth_response.token.access_token,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=auth_response.token.expires_in,
+        )
+    except Exception:
+        pass
     try:
         resp.set_cookie(
             key="access_token_web",
@@ -275,6 +318,10 @@ async def logout():
 
     # delete with and without domain to cover how cookie was set
     for dom in (None, frontend_host):
+        try:
+            resp.delete_cookie("auth_session", path="/", domain=dom)
+        except Exception:
+            pass
         try:
             resp.delete_cookie("access_token", path="/", domain=dom)
         except Exception:
@@ -333,6 +380,95 @@ def debug_headers(request: Request):
         "cookies": dict(request.cookies),
     }
 
+# ===== Debug helpers: set/clear cookie to test proxy & browser behavior =====
+@router.get("/debug/set-cookie")
+def debug_set_cookie():
+    # 실제 JWT 발급으로 즉시 /auth/me 검증 가능
+    token = auth_service.create_access_token({"sub": "debug-user"})
+    resp = JSONResponse({"ok": True, "set": "auth_session"})
+    resp.set_cookie(
+        key="auth_session",
+        value=token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        path="/",
+        max_age=300,
+    )
+    try:
+        resp.set_cookie(
+            key="access_token_web",
+            value=token,
+            httponly=False,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=300,
+        )
+    except Exception:
+        pass
+    return resp
+
+@router.get("/debug/clear-cookie")
+def debug_clear_cookie():
+    resp = JSONResponse({"ok": True, "cleared": True})
+    for name in ("auth_session", "access_token", "access_token_web"):
+        try:
+            resp.delete_cookie(name, path="/")
+        except Exception:
+            pass
+    return resp
+
+@router.get("/debug/whoami")
+def debug_whoami(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    auth_session: Optional[str] = Cookie(default=None),
+    access_token: Optional[str] = Cookie(default=None),
+    access_token_web: Optional[str] = Cookie(default=None),
+):
+    token = auth_session or access_token or access_token_web
+    if not token and authorization:
+        parts = authorization.strip().split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+    data = auth_service.verify_token(token) if token else None
+    return {"token_user_id": getattr(data, "user_id", None), "has_token": bool(token)}
+
+@router.post("/debug/upsert-user")
+def debug_upsert_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+    auth_session: Optional[str] = Cookie(default=None),
+    access_token: Optional[str] = Cookie(default=None),
+    access_token_web: Optional[str] = Cookie(default=None),
+):
+    token = auth_session or access_token or access_token_web
+    if not token and authorization:
+        parts = authorization.strip().split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+    data = auth_service.verify_token(token) if token else None
+    user_id = getattr(data, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=400, detail="No token or invalid token")
+    existing = db.query(UserModel).filter(UserModel.user_id == user_id).first()
+    if existing:
+        return {"ok": True, "user_id": user_id, "created": False}
+    u = UserModel(
+        user_id=str(user_id),
+        name="Debug User",
+        is_active=True,
+        provider="debug",
+        provider_account_id=str(user_id),
+        scope="debug",
+    )
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return {"ok": True, "user_id": u.user_id, "created": True}
+
 # ================= NAVER OAuth =================
 @router.get("/naver")
 async def naver_auth(request: Request):
@@ -383,8 +519,9 @@ async def naver_callback(
 
     resp = HTMLResponse(content=html, status_code=200)
     resp.delete_cookie("naver_oauth_state", path="/")
+    # 표준 세션 쿠키 설정
     resp.set_cookie(
-        key="access_token",
+        key="auth_session",
         value=auth_response.token.access_token,
         httponly=True,
         secure=False,
@@ -392,6 +529,19 @@ async def naver_callback(
         path="/",
         max_age=auth_response.token.expires_in,
     )
+    # 하위 호환: access_token(HTTPOnly)도 유지
+    try:
+        resp.set_cookie(
+            key="access_token",
+            value=auth_response.token.access_token,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            path="/",
+            max_age=auth_response.token.expires_in,
+        )
+    except Exception:
+        pass
     try:
         resp.set_cookie(
             key="access_token_web",

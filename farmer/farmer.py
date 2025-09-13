@@ -35,10 +35,8 @@ def _get_llm():
     """LLM 인스턴스를 지연 로딩으로 가져오기"""
     global _llm_instance
     if _llm_instance is None:
-        print("🤖 Farmer LLM 모듈 로딩 중...")
         llm_config = FarmerConfig.get_llm_config()
         _llm_instance = ChatOpenAI(**llm_config)
-        print("✅ Farmer LLM 모듈 로딩 완료")
     return _llm_instance
 
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
@@ -188,7 +186,6 @@ class AgentManager:
         """에이전트 함수를 지연 로딩으로 가져오기 (전역 캐시 사용)"""
         # 해당 에이전트가 아직 로드되지 않은 경우에만 import
         if agent_name not in self._cache:
-            print(f"🤖 {agent_name} 모듈 로딩 중...")
             self.logger.debug(f"{agent_name} 모듈 로딩 시작")
             
             try:
@@ -211,11 +208,9 @@ class AgentManager:
                     self.logger.error(f"알 수 없는 에이전트: {agent_name}")
                     return None
                 
-                print(f"✅ {agent_name} 모듈 로딩 완료")
                 self.logger.info(f"{agent_name} 모듈 로딩 완료")
                 
             except Exception as e:
-                print(f"❌ {agent_name} 모듈 로딩 실패: {e}")
                 self.logger.error(f"{agent_name} 모듈 로딩 실패: {e}")
                 self._cache[agent_name] = None
                 return None
@@ -520,10 +515,8 @@ class Farmer:
         """워크플로우 그래프 지연 로딩"""
         global _workflow_graph
         if _workflow_graph is None:
-            print("🔄 Farmer 워크플로우 그래프 생성 중...")
             self.logger.debug("Farmer 워크플로우 그래프 생성 중...")
             _workflow_graph = self.workflow_builder.create_workflow()
-            print("✅ Farmer 워크플로우 그래프 생성 완료")
             self.logger.info("Farmer 워크플로우 그래프 생성 완료")
         return _workflow_graph
     
@@ -1139,23 +1132,6 @@ class Farmer:
         # 실행 요약 출력
         selected_agents = state.get("selected_agents", [])
         
-        # =========[ CONTEXT 디버깅 출력 ]=========
-        print("\n" + "="*80)
-        print("🔍 최종 응답 병합 - 전달되는 CONTEXT 정보")
-        print("="*80)
-        print(f"📊 선택된 에이전트: {selected_agents}")
-        print(f"📊 에이전트 결과 개수: {len(agent_results)}")
-        print("\n📋 각 에이전트별 결과:")
-        for agent_name, result in agent_results.items():
-            print(f"\n[{agent_name}]")
-            print(f"  길이: {len(str(result))}자")
-            print(f"  미리보기: {str(result)[:200]}...")
-        print("\n📋 전체 상태 정보:")
-        print(f"  - query: {state.get('query', [])}")
-        print(f"  - selected_crop: {state.get('selected_crop', [])}")
-        print(f"  - crop_info: {len(state.get('crop_info', []))}개 항목")
-        print(f"  - agent_results: {len(state.get('agent_results', {}))}개 항목")
-        print("="*80 + "\n")
         
         output = ""
         
@@ -1197,14 +1173,6 @@ class Farmer:
         # 여러 에이전트가 있는 경우에만 LLM 요약
         self.logger.info("LLM 요약 시작...")
         
-        # =========[ LLM 요약용 CONTEXT 출력 ]=========
-        print("\n" + "="*80)
-        print("🤖 LLM 요약 - 전달되는 CONTEXT 정보")
-        print("="*80)
-        print(f"📊 병합된 출력 길이: {len(merged_output)}자")
-        print(f"📊 병합된 출력 미리보기:")
-        print(f"  {merged_output[:500]}...")
-        print("="*80 + "\n")
         
         summary_prompt = (
             f"""

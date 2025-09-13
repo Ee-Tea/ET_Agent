@@ -104,7 +104,8 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5433/postgres?sslmode=disable
+      
       PYTHONPATH: /deps/LLM-T
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/auth/health"]
@@ -130,7 +131,7 @@ services:
     environment:
       REDIS_URI: redis://redis:6379/0
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
-      POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
+      POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5433/postgres?sslmode=disable
       # Milvus 연결 설정 (애플리케이션 컨테이너 내부에서는 'localhost' 대신 서비스명 사용)
 
       MILVUS_HOST: ${MILVUS_HOST:-standalone}

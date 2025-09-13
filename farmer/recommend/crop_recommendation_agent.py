@@ -7,21 +7,30 @@
 
 # 이 스크립트는 RAG 파이프라인을 구축하여 사용자 질문에 대한 최적의 답변을 생성합니다.
 
-# ==================== 라이브러리 불러오기 ====================
-import os # 파일 경로, 환경 변수 등 운영체제 상호작용 모듈
-import re # 정규표현식 모듈
-import argparse # 명령줄 인자를 파싱하는 모듈
-from typing import List, Dict, Any, Optional, TypedDict # 타입 힌트 모듈
+# =========[ 표준/외부 라이브러리 ]=========
+import os
+import re
+import argparse
+from typing import List, Dict, Any, Optional, TypedDict
+from dotenv import load_dotenv, find_dotenv
 
-from dotenv import load_dotenv, find_dotenv  # '.env' 파일에서 환경 변수를 로드합니다.
-from langchain_core.prompts import ChatPromptTemplate  # 챗봇 프롬프트 템플릿을 정의합니다.
-from langchain_huggingface import HuggingFaceEmbeddings  # HuggingFace 임베딩 모델을 사용합니다.
-from langchain_milvus import Milvus as MilvusVectorStore  # Milvus 벡터 DB를 LangChain에 통합합니다.
-from tavily import TavilyClient  # Tavily API를 사용하여 웹 검색을 수행합니다.
-from langchain_openai import ChatOpenAI  # OpenAI 챗 모델을 사용합니다.
-from langgraph.graph import StateGraph, END  # LangGraph의 상태 그래프와 종료 노드를 정의합니다.
-from pymilvus import connections  # Milvus 서버와의 연결을 관리합니다.
+# =========[ LangChain / LangGraph / LLM ]=========
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
+
+# =========[ 외부 서비스 ]=========
+from tavily import TavilyClient
+
+# =========[ 공통 모듈 ]=========
 from common.milvus_helpers import search_milvus_documents, create_context_from_documents
+
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_crop_recommend_app = None
+_llm_instance = None
+_tavily_client = None
+_embedding_model = None
+_vectorstore = None
 
 # ==================== 환경 변수 로드 ====================
 load_dotenv(find_dotenv()) # .env 파일을 찾아 환경 변수들을 로드합니다.
@@ -43,14 +52,60 @@ if not OPENAI_API_KEY: # OpenAI API 키가 설정되지 않았다면
 
 MIN_DB_CONTEXT_CHARS = int(os.getenv("MIN_DB_CONTEXT_CHARS", "1000")) # DB 컨텍스트의 최소 글자 수를 설정합니다.
 
-# ==================== 전역 변수 및 초기화 ====================
-_vectorstore = None # Milvus 벡터스토어 객체를 저장할 전역 변수
-embedding_model = HuggingFaceEmbeddings( # Hugging Face 임베딩 모델을 초기화합니다.
-    model_name=EMBED_MODEL_NAME,
-    model_kwargs={"device": "cpu"} # 모델을 CPU에서 실행하도록 설정합니다.
-)
-llm = ChatOpenAI(model_name=OPENAI_MODEL, temperature=TEMPERATURE, api_key=OPENAI_API_KEY) # OpenAI LLM을 초기화합니다.
-agent_app = None # LangGraph 앱 객체를 저장할 전역 변수
+# =========[ 지연 로딩 함수들 ]=========
+def _get_llm():
+    """LLM 인스턴스를 지연 로딩으로 가져오기"""
+    global _llm_instance
+    if _llm_instance is None:
+        print("🤖 LLM 모듈 로딩 중...")
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY가 .env에 설정되어야 합니다.")
+        _llm_instance = ChatOpenAI(model_name=OPENAI_MODEL, temperature=TEMPERATURE, api_key=OPENAI_API_KEY)
+        print("✅ LLM 모듈 로딩 완료")
+    return _llm_instance
+
+def _get_tavily_client():
+    """Tavily 클라이언트를 지연 로딩으로 가져오기"""
+    global _tavily_client
+    if _tavily_client is None:
+        print("🔍 Tavily 클라이언트 로딩 중...")
+        _tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+        print("✅ Tavily 클라이언트 로딩 완료")
+    return _tavily_client
+
+def _get_embedding_model():
+    """임베딩 모델을 지연 로딩으로 가져오기"""
+    global _embedding_model
+    if _embedding_model is None:
+        print("🧠 임베딩 모델 로딩 중...")
+        from langchain_huggingface import HuggingFaceEmbeddings
+        _embedding_model = HuggingFaceEmbeddings(
+            model_name=EMBED_MODEL_NAME,
+            model_kwargs={"device": "cpu"}
+        )
+        print("✅ 임베딩 모델 로딩 완료")
+    return _embedding_model
+
+def _get_vectorstore():
+    """벡터스토어를 지연 로딩으로 가져오기"""
+    global _vectorstore
+    if _vectorstore is None:
+        print("🗄️ 벡터스토어 로딩 중...")
+        from langchain_milvus import Milvus as MilvusVectorStore
+        from pymilvus import connections
+        
+        # Milvus 연결이 없으면 새로 연결을 시도합니다.
+        if "default" not in connections.list_connections() or not connections.has_connection("default"):
+            connections.connect(alias="default", uri=MILVUS_URI, token=MILVUS_TOKEN)
+        
+        embedding_model = _get_embedding_model()
+        _vectorstore = MilvusVectorStore(
+            embedding_function=embedding_model,
+            collection_name=MILVUS_COLLECTION,
+            connection_args={"uri": MILVUS_URI, "token": MILVUS_TOKEN},
+        )
+        print(f"✅ 벡터스토어 로딩 완료: {MILVUS_COLLECTION}")
+    return _vectorstore
 
 # ==================== 프롬프트 (구수 version) ====================
 # RAG_PROMPT_TMPL = """ 
@@ -94,8 +149,13 @@ RAG_PROMPT_TMPL = """
 🟢 질문: {question}  
 ✨ 답변:  
 """
-rag_prompt = ChatPromptTemplate.from_template(RAG_PROMPT_TMPL) # RAG 프롬프트 템플릿 객체를 생성합니다.
+def _get_rag_prompt():
+    """RAG 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(RAG_PROMPT_TMPL)
 
+def _get_web_prompt():
+    """웹 검색 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(WEB_PROMPT_TMPL)
 
 #---------------------------------------- 프롬프트 (구수 version) ----------------------------------------
 # WEB_PROMPT_TMPL = """ 
@@ -138,7 +198,7 @@ WEB_PROMPT_TMPL = """
 🟢 질문: {question}
 ✨ 답변:
 """
-web_prompt = ChatPromptTemplate.from_template(WEB_PROMPT_TMPL) # 웹 전용 프롬프트 템플릿 객체를 생성합니다.
+# web_prompt는 _get_web_prompt() 함수로 지연 로딩됩니다.
 
 class GraphState(TypedDict, total=False):  # LangGraph의 상태를 정의하는 딕셔너리 타입입니다.
     question: Optional[str]  # 사용자의 질문을 저장하는 필드입니다.
@@ -202,16 +262,9 @@ def route_after_retrieve(state: "GraphState") -> str:
 # ==================== 노드들 ====================
 def load_milvus_node(state: GraphState) -> Dict[str, Any]: # Milvus를 로드하는 노드 함수입니다.
     print("\n--- 노드: Milvus 로드 ---")
-    global _vectorstore
-    # Milvus 연결이 없으면 새로 연결을 시도합니다.
-    if "default" not in connections.list_connections() or not connections.has_connection("default"):
-        connections.connect(alias="default", uri=MILVUS_URI, token=MILVUS_TOKEN)
     try:
-        _vectorstore = MilvusVectorStore( # MilvusVectorStore 객체를 생성합니다.
-            embedding_function=embedding_model,
-            collection_name=MILVUS_COLLECTION,
-            connection_args={"uri": MILVUS_URI, "token": MILVUS_TOKEN},
-        )
+        # 벡터스토어를 지연 로딩으로 가져오기
+        _vectorstore = _get_vectorstore()
         print(f"✅ Milvus 로드 완료: {MILVUS_COLLECTION}")
         return {**state}
     except Exception as e:
@@ -284,6 +337,8 @@ def generate_draft_node(state: GraphState) -> Dict[str, Any]:  # 답변 초안�
         print("❌ 컨텍스트가 없어 답변을 생성할 수 없습니다.")  # 에러 메시지를 출력합니다.
         return {**state, "answer_draft": "주어진 정보로는 답변할 수 없습니다."}  # 실패 메시지를 초안에 저장하고 반환합니다.
 
+    llm = _get_llm()
+    rag_prompt = _get_rag_prompt()
     response = llm.invoke(rag_prompt.format(context=context, question=question))  # LLM을 호출하여 답변을 생성합니다.
     ans = response.content  # 생성된 답변 내용을 가져옵니다.
     
@@ -305,7 +360,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]: # 웹 검색 노드입
         print("⚠️ TAVILY API 키가 없어 웹 검색을 건너뜁니다.")
         return {**state, "web_context": "웹 검색 비활성화"} # API 키가 없으면 검색을 건너뜁니다.
     
-    search_tool = TavilyClient(api_key=TAVILY_API_KEY)
+    search_tool = _get_tavily_client()
     web_context_parts = []
     
     try:
@@ -328,45 +383,10 @@ def web_search_node(state: GraphState) -> Dict[str, Any]: # 웹 검색 노드입
     print("✅ 웹 검색 완료.")
     return {**state, "web_context": web_context}
 
-def combine_context_node(state: GraphState) -> Dict[str, Any]: # 컨텍스트를 결합하는 노드입니다.
-    print("--- 노드: 컨텍스트 결합 ---")
-    db_context = state.get("db_context", "")
-    web_context = state.get("web_context", "")
-    final_context = db_context # 최종 컨텍스트를 DB 내용으로 초기화합니다.
-    if web_context and web_context != "웹 검색 비활성화": # 웹 검색 결과가 있을 경우
-        print("✅ DB와 웹 컨텍스트를 결합합니다.")
-        # DB와 웹 컨텍스트를 결합하여 최종 컨텍스트를 만듭니다.
-        final_context = f"[DB 검색 결과]\n{db_context}\n\n[웹 검색 결과]\n{web_context}"
-    else:
-        print("ℹ️ DB 컨텍스트만 사용합니다.")
-    return {**state, "context": final_context}
-
-def generate_draft_node(state: GraphState) -> Dict[str, Any]: # 최종 답변을 생성하는 노드입니다.
-    print("--- 노드: 답변 생성 ---")
-    context = state.get("context", "")
-    question = state.get("question", "")
-
-    if not context:
-        print("❌ 컨텍스트가 없어 답변을 생성할 수 없습니다.")
-        return {**state, "answer": "제공된 자료만으로는 답변이 어렵습니다."}
-
-    # 웹 컨텍스트만 있을 경우와 DB 컨텍스트가 있을 경우 다른 프롬프트를 사용합니다.
-    if context.startswith("[웹 검색 결과]"):
-        messages = web_prompt.format_messages(web_context_parts=context, question=question)
-    else:
-        messages = rag_prompt.format_messages(context=context, question=question)
-
-    response = llm.invoke(messages) # LLM을 호출하여 답변을 생성합니다.
-    ans = response.content
-    print("✅ 최종 답변 생성 완료.")
-    return {**state, "answer": ans, "answer_source": "DB/웹"}
+# 중복된 함수 정의 제거됨 - 위의 함수들이 사용됨
 
 # ==================== 그래프 빌드 ====================
 def build_graph(): # LangGraph 워크플로우를 구축하는 함수입니다.
-    global agent_app
-    if agent_app is not None:
-        return agent_app
-    
     g = StateGraph(GraphState)
     g.add_node("load_milvus", load_milvus_node) # 노드: Milvus 연결
     g.add_node("retrieve", retrieve_node) # 노드: DB 검색
@@ -389,8 +409,7 @@ def build_graph(): # LangGraph 워크플로우를 구축하는 함수입니다.
     g.add_edge("combine_context", "generate_draft") # 컨텍스트 결합 후 답변 생성으로 이동합니다.
     g.add_edge("generate_draft", END) # ✅ 답변 생성 후 워크플로우를 종료합니다.
 
- 지연 로딩을 위한 전역 변수
-_crop_recommend_app = None
+    return g.compile()
 
 def _get_crop_recommend_app():
     """작물추천 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
@@ -421,7 +440,8 @@ def run(state: dict) -> dict:  # 에이전트를 실행하는 함수입니다.
         })  # LangGraph 애플리케이션을 호출하여 그래프를 실행합니다.
 
         if isinstance(final_state, dict):
-            answer = final_state.get("answer", "답변 생성에 실패했습니다.")
+            # answer_draft 필드에서 답변을 가져오고, 없으면 answer 필드를 확인
+            answer = final_state.get("answer_draft") or final_state.get("answer", "답변 생성에 실패했습니다.")
         elif isinstance(final_state, str):
             answer = final_state
         else:
@@ -449,7 +469,7 @@ if __name__ == "__main__":  # 스크립트가 직접 실행될 때의 진입점�
     parser.add_argument("-q", "--query", type=str, help="한 번만 실행할 질문 (예: -q '주말농장에 키울 작물 추천해줘')")
     args = parser.parse_args()
     
-    agent_app = build_graph()  # 그래프를 빌드합니다.
+    agent_app = _get_crop_recommend_app()  # 그래프를 지연 로딩으로 빌드합니다.
 
     # 그래프 시각화 (선택 사항)
     # try:

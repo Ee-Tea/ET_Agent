@@ -26,6 +26,19 @@ _interrupt_flag = threading.Event()
 # 전역 에이전트 함수 캐시 (지연 로딩용)
 _agent_functions_cache = {}
 
+# 지연 로딩을 위한 전역 변수들
+_llm_instance = None
+_workflow_graph = None
+
+# =========[ 지연 로딩 함수들 ]=========
+def _get_llm():
+    """LLM 인스턴스를 지연 로딩으로 가져오기"""
+    global _llm_instance
+    if _llm_instance is None:
+        llm_config = FarmerConfig.get_llm_config()
+        _llm_instance = ChatOpenAI(**llm_config)
+    return _llm_instance
+
 # 병합 함수들을 먼저 정의 (RouterState에서 사용하기 위해)
 def merge_dicts(left: dict, right: dict) -> dict:
     """딕셔너리 병합 함수 - LangGraph용"""
@@ -217,7 +230,7 @@ class RouterState(dict):
     """LangGraph 상태 클래스 - 적절한 기본값으로 초기화"""
     
     # 사용자 입력 관련
-    query: Annotated[List[str], operator.add] = []
+    query: Annotated[List[str], merge_lists_unique] = []
     question_parts: Annotated[Dict[str, str], merge_dicts] = {}
     
     # 에이전트 관리 관련
@@ -225,13 +238,13 @@ class RouterState(dict):
     execution_order: Annotated[List[str], merge_lists_unique] = []
     
     # 작물 관련
-    crop_info: Annotated[List[str], operator.add] = []
+    crop_info: Annotated[List[str], merge_lists_unique] = []
     selected_crop: Annotated[List[str], merge_lists_unique] = []
     crop_recommendation_failed: Annotated[List[bool], merge_lists_unique] = []
     
     # 결과 및 출력
     agent_results: Annotated[Dict[str, str], merge_dicts] = {}
-    output: Annotated[List[str], operator.add] = []
+    output: Annotated[List[str], merge_lists_unique] = []
     
     # 세션 및 메타데이터
     session: Annotated[Dict[str, any], merge_dicts] = {}
@@ -471,9 +484,7 @@ class Farmer:
         # 설정 클래스 사용
         self.config = FarmerConfig()
         
-        # LLM 설정 (필수 - 즉시 로딩)
-        llm_config = self.config.get_llm_config()
-        self.llm = ChatOpenAI(**llm_config)
+        # LLM은 지연 로딩으로 변경 (필요할 때만 로딩)
         
         # 로거 초기화
         self.logger = LoggingConfig.get_logger("Farmer")
@@ -486,15 +497,14 @@ class Farmer:
         # 메모리 시스템 초기화 (가벼운 작업)
         self._init_memory_system()
         
-        # 워크플로우 그래프 생성 (지연 로딩으로 변경)
-        self._graph = None  # 지연 로딩용
+        # 워크플로우 그래프는 지연 로딩으로 변경 (전역 변수 사용)
         
         
         # 시그널 핸들러 등록 (메인 스레드에서만)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGINT, signal_handler)
         
-        self.logger.info("Farmer 초기화 완료 (지연 로딩 모드)")
+        self.logger.info("Farmer 초기화 완료")
     
     def _init_memory_system(self):
         """메모리 시스템 초기화 - Main에서 중앙집중식 관리"""
@@ -503,11 +513,12 @@ class Farmer:
     @property
     def graph(self):
         """워크플로우 그래프 지연 로딩"""
-        if self._graph is None:
+        global _workflow_graph
+        if _workflow_graph is None:
             self.logger.debug("Farmer 워크플로우 그래프 생성 중...")
-            self._graph = self.workflow_builder.create_workflow()
+            _workflow_graph = self.workflow_builder.create_workflow()
             self.logger.info("Farmer 워크플로우 그래프 생성 완료")
-        return self._graph
+        return _workflow_graph
     
     
     def clear_cache(self):
@@ -561,8 +572,13 @@ class Farmer:
             # RouterState로 변환하고 Supervisor에서 전달받은 상태들을 반영 (query, selected_crop만)
             router_state = RouterState()
             
-            # Supervisor에서 받는 상태들
-            router_state["query"] = [state.get("query", "")] if state.get("query") else []
+            # Supervisor에서 받는 상태들 (중복 방지)
+            query_text = state.get("query", "")
+            if query_text:
+                # 단일 문자열을 리스트로 변환 (중복 방지)
+                router_state["query"] = [query_text]
+            else:
+                router_state["query"] = []
             
             if state.get("selected_crop"):
                 router_state["selected_crop"] = [state.get("selected_crop")] if isinstance(state.get("selected_crop"), str) else state.get("selected_crop", [])
@@ -652,7 +668,8 @@ class Farmer:
         """
         
         try:
-            result = self.llm.invoke(selection_prompt)
+            llm = _get_llm()
+            result = llm.invoke(selection_prompt)
             
             # JSON 부분 추출
             json_match = re.search(r'\{.*\}', result.content, re.DOTALL)
@@ -709,15 +726,18 @@ class Farmer:
         """사용자 질문에서 작물명을 추출하는 노드"""
         self.logger.info("질문 분석 및 작물명 추출 시작")
         
-        # 현재 상태에서 query 가져오기
+        # 현재 상태에서 query 가져오기 (중복 제거)
         query = state.get("query", [])
-        user_input = query[0] if query and len(query) > 0 else ""
+        # 중복 제거하고 첫 번째 유효한 질문 사용
+        unique_queries = list(dict.fromkeys(query))  # 순서 유지하면서 중복 제거
+        user_input = unique_queries[0] if unique_queries else ""
         
         if not user_input:
             self.logger.error("질문이 없습니다")
             return state
         
         self.logger.debug(f"분석할 질문: {user_input}")
+        self.logger.debug(f"중복 제거 전 query 개수: {len(query)}, 제거 후: {len(unique_queries)}")
         
         # 새로운 질문 플래그 설정
         state.setdefault("session", {})
@@ -799,7 +819,8 @@ class Farmer:
             추출된 작물명:"""
         
         try:
-            result = self.llm.invoke(extraction_prompt)
+            llm = _get_llm()
+            result = llm.invoke(extraction_prompt)
             extracted_crop = result.content.strip()
             
             # "없음"이거나 빈 문자열인 경우 빈 문자열 반환
@@ -1111,6 +1132,7 @@ class Farmer:
         # 실행 요약 출력
         selected_agents = state.get("selected_agents", [])
         
+        
         output = ""
         
         # 에이전트가 하나뿐인 경우 단순 처리
@@ -1150,12 +1172,14 @@ class Farmer:
         
         # 여러 에이전트가 있는 경우에만 LLM 요약
         self.logger.info("LLM 요약 시작...")
+        
+        
         summary_prompt = (
             f"""
             아래는 여러 농업 agent의 답변입니다.
             사용자는 농작물을 키우는 입장으로 당신에게 조언을 구하고 있습니다.
             사용자에게 최대한 자세하고 상세하게 한국어로 알려주세요.
-            작물 추천, 재배 방법, 재해, 판매처, 날씨 순으로 자연스럽게 대화하듯 연결해주세요. (**실행되지 않은 agent는 생략**)
+            작물 추천_agent, 재배 방법_agent, 재해_agent, 판매처_agent, 날씨_agent 순서로 자연스럽게 대화하듯 연결해주세요. (**실행되지 않은 agent는 생략**)
             \n\n
             {merged_output}
             \n\n
@@ -1163,7 +1187,6 @@ class Farmer:
             - 답변으로 받은 정보는 **변경하거나 빼먹지 말고 출력** (특히 오늘인지 내일인지 등 시간 정보)
             - "정보가 없다"는 것도 빼지 말고 아쉽다는 식으로 없다고 대답
             - 내용 안에 agent 이름을 넣지 말고 대화하는 것처럼 사용자에게 대답
-            - 농작물의 **직매장 등을 찾고 있다면** 구매하는 것이 아닌 판매하려 한다는 것을 알아둬
             - **절대 마크다운 형식을 사용하지 마세요**: **, ##, ###, *, -, [], (), ``` 등 모든 마크다운 문법 금지
             - **순수한 텍스트만 사용하세요**: 굵은 글씨, 제목, 리스트, 코드 블록 등 모두 일반 텍스트로 변환
             - 마지막에는 사용자에게 다른 질문을 유도하는 문장 추가
@@ -1171,7 +1194,8 @@ class Farmer:
         )
         
         try:
-            summary = self.llm.invoke(summary_prompt)
+            llm = _get_llm()
+            summary = llm.invoke(summary_prompt)
             self.logger.info(f"LLM 요약 완료")
         except Exception as e:
             summary = f"요약 중 오류: {e}"

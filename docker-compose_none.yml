@@ -150,6 +150,12 @@ services:
     environment:
       PYTHONPATH: /app
       DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+      LANGGRAPH_DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+      PGHOST: langgraph-postgres
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/auth/health', timeout=2).read(); print('ok')\""]
       interval: 10s
@@ -184,7 +190,18 @@ services:
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
       RUN_IN_CONTAINER: '1'
       REDIS_DEBUG: 'false'
-      DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+      LANGGRAPH_DATABASE_URL: postgresql+psycopg://postgres:postgres@langgraph-postgres:5432/postgres
+      PGHOST: langgraph-postgres
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+      POSTGRES_HOST: langgraph-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
 
     volumes:
     - ./:/deps/LLM-T:rw
@@ -198,19 +215,18 @@ services:
     env_file:
     - .env
     environment:
-      PYTHONPATH: /app
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_URL: redis://redis:6379
-      DATABASE_URI: postgresql://postgres:postgres@langgraph-postgres:5432/postgres
-      AUTH_API_BASE: http://auth-api:8000
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_LLM_MODEL: ${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
-      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
-      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY}
-      GIT_PYTHON_REFRESH: quiet
-      LANGGRAPH_API_BASE: http://langgraph-api:8000
-      LANGGRAPH_API_URL: http://langgraph-api:8000
+    - PYTHONPATH=/app
+    - REDIS_HOST=redis
+    - REDIS_PORT=6379
+    - REDIS_URL=redis://redis:6379
+    - DATABASE_URL=postgresql://postgres:postgres@langgraph-postgres:5432/postgres
+    - OPENAI_API_KEY=${OPENAI_API_KEY}
+    - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-moonshotai/kimi-k2-instruct}
+    - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
+    - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+    - GIT_PYTHON_REFRESH=quiet
+    - LANGGRAPH_API_BASE=http://langgraph-api:8000
+    - LANGGRAPH_API_URL=http://langgraph-api:8000
     volumes:
     - ./supervisor.py:/app/supervisor.py
     - ./teacher:/app/teacher

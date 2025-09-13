@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field
 import uvicorn
 import httpx
 from api.routers import chat, health, sessions
-import auth.auth_routes as auth_routes
 from api.services.hybrid_session_service import HybridSessionService
+from api.clients.auth_client import verify_token
 # supervisor import는 런타임에 처리
 
 # 프로젝트 루트 경로 추가
@@ -209,7 +209,8 @@ async def lifespan(app: FastAPI):
     # 하이브리드 세션 서비스 초기화
     try:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
-        postgres_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/postgres")
+        # 컨테이너 내부에서는 서비스명:5432 사용
+        postgres_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@langgraph-postgres:5432/postgres")
         
         hybrid_session_service = HybridSessionService(redis_url, postgres_url)
         await hybrid_session_service.init_postgres()
@@ -285,7 +286,17 @@ from .routers import chat, health, sessions
 app.include_router(chat.router)
 app.include_router(health.router)
 app.include_router(sessions.router)
-app.include_router(auth_routes.router)
+# auth 라우터는 별도 서비스(auth-api)로 분리되어 HTTP로 통신
+
+from fastapi import Header
+
+@app.get("/me")
+async def me(authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing/invalid token")
+    token = authorization.replace("Bearer ", "")
+    data = await verify_token(token)
+    return {"user": data}
 
 # ========== Pydantic 모델 정의 ==========
 

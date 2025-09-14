@@ -188,7 +188,7 @@ async def main():
             return
         
         # 타임스탬프가 포함된 파일명 생성
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         dataset_filename = f"./farmer/sales/data/sales_golden_dataset_{timestamp}.csv"
         
     elif choice == '2':

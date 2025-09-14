@@ -587,7 +587,7 @@ def save_results(self, output_path=None):
         return None
     
     if not output_path:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         # ./farmer/sales/data 디렉토리에 저장
         data_dir = "./farmer/sales/data"
         os.makedirs(data_dir, exist_ok=True)  # 디렉토리가 없으면 생성

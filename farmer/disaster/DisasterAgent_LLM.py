@@ -566,11 +566,14 @@ def run(state: dict) -> dict:
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")
         
-        print(f"[재해_agent_LLM] 답변 생성 완료: {len(answer)}자")
+        # 마크다운 제거
+        cleaned_answer = remove_markdown_and_special_chars(answer)
+        
+        print(f"[재해_agent_LLM] 답변 생성 완료: {len(cleaned_answer)}자")
         
         # 전체 그래프 상태를 반환 (RAGAS 평가를 위해)
         return {
-            "agent_answer": answer,
+            "agent_answer": cleaned_answer,
             **result  # 그래프의 모든 상태 정보 포함
         }
         
@@ -578,6 +581,17 @@ def run(state: dict) -> dict:
         error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"
         print(f"[재해_agent_LLM] 오류: {e}")
         return {"agent_answer": error_msg}
+
+# =========[ 마크다운 제거 함수 ]=========
+def remove_markdown_and_special_chars(text: str) -> str:
+    """마크다운 및 특수문자를 제거하는 함수"""
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 헤더 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거
+    text = re.sub(r'[\*\-]', '', text)  # 불릿(*, -) 제거
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)  # 링크 제거
+    text = re.sub(r'\s+', ' ', text)  # 여러 공백을 하나로 축소
+    return text.strip()  # 양 끝 공백 제거
 
 # =========[ 실행부 ]=========
 if __name__ == "__main__":

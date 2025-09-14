@@ -255,7 +255,22 @@ def fetch_api_data(query=None):
     response = requests.get(url, params=params)
     docs = []
     if response.status_code == 200:
-        data = response.json()
+        try:
+            # 응답 텍스트가 비어있거나 유효하지 않은 JSON인지 확인
+            response_text = response.text.strip()
+            if not response_text:
+                print("⚠️ API 응답이 비어있습니다.")
+                return ["API에서 데이터를 받아올 수 없습니다."]
+            
+            data = response.json()
+        except ValueError as e:
+            print(f"⚠️ JSON 파싱 오류: {e}")
+            print(f"응답 내용: {response.text[:200]}...")
+            return ["API 응답 형식이 올바르지 않습니다."]
+        except Exception as e:
+            print(f"⚠️ API 데이터 처리 오류: {e}")
+            return ["API 데이터 처리 중 오류가 발생했습니다."]
+        
         items = []
         price = data.get("price", {})
         if isinstance(price, dict):
@@ -1115,6 +1130,17 @@ def _get_sales_app():
         print("✅ 판매처_agent 모듈 로딩 완료")
     return _sales_app
 
+# =========[ 마크다운 제거 함수 ]=========
+def remove_markdown_and_special_chars(text: str) -> str:
+    """마크다운 및 특수문자를 제거하는 함수"""
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 헤더 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거
+    text = re.sub(r'[\*\-]', '', text)  # 불릿(*, -) 제거
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)  # 링크 제거
+    text = re.sub(r'\s+', ' ', text)  # 여러 공백을 하나로 축소
+    return text.strip()  # 양 끝 공백 제거
+
 # 실행 함수
 def run(state: dict) -> dict:
     """
@@ -1150,10 +1176,13 @@ def run(state: dict) -> dict:
         answer = result_state.get("final_answer", "답변을 생성할 수 없습니다.")
         context = result_state.get("context", {})
         
-        print(f"[판매처_agent] 답변 생성 완료: {len(answer)}자")
+        # 마크다운 제거
+        cleaned_answer = remove_markdown_and_special_chars(answer)
+        
+        print(f"[판매처_agent] 답변 생성 완료: {len(cleaned_answer)}자")
         
         return {
-            "agent_answer": answer,
+            "agent_answer": cleaned_answer,
             "context": context
         }
         

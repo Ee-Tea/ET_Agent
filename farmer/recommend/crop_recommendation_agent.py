@@ -193,7 +193,8 @@ WEB_PROMPT_TMPL = """
 - 재배 방법은 각 단계마다 한 줄씩 띄워서 작성하세요.
 - 모든 답변은 반드시 한국어로 작성하세요.
 - 추천 작물의 개수는 적합한 수준(1~5개 이내)으로 제한하세요.
-- **마크다운 형식은 제거 하세요.**
+- **절대 마크다운 형식을 사용하지 마세요. #, ##, ###, **, *, -, ` 등의 기호를 사용하지 마세요.**
+- **평문으로만 작성하세요. 제목이나 헤더는 사용하지 마세요.**
 
 🟢 질문: {question}
 ✨ 답변:
@@ -456,7 +457,9 @@ def run(state: dict) -> dict:  # 에이전트를 실행하는 함수입니다.
 
 # ==================== 출력 유틸 ====================
 def remove_markdown_and_special_chars(text: str) -> str: # 마크다운 및 특수문자를 제거하는 함수입니다.
-    text = re.sub(r'#{1,6}\s', '', text) # 헤더(#) 제거
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE) # 헤더(#) 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE) # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE) # 불릿 포인트 제거 (- *)
     text = re.sub(r'[\*\-]', '', text) # 불릿(*, -) 제거
     text = re.sub(r'\[.*?\]\(.*?\)', '', text) # 링크 제거
     text = re.sub(r'\s+', ' ', text) # 여러 공백을 하나로 축소

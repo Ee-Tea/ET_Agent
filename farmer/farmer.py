@@ -154,9 +154,13 @@ class FarmerConfig:
         "판매처_agent": (
             "사용자가 재배하거나 수확한 농산물을 어디에 팔 수 있는지, 판매처 위치 정보와 해당 작물의 시세, 최근 가격 변동을 안내합니다."
             "※ 핵심 키워드: '판매처', '시장', '도매상', '유통', '가격', '시세', '수익', '거래', '실시간 시세', '가격 변동', '팔고 싶어'"
+        ),
+        "날씨_agent": (
+            "현재 및 예보된 날씨 정보를 제공하여 작물 재배에 도움이 되는 기상 데이터를 안내합니다. 기온, 강수량, 습도, 바람, 자외선 지수 등 작물 관리와 재배 활동에 필요한 날씨 정보를 실시간으로 제공합니다."
+            "※ 핵심 키워드: '날씨', '기온', '비', '강수량', '습도', '바람', '기상 정보', '예보', '오늘 날씨', '내일 날씨'"
         )
     }
-    
+
     # 에이전트 모듈 매핑
     AGENT_MODULES = {
         "작물추천_agent": "farmer.recommend.crop_recommendation_agent",
@@ -638,7 +642,7 @@ class Farmer:
         
         3) 재해_agent: {self.config.AGENT_DESCRIPTIONS["재해_agent"]}
         
-        4) 날씨_agent: **'날씨', '기상' 이라는 키워드가 포함되어 있을 경우에만 선택**
+        4) 날씨_agent: {self.config.AGENT_DESCRIPTIONS["날씨_agent"]}
         
         5) 판매처_agent: {self.config.AGENT_DESCRIPTIONS["판매처_agent"]}
         
@@ -1219,7 +1223,9 @@ class Farmer:
         text = re.sub(r'__([^_]+)__', r'\1', text)  # 굵은 글씨 제거 (__...__)
         text = re.sub(r'\*([^*]+)\*', r'\1', text)  # 기울임 글씨 제거 (*...*)
         text = re.sub(r'_([^_]+)_', r'\1', text)  # 기울임 글씨 제거 (_..._)
-        text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # 제목 제거 (# ## ###)
+        text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 제목 제거 (# ## ###) - 공백 없이도 제거
         text = re.sub(r'^[-*]{3,}$', '', text, flags=re.MULTILINE)  # 수평선 제거 (--- ***)
+        text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+        text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거 (- *)
 
         return text

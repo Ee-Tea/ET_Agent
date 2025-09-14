@@ -240,7 +240,9 @@ def generate_final_answer_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "answer": answer}
 
 def remove_markdown_and_special_chars(text: str) -> str:
-    text = re.sub(r'#{1,6}\s', '', text)
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 헤더 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거
     text = re.sub(r'[\*\-]', '', text)
     text = re.sub(r'\[.*?\]\(.*?\)', '', text)
     return text.strip()
@@ -334,8 +336,11 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
             final_response = final_state.get('answer', '답변을 생성할 수 없습니다.')
             print("✅ 답변 생성 완료")
             
+            # 마크다운 제거
+            cleaned_response = remove_markdown_and_special_chars(final_response)
+            
             return {
-                "agent_answer": final_response,
+                "agent_answer": cleaned_response,
                 "status": "success",
                 "error": None
             }

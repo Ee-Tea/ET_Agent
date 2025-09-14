@@ -1,33 +1,32 @@
-# 설정
-from pymilvus import connections, Collection, utility
-import requests
-from dotenv import load_dotenv
+# =========[ 표준/외부 라이브러리 ]=========
 import os
-import pandas as pd
-try:
-    from kiwipiepy import Kiwi
-    kiwi = Kiwi()
-    USE_KIWI = True
-except ImportError:
-    try:
-        from konlpy.tag import Okt
-        okt = Okt()
-        USE_KIWI = False
-    except:
-        USE_KIWI = None
 import re
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
-from typing import Dict, Any, List, Optional, TypedDict
-from tavily import TavilyClient
+import requests
+import pandas as pd
 from datetime import datetime
-from sentence_transformers import SentenceTransformer
+from typing import Dict, Any, List, Optional, TypedDict
+from dotenv import load_dotenv
+
+# =========[ LangChain / LangGraph / LLM ]=========
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
+
+# =========[ 외부 서비스 ]=========
+from tavily import TavilyClient
+
+# =========[ 공통 모듈 ]=========
 from common.milvus_helpers import search_milvus_documents
 
-# 임베딩 모델
-embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_sales_app = None
+_llm_instance = None
+_tavily_client = None
+_embedder = None
+_kiwi_instance = None
+_okt_instance = None
+_use_kiwi = None
 
 # 환경 변수 로드
 load_dotenv()
@@ -37,8 +36,57 @@ milvus_host = os.getenv("MILVUS_HOST", "localhost")
 milvus_port = os.getenv("MILVUS_PORT", "19530")
 collection_name = "market_price_docs"
 
-# LLM 및 프롬프트 설정
-llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
+# =========[ 지연 로딩 함수들 ]=========
+def _get_llm():
+    """LLM 인스턴스를 지연 로딩으로 가져오기"""
+    global _llm_instance
+    if _llm_instance is None:
+        print("🤖 LLM 모듈 로딩 중...")
+        if not os.getenv("OPENAI_API_KEY"):
+            raise ValueError("OPENAI_API_KEY가 .env에 없습니다.")
+        _llm_instance = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
+        print("✅ LLM 모듈 로딩 완료")
+    return _llm_instance
+
+def _get_tavily_client():
+    """Tavily 클라이언트를 지연 로딩으로 가져오기"""
+    global _tavily_client
+    if _tavily_client is None:
+        print("🔍 Tavily 클라이언트 로딩 중...")
+        _tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+        print("✅ Tavily 클라이언트 로딩 완료")
+    return _tavily_client
+
+def _get_embedder():
+    """임베딩 모델을 지연 로딩으로 가져오기"""
+    global _embedder
+    if _embedder is None:
+        print("🧠 임베딩 모델 로딩 중...")
+        from sentence_transformers import SentenceTransformer
+        _embedder = SentenceTransformer("jhgan/ko-sroberta-multitask")
+        print("✅ 임베딩 모델 로딩 완료")
+    return _embedder
+
+def _get_kiwi():
+    """Kiwi 형태소 분석기를 지연 로딩으로 가져오기"""
+    global _kiwi_instance, _use_kiwi
+    if _use_kiwi is None:
+        print("🔤 형태소 분석기 로딩 중...")
+        try:
+            from kiwipiepy import Kiwi
+            _kiwi_instance = Kiwi()
+            _use_kiwi = True
+            print("✅ Kiwi 형태소 분석기 로딩 완료")
+        except ImportError:
+            try:
+                from konlpy.tag import Okt
+                _okt_instance = Okt()
+                _use_kiwi = False
+                print("✅ KoNLPy Okt 형태소 분석기 로딩 완료")
+            except:
+                _use_kiwi = None
+                print("⚠️ 형태소 분석기를 사용할 수 없습니다.")
+    return _kiwi_instance, _use_kiwi
 
 # 상태 스키마 정의
 class GraphState(TypedDict):
@@ -59,17 +107,23 @@ class GraphState(TypedDict):
 
 # 키워드 추출
 def extract_keywords(query):
-    if USE_KIWI:
+    kiwi_instance, use_kiwi = _get_kiwi()
+    
+    if use_kiwi and kiwi_instance:
         # Kiwi 사용 (Java 불필요)
-        result = kiwi.analyze(query)
+        result = kiwi_instance.analyze(query)
         nouns = []
         for token in result[0][0]:
             if token.tag.startswith('N'):  # 명사류 태그
                 nouns.append(token.form)
         return nouns
-    else:
+    elif not use_kiwi and _okt_instance:
         # KoNLPy 사용 (JAVA_HOME 설정 필요)
-        return okt.nouns(query)
+        return _okt_instance.nouns(query)
+    else:
+        # 형태소 분석기를 사용할 수 없는 경우 간단한 키워드 추출
+        import re
+        return re.findall(r'[가-힣A-Za-z0-9]+', query)
 
 # ===============================
 # 사용자 질문 받기
@@ -128,6 +182,7 @@ def classify_question_simple(query: str) -> str:
     
     try:
         # LLM 체인 생성
+        llm = _get_llm()
         chain = classification_prompt | llm | StrOutputParser()
         
         # 분류 실행
@@ -360,6 +415,7 @@ def search_market_docs(query, local_collection, top_k=3):
         # 1. 지역 키워드 임베딩 검색
         if locations:
             region_query = " ".join(locations)
+            embedder = _get_embedder()
             region_vec = embedder.encode([region_query])[0]
             region_results = local_collection.search(
                 data=[region_vec],
@@ -372,6 +428,7 @@ def search_market_docs(query, local_collection, top_k=3):
                 all_results.extend([hit.entity.get("text") for hit in region_results[0]])
 
         # 2. 전체 쿼리 임베딩 검색
+        embedder = _get_embedder()
         query_vec = embedder.encode([query])[0]
         query_results = local_collection.search(
             data=[query_vec],
@@ -519,6 +576,7 @@ def make_system_instruction(classification="시세+판매처"):
     - [참고 정보]의 가격과 단위를 정확히 사용
     - 없는 정보는 없다고 안내
     - **이나 ##같은 마크다운 형식은 제외
+    - USD 같은 외화는 KRW로 바꿔서 '원'으로 표시
     - 순서: {template['order']}
     [출처 규칙] 
     - `[실시간시세 정보 (API)]`에서 가져온 정보의 출처는 'https://www.kamis.or.kr/customer/main/main.do'을 명시
@@ -558,7 +616,8 @@ def ask_llm_openai(prompt, context="", system_instruction=None, model="gpt-4o-mi
             "content": prompt
         })
         
-        # ChatGroq를 사용하여 응답 생성
+        # LLM을 사용하여 응답 생성
+        llm = _get_llm()
         response = llm.invoke(messages)
         return response.content.strip()
         
@@ -897,7 +956,7 @@ def supplement_missing_info_with_web_search(query: str, missing_info_type: str, 
             print("⚠️ Tavily API 키가 설정되지 않았습니다.")
             return supplemented_context
         
-        tavily_tool = TavilyClient(api_key=tavily_api_key)
+        tavily_tool = _get_tavily_client()
         
         search_queries = []
         if missing_info_type == "판매처":
@@ -1046,9 +1105,6 @@ graph.add_edge("reanalyze", "llm_summarize")  # 재분석 후 LLM으로
 graph.add_edge("output", END)
 
 graph.set_entry_point("input")
-
-# 지연 로딩을 위한 전역 변수
-_sales_app = None
 
 def _get_sales_app():
     """판매처 에이전트 애플리케이션을 지연 로딩으로 가져오기"""

@@ -4,7 +4,7 @@
 PROJECT_ROOT = r"C:\FinalPrj\ET_Agent"
 
 # 이 경로에 CSV / JSON / JSONL(=NDJSON) 아무거나 지정하면 자동 인식합니다.
-CSV_FILE_PATH = "./teacher/agents/retrieve/out/goldenset_20250913_154620.jsonl"
+CSV_FILE_PATH = "./teacher/agents/retrieve/goldensets/goldenset_20250913_154620.jsonl"
 
 OUTPUT_DIRECTORY = "./teacher/agents/retrieve/eval_goldenset_deepeval"
 OUTPUT_FORMAT = "json"   # "json" or "csv"

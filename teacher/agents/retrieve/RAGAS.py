@@ -78,17 +78,63 @@ def split_contexts_from_merged(merged: str) -> List[str]:
 # ---------- 유틸: Milvus 연결 정보 구성 (환경변수 기반) ----------
 def build_milvus_data_from_env() -> Dict[str, Any]:
     """
-    다른 에이전트 RAGAS 코드 스타일을 따라 환경변수에서 연결 정보 수집.
-    (retrieve_agent 안의 Milvus 검색 노드는 milvus_data를 그대로 넘겨 사용함)
+    MilvusDBManager(개별 인서터)로 생성된 'concepts' 컬렉션과 정확히 일치하도록
+    검색 노드가 사용할 설정을 구성한다.
+    retrieve_agent는 이 dict를 그대로 받아 Milvus에 접속/검색한다는 가정.
     """
-    d = {
+    host   = os.getenv("MILVUS_HOST", "localhost")
+    port   = os.getenv("MILVUS_PORT", "19530")
+
+    # 인서터에서 기본값: collection_name='concepts', vector_field='embedding'
+    collection = os.getenv("CONCEPT_COLL", "concepts")
+    vector_field = os.getenv("MILVUS_VECTOR_FIELD", "embedding")
+
+    # 인서터 기본 인덱스: HNSW + COSINE 권장
+    index_type = os.getenv("MILVUS_INDEX", "HNSW").upper()          # HNSW | IVF_FLAT | ...
+    metric     = os.getenv("MILVUS_METRIC", "COSINE").upper()       # COSINE | IP | L2
+    ef         = int(os.getenv("MILVUS_EF", "128"))                 # HNSW용 파라미터
+    nprobe     = int(os.getenv("NPROBE", "32"))                     # IVF용 파라미터
+    top_k      = int(os.getenv("TOP_K", "5"))
+
+    # 인서터에서 사용한 SentenceTransformer 모델과 반드시 동일해야 차원 mismatch가 안 남
+    # (MilvusDBManager 기본: jhgan/ko-sroberta-multitask → 보통 768-d)
+    embedding_model_name = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")
+    expected_dim_env = os.getenv("EMBED_DIM")  # 선택: 차원 고정 검증
+    expected_dim = int(expected_dim_env) if expected_dim_env and expected_dim_env.isdigit() else None
+
+    # 검색 파라미터 (Milvus SDK search params)
+    if index_type == "HNSW":
+        search_params = {"metric_type": metric, "params": {"ef": ef}}
+    else:
+        search_params = {"metric_type": metric, "params": {"nprobe": nprobe}}
+
+    # retrieve_agent가 사용할 출력 필드들 (인서터 스키마와 일치)
+    output_fields = [
+        "id", "subject", "source_file", "item_id",
+        "item_title", "content", "chunk_index", "n_tokens",
+    ]
+
+    # (선택) subject 필터를 외부에서 주입하고 싶을 때를 대비한 자리
+    subject_filter = os.getenv("SUBJECT_FILTER")  # e.g., "데이터베이스 구축"
+
+    return {
         "connection_status": True,
-        "host": os.getenv("MILVUS_HOST", "localhost"),
-        "port": os.getenv("MILVUS_PORT", "19530"),
-        "embedding_model_name": os.getenv("EMB_MODEL", "intfloat/multilingual-e5-large"),
-        # 필요시 token/username/password 등 추가
+        "host": host,
+        "port": port,
+        "collection_name": collection,
+        "vector_field": vector_field,
+        "output_fields": output_fields,
+        "metric_type": metric,
+        "index_type": index_type,
+        "search_params": search_params,
+        "top_k": top_k,
+        "subject_filter": subject_filter,          # None이면 미사용
+        "embedding_model_name": embedding_model_name,
+        "expected_dim": expected_dim,              # None이면 검증 생략
+        "normalize_embeddings": True,              # 인서터와 동일 설정 권장
+        "consistency_level": os.getenv("MILVUS_CONSISTENCY", "Eventually"),
+        # 필요 시 인증/네임스페이스 등 확장 키 추가 가능
     }
-    return d
 
 
 # ---------- 유틸: RAGAS 직전 최소 안전화 ----------
@@ -210,9 +256,8 @@ def run_evaluation(
 
 # ---------- CLI ----------
 def main():
-    input_path = "teacher/agents/retrieve/out/goldenset_20250913_141611.jsonl"
-    # input_path = "teacher/agents/retrieve/out/goldenset_20250913_154620.jsonl"
-    out_dir = "./ragas_out"
+    input_path = "teacher/agents/retrieve/goldensets/goldenset_20250913_154620.jsonl"
+    out_dir = "teacher/agents/retrieve/eval_results"
     limit = None
     sleep_sec = 0.0
     openai_model = "gpt-4o-mini"

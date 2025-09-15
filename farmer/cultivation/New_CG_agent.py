@@ -107,7 +107,13 @@ def _get_web_only_prompt():
     return ChatPromptTemplate.from_template(WEB_ONLY_PROMPT_TEMPLATE)
 
 VALIDATION_PROMPT = """
-주어진 맥락만 사용하여 다음 질문에 대한 완전하고 상세한 답변을 생성할 수 있는지 여부를 '네' 또는 '아니오'로만 답변하세요.
+주어진 맥락을 바탕으로 다음 질문에 대한 유용한 답변을 제공할 수 있는지 여부를 '네' 또는 '아니오'로만 답변하세요.
+
+기준:
+- 질문과 관련된 정보가 맥락에 포함되어 있으면 '네'
+- 완전하지 않더라도 부분적인 답변을 제공할 수 있으면 '네'
+- 전혀 관련이 없거나 아무 정보가 없을 때만 '아니오'
+
 질문: {question}
 맥락: {db_context}
 답변:

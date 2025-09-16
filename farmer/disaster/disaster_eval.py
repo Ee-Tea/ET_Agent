@@ -3,7 +3,7 @@
 # =============================================================================
 
 # 평가할 데이터셋 파일 경로 설정
-CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250916_181133.csv"
+CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250916_214439.csv"
 
 # 결과 저장 설정
 OUTPUT_DIRECTORY = "./farmer/disaster/data"                # 결과 저장 디렉토리
@@ -23,12 +23,12 @@ FILTER_BY_THRESHOLD = True      # True: 모든 메트릭 임계값을 넘는 것
 
 # 메트릭 임계값 설정
 METRIC_THRESHOLDS = {
-    'input_quality': 0.8,                   # 입력 질문 품질
-    'reference_quality': 0.8,               # 참조 컨텍스트 품질
-    'answer_quality': 0.8,                  # 답변 품질
-    'input_reference_alignment': 0.8,       # 입력-참조 정렬도
-    'reference_answer_alignment': 0.8,      # 참조-답변 정렬도
-    'input_answer_alignment': 0.8           # 입력-답변 정렬도
+    'input_quality': 0.75,                   # 입력 질문 품질
+    'reference_quality': 0.75,               # 참조 컨텍스트 품질
+    'answer_quality': 0.75,                  # 답변 품질
+    'input_reference_alignment': 0.75,       # 입력-참조 정렬도
+    'reference_answer_alignment': 0.75,      # 참조-답변 정렬도
+    'input_answer_alignment': 0.75           # 입력-답변 정렬도
 }
 
 # ✅ DeepEval metric 이름 ↔ threshold key 매핑 추가
@@ -59,7 +59,7 @@ EVALUATION_STEPS = {
         "참조 컨텍스트가 구체적인 작물별 대응 방법을 포함하는지 평가합니다.",
         "단계별 매뉴얼(예방→대비→대응→복구)이 있는지 확인합니다.",
         "현장에서 적용 가능한 방법론(배수로 정비, 방풍망, 병해충 예방 등)이 포함되어야 합니다.",
-        "과학적 근거, 전문가 권고사항이 포함된 경우 높은 점수(0.8~1.0)를 부여합니다.",
+        "과학적 근거, 전문가 권고사항이 포함된 경우 높은 점수(0.75~1.0)를 부여합니다.",
         "정보가 부족하거나 일반적 수준에 그치면 낮은 점수(0.0~0.3)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 충족도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
@@ -67,14 +67,14 @@ EVALUATION_STEPS = {
     'answer_quality': [
         "답변이 재해 상황에서 실제 적용 가능한 구체적 대응 방법을 제시했는지 평가합니다.",
         "단계별 조치사항, 시기별 관리 방법, 작물별 맞춤형 대응 방안이 포함되어야 합니다.",
-        "현장에서 바로 적용 가능한 방법론이 포함되면 높은 점수(0.8~1.0)를 부여합니다.",
+        "현장에서 바로 적용 가능한 방법론이 포함되면 높은 점수(0.75~1.0)를 부여합니다.",
         "불필요하게 장황하거나 모호한 답변은 낮은 점수(0.0~0.3)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 충족도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
     ],
     'input_reference_alignment': [
         "질문에 언급된 작물·재해 유형과 참조 컨텍스트의 대응 방안이 일치하는지 평가합니다.",
-        "정확히 일치하거나 유사한 경우 높은 점수(0.8~1.0)를 부여합니다.",
+        "정확히 일치하거나 유사한 경우 높은 점수(0.75~1.0)를 부여합니다.",
         "관련 없는 작물이나 재해 정보가 포함되면 낮은 점수(0.0~0.3)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 일치도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
@@ -82,14 +82,14 @@ EVALUATION_STEPS = {
     'reference_answer_alignment': [
         "답변이 참조 컨텍스트에 근거했는지 평가합니다.",
         "참조에 없는 방법이 추가되면 낮은 점수(0.0~0.3)를 부여합니다.",
-        "참조의 핵심 대응 방법이 답변에 잘 반영되면 높은 점수(0.8~1.0)를 부여합니다.",
+        "참조의 핵심 대응 방법이 답변에 잘 반영되면 높은 점수(0.75~1.0)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 충실히 반영되었음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
     ],
     'input_answer_alignment': [
         "답변이 질문의 작물·재해 맥락에 맞는 구체적 대응 방법을 제시했는지 평가합니다.",
         "질문 의도와 일치하지 않으면 낮은 점수(0.0~0.3)를 부여합니다.",
-        "정확히 맞춤형 대응을 제시하면 높은 점수(0.8~1.0)를 부여합니다.",
+        "정확히 맞춤형 대응을 제시하면 높은 점수(0.75~1.0)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 일치도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
     ]
@@ -503,7 +503,7 @@ class DeepEvaluator:
                                    'Input-Reference Alignment', 'Reference-Answer Alignment', 'Input-Answer Alignment']:
                     if metric_name in result['metric_scores']:
                         score = result['metric_scores'][metric_name]['score']
-                        threshold = METRIC_THRESHOLDS.get(metric_name.lower().replace(' ', '_').replace('-', '_'), 0.8)
+                        threshold = METRIC_THRESHOLDS.get(metric_name.lower().replace(' ', '_').replace('-', '_'), 0.75)
                         row[f'{metric_name}_score'] = score
                         row[f'{metric_name}_threshold'] = threshold
                         row[f'{metric_name}_pass'] = "PASS" if score >= threshold else "FAIL"

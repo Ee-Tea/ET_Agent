@@ -5,32 +5,32 @@
 PROJECT_ROOT = r"C:\FinalPrj\ET_Agent"
 
 # 평가할 데이터셋 파일 경로 설정
-CSV_FILE_PATH = "./farmer/sales/data/sales_golden_dataset_20250912_161133.csv"
+CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250916_181133.csv"
 
 # 결과 저장 설정
-OUTPUT_DIRECTORY = "./farmer/sales/data"                # 결과 저장 디렉토리
-OUTPUT_FORMAT = "json"                                  # 출력 형식: "json" 또는 "csv"
-OUTPUT_FILENAME_PREFIX = "sales_deepeval_results"       # 파일명 접두사 자동으로 타임스탬프(YYYYMMDD_HHMM)가 붙음
+OUTPUT_DIRECTORY = "./farmer/disaster/data"                # 결과 저장 디렉토리
+OUTPUT_FORMAT = "csv"                                   # 출력 형식: "json" 또는 "csv"
+OUTPUT_FILENAME_PREFIX = "disaster_deepeval_results"       # 파일명 접두사 자동으로 타임스탬프(YYYYMMDD_HHMM)가 붙음
 
 # 골든셋 컬럼명 설정 (각 데이터셋에 맞게 오른쪽 수정)
 GOLDEN_DATASET_COLUMNS = {
-    'question': 'user_input',               # 사용자 질문 컬럼명
-    'reference': 'reference_contexts',      # 참조 컨텍스트 컬럼명
-    'answer': 'reference'                   # 참조 답변 컬럼명
+    'question': 'question',               # 사용자 질문 컬럼명
+    'reference': 'contexts',      # 참조 컨텍스트 컬럼명
+    'answer': 'ground_truth'                   # 참조 답변 컬럼명
 }
 
 # 평가 설정
 MAX_EVALUATION_ROWS = None      # 평가할 최대 행 수 (None이면 전체 평가)
-FILTER_BY_THRESHOLD = False     # True: 메트릭 임계값 미달만 저장, False: 전체 저장
+FILTER_BY_THRESHOLD = True      # True: 모든 메트릭 임계값을 넘는 것만 저장, False: 전체 저장
 
 # 메트릭 임계값 설정
 METRIC_THRESHOLDS = {
-    'input_quality': 0.9,                   # 입력 질문 품질
-    'reference_quality': 0.9,               # 참조 컨텍스트 품질
-    'answer_quality': 0.9,                  # 답변 품질
-    'input_reference_alignment': 0.9,       # 입력-참조 정렬도
-    'reference_answer_alignment': 0.9,      # 참조-답변 정렬도
-    'input_answer_alignment': 0.9           # 입력-답변 정렬도
+    'input_quality': 0.8,                   # 입력 질문 품질
+    'reference_quality': 0.8,               # 참조 컨텍스트 품질
+    'answer_quality': 0.8,                  # 답변 품질
+    'input_reference_alignment': 0.8,       # 입력-참조 정렬도
+    'reference_answer_alignment': 0.8,      # 참조-답변 정렬도
+    'input_answer_alignment': 0.8           # 입력-답변 정렬도
 }
 
 # =============================================================================
@@ -402,25 +402,28 @@ class DeepEvaluator:
             file_extension = "json" if OUTPUT_FORMAT.lower() == "json" else "csv"
             output_path = os.path.join(OUTPUT_DIRECTORY, f"{OUTPUT_FILENAME_PREFIX}_{timestamp}.{file_extension}")
         
-        # 결과 필터링 (메트릭별 임계값 기준)
+        # 결과 필터링 (모든 메트릭 임계값을 넘는 것만 저장)
         if FILTER_BY_THRESHOLD:
             filtered_results = []
             for result in self.evaluation_results:
                 metric_scores = result.get('metric_scores', {})
                 
-                # 각 메트릭별로 임계값 미달인지 확인
-                below_threshold = False
+                # 모든 메트릭이 임계값을 넘는지 확인
+                all_above_threshold = True
                 for metric_name, threshold in METRIC_THRESHOLDS.items():
                     if metric_name in metric_scores:
                         score = metric_scores[metric_name].get('score', 0)
                         if score < threshold:
-                            below_threshold = True
+                            all_above_threshold = False
                             break
+                    else:
+                        all_above_threshold = False
+                        break
                 
-                if below_threshold:
+                if all_above_threshold:
                     filtered_results.append(result)
             
-            print(f"🔍 메트릭 임계값 필터링 적용: {len(self.evaluation_results)}개 중 {len(filtered_results)}개 저장")
+            print(f"🔍 모든 메트릭 임계값을 넘는 것만 필터링: {len(self.evaluation_results)}개 중 {len(filtered_results)}개 저장")
             results_to_save = filtered_results
         else:
             results_to_save = self.evaluation_results
@@ -458,11 +461,25 @@ class DeepEvaluator:
             # CSV 형식으로 저장
             csv_data = []
             for result in results_to_save:
+                # 모든 메트릭이 임계값을 넘는지 확인
+                metric_scores = result.get('metric_scores', {})
+                all_pass = True
+                for metric_name, threshold in METRIC_THRESHOLDS.items():
+                    if metric_name in metric_scores:
+                        score = metric_scores[metric_name].get('score', 0)
+                        if score < threshold:
+                            all_pass = False
+                            break
+                    else:
+                        all_pass = False
+                        break
+                
                 row = {
                     'question': result['question'],
                     'answer': result['answer'],
                     'reference': result['reference'],
                     'overall_score': result['overall_score'],
+                    'all_metrics_pass': "PASS" if all_pass else "FAIL",
                     'timestamp': result['timestamp']
                 }
                 
@@ -470,12 +487,16 @@ class DeepEvaluator:
                 for metric_name in ['Input Quality', 'Reference Quality', 'Answer Quality', 
                                    'Input-Reference Alignment', 'Reference-Answer Alignment', 'Input-Answer Alignment']:
                     if metric_name in result['metric_scores']:
-                        row[f'{metric_name}_score'] = result['metric_scores'][metric_name]['score']
-                        row[f'{metric_name}_success'] = result['metric_scores'][metric_name]['success']
+                        score = result['metric_scores'][metric_name]['score']
+                        threshold = METRIC_THRESHOLDS.get(metric_name.lower().replace(' ', '_').replace('-', '_'), 0.9)
+                        row[f'{metric_name}_score'] = score
+                        row[f'{metric_name}_threshold'] = threshold
+                        row[f'{metric_name}_pass'] = "PASS" if score >= threshold else "FAIL"
                         row[f'{metric_name}_reason'] = result['metric_scores'][metric_name]['reason']
                     else:
                         row[f'{metric_name}_score'] = 0.0
-                        row[f'{metric_name}_success'] = False
+                        row[f'{metric_name}_threshold'] = METRIC_THRESHOLDS.get(metric_name.lower().replace(' ', '_').replace('-', '_'), 0.9)
+                        row[f'{metric_name}_pass'] = "FAIL"
                         row[f'{metric_name}_reason'] = "평가 실패"
                 
                 csv_data.append(row)

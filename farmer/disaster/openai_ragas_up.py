@@ -19,12 +19,13 @@ from datetime import datetime
 import fitz  # PyMuPDF
 import easyocr
 import pdfplumber
+import numpy as np
 from langchain.schema import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from ragas.testset import TestsetGenerator
 from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import OpenAIEmbeddings
+from ragas.embeddings import embedding_factory
 from ragas.testset.persona import Persona
 from ragas.testset.transforms.splitters import HeadlineSplitter
 from ragas.testset.transforms.extractors.llm_based import NERExtractor
@@ -44,8 +45,8 @@ PDF_DIR = "./farmer/disaster/data"
 SINGLE_PDF_PATH = "./farmer/disaster/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
 IMAGE_DIR = ""
 TARGET_QUESTIONS = 50   # 🔥 생성할 질문 수
-CHUNK_SIZE = 900       # db_disaster.py와 동일하게 설정
-CHUNK_OVERLAP = 150    # db_disaster.py와 동일하게 설정
+CHUNK_SIZE = 900      # 더 긴 context로 변경
+CHUNK_OVERLAP = 150    # overlap도 비례적으로 증가
 
 # ===================== 전처리 (OCR + 표 파싱) =====================
 ocr_reader = None
@@ -229,7 +230,7 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         temperature=0.4,  # 창의성과 일관성의 균형
         max_tokens=2000   # 더 긴 답변 생성
     ))
-    generator_embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+    generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")
 
     personas = get_personas(mode)
     transforms = [HeadlineSplitter(), NERExtractor()]
@@ -241,9 +242,7 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
     )
 
     # 안정성: SingleHop만 사용 (단일 페르소나)
-    query = SingleHopSpecificQuerySynthesizer(
-        llm=generator_llm
-    )
+    query = SingleHopSpecificQuerySynthesizer(llm=generator_llm)
     # 한국어 프롬프트 설정 (동기 방식)
     try:
         # adapt_prompts를 동기적으로 호출
@@ -261,6 +260,16 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         transforms=transforms,
         query_distribution=[(query, 1.0)]
     )
+    
+        # 🔥 관련성 높은 context만 추려내는 함수
+    def get_top_k_contexts(query: str, documents: list[Document], embedder, k: int = 5) -> list[str]:
+        query_vec = embedder.embed_query(query)
+        doc_vecs = embedder.embed_documents([doc.page_content for doc in documents])
+        scores = np.dot(doc_vecs, query_vec) / (
+            np.linalg.norm(doc_vecs, axis=1) * np.linalg.norm(query_vec)
+        )
+        top_idx = np.argsort(scores)[::-1][:k]
+        return [documents[i].page_content for i in top_idx]
 
     eval_dataset = dataset.to_evaluation_dataset()
 
@@ -269,13 +278,12 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         print(f"\n질문 {i+1}")
         print("  Question:", sample.user_input)
         print("  Ground Truth:", sample.reference)
-        print(f"  Contexts ({len(sample.reference_contexts)}개):")
-        for j, ctx in enumerate(sample.reference_contexts):
-            print(f"    [{j+1}] {ctx[:100]}..." if len(ctx) > 100 else f"    [{j+1}] {ctx}")
+        filtered_contexts = get_top_k_contexts(sample.user_input, documents, generator_embeddings, k=5)
+        print("  Contexts:", filtered_contexts)
         results.append({
             "question": sample.user_input,
             "ground_truth": sample.reference,
-            "contexts": sample.reference_contexts
+            "contexts": filtered_contexts  # 필터링된 context 사용
         })
 
     # 저장 (타임스탬프 추가) - farmer/disaster/data 폴더에 저장

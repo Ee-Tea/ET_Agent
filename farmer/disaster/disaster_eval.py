@@ -471,8 +471,9 @@ class DeepEvaluator:
                 metric_scores = result.get('metric_scores', {})
                 all_pass = True
                 for metric_name, threshold in METRIC_THRESHOLDS.items():
-                    if metric_name in metric_scores:
-                        score = metric_scores[metric_name].get('score', 0)
+                    mapped_name = NAME_MAP[metric_name]  # ✅ 매핑된 이름 사용
+                    if mapped_name in metric_scores:
+                        score = metric_scores[mapped_name].get('score', 0)
                         if score < threshold:
                             all_pass = False
                             break

@@ -447,14 +447,32 @@ async def chat(request: Request):
             chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id") or ""
         if not session_id_in:
             session_id_in = request.headers.get("x-session-id") or request.cookies.get("session_id") or ""
+        # 쿠키/헤더로 받은 chat_id가 숫자가 아니면 무시
+        if chat_id and not chat_id.isdigit():
+            chat_id = ""
         if hybrid_session_service:
             try:
                 await hybrid_session_service.init_postgres()
                 # session_id로 chat_id 역참조
-                if not chat_id and session_id_in:
+                if session_id_in:
                     row = await hybrid_session_service.get_session_by_session_id(session_id_in)
                     if row and str(row.get("user_id")) == str(user_id):
-                        chat_id = str(row.get("chat_id"))
+                        mapped_chat = str(row.get("chat_id") or "")
+                        # 매핑값이 숫자가 아니면 자가 치유: 새 번호로 갱신
+                        if mapped_chat and not mapped_chat.isdigit():
+                            try:
+                                new_chat = await hybrid_session_service.get_next_chat_id(user_id)
+                                async with hybrid_session_service.pool.acquire() as conn:
+                                    await conn.execute(
+                                        "UPDATE chat_sessions SET chat_id=$1, updated_at=NOW() WHERE session_id=$2",
+                                        new_chat,
+                                        session_id_in,
+                                    )
+                                mapped_chat = new_chat
+                            except Exception:
+                                mapped_chat = ""
+                        if not chat_id and mapped_chat:
+                            chat_id = mapped_chat
                 # 없으면 신규 채번
                 if not chat_id:
                     chat_id = await hybrid_session_service.get_next_chat_id(user_id)
@@ -985,7 +1003,8 @@ async def get_pdf_status(
         return {"status": status, "progress": progress, "session": session_key}
     except Exception as e:
         logger.exception(f"/pdf-status failed: {e}")
-        raise HTTPException(status_code=500, detail=f"PDF status retrieval failed: {str(e)}")
+        # 프론트는 폴링 중이므로 200으로 안전하게 대응
+        return {"status": "idle", "progress": 0.0, "session": None}
 
 # ========== PDF 파일 엔드포인트 ==========
 

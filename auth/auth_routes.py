@@ -141,20 +141,12 @@ async def google_callback(
 
     auth_response = await auth_service.authenticate_google(db, code)
 
-    # 1) 여기서 8124 도메인에 쿠키 'access_token'을 확실히 심음
-    html = f"""<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Login OK</title></head>
-  <body>
-    <p>로그인 완료! 잠시 후 이동합니다...</p>
-    <script>
-      // 2) 쿠키가 박힌 뒤 프론트(3000)로 이동
-      window.location.replace("{settings.FRONTEND_BASE_URL}/?login=ok");
-    </script>
-  </body>
-</html>"""
-
-    resp = HTMLResponse(content=html, status_code=200)
+    # Redirect + Set-Cookie: 8124가 직접 심고 프론트로 즉시 이동
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    hostname = (host.split(":", 1)[0] or "").lower()
+    cookie_domain = None if hostname in {"localhost", "127.0.0.1"} else hostname
+    redirect_to = f"{settings.FRONTEND_BASE_URL}/?login=ok"
+    resp = RedirectResponse(url=redirect_to, status_code=302)
     # 표준 세션 쿠키
     resp.set_cookie(
         key="auth_session",
@@ -164,6 +156,7 @@ async def google_callback(
         samesite="lax",
         path="/",
         max_age=auth_response.token.expires_in,
+        domain=cookie_domain,
     )
     # 하위 호환: access_token 유지(HTTPOnly)
     try:
@@ -175,6 +168,7 @@ async def google_callback(
             samesite="lax",
             path="/",
             max_age=auth_response.token.expires_in,
+            domain=cookie_domain,
         )
     except Exception:
         pass
@@ -188,6 +182,7 @@ async def google_callback(
             samesite="lax",
             path="/",
             max_age=auth_response.token.expires_in,
+            domain=cookie_domain,
         )
     except Exception:
         pass
@@ -228,18 +223,12 @@ async def kakao_callback(
 
     auth_response = await kakao_oauth_service.authenticate(db, code)
 
-    html = f"""<!doctype html>
-<html>
-  <head><meta charset=\"utf-8\"><title>Login OK</title></head>
-  <body>
-    <p>카카오 로그인 완료! 잠시 후 이동합니다...</p>
-    <script>
-      window.location.replace(\"{settings.FRONTEND_BASE_URL}/?login=ok\");
-    </script>
-  </body>
-</html>"""
-
-    resp = HTMLResponse(content=html, status_code=200)
+    # Redirect + Set-Cookie: 8124가 직접 심고 프론트로 즉시 이동
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    hostname = (host.split(":", 1)[0] or "").lower()
+    cookie_domain = None if hostname in {"localhost", "127.0.0.1"} else hostname
+    redirect_to = f"{settings.FRONTEND_BASE_URL}/?login=ok"
+    resp = RedirectResponse(url=redirect_to, status_code=302)
     resp.delete_cookie("kakao_oauth_state", path="/")
     resp.set_cookie(
         key="auth_session",
@@ -249,6 +238,7 @@ async def kakao_callback(
         samesite="lax",
         path="/",
         max_age=auth_response.token.expires_in,
+        domain=cookie_domain,
     )
     try:
         resp.set_cookie(
@@ -259,6 +249,7 @@ async def kakao_callback(
             samesite="lax",
             path="/",
             max_age=auth_response.token.expires_in,
+            domain=cookie_domain,
         )
     except Exception:
         pass
@@ -271,6 +262,7 @@ async def kakao_callback(
             samesite="lax",
             path="/",
             max_age=auth_response.token.expires_in,
+            domain=cookie_domain,
         )
     except Exception:
         pass
@@ -310,14 +302,17 @@ async def logout():
     """Logout user: delete auth cookies for both with/without domain."""
     from urllib.parse import urlparse
     resp = JSONResponse({"message": "Logged out"})
-    frontend_host = None
     try:
-        frontend_host = urlparse(settings.FRONTEND_BASE_URL).hostname or None
+        _host = urlparse(settings.FRONTEND_BASE_URL).hostname or None
+        if _host in {"localhost", "127.0.0.1"}:
+            cookie_domain = None
+        else:
+            cookie_domain = _host
     except Exception:
-        frontend_host = None
+        cookie_domain = None
 
     # delete with and without domain to cover how cookie was set
-    for dom in (None, frontend_host):
+    for dom in (None, cookie_domain):
         try:
             resp.delete_cookie("auth_session", path="/", domain=dom)
         except Exception:
@@ -506,18 +501,12 @@ async def naver_callback(
 
     auth_response = await naver_oauth_service.authenticate(db, code, state)
 
-    html = f"""<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Login OK</title></head>
-  <body>
-    <p>네이버 로그인 완료! 잠시 후 이동합니다...</p>
-    <script>
-      window.location.replace("{settings.FRONTEND_BASE_URL}/?login=ok");
-    </script>
-  </body>
-</html>"""
-
-    resp = HTMLResponse(content=html, status_code=200)
+    # Redirect + Set-Cookie: 8124가 직접 심고 프론트로 즉시 이동
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    hostname = (host.split(":", 1)[0] or "").lower()
+    cookie_domain = None if hostname in {"localhost", "127.0.0.1"} else hostname
+    redirect_to = f"{settings.FRONTEND_BASE_URL}/?login=ok"
+    resp = RedirectResponse(url=redirect_to, status_code=302)
     resp.delete_cookie("naver_oauth_state", path="/")
     # 표준 세션 쿠키 설정
     resp.set_cookie(
@@ -528,6 +517,7 @@ async def naver_callback(
         samesite="lax",
         path="/",
         max_age=auth_response.token.expires_in,
+        domain=cookie_domain,
     )
     # 하위 호환: access_token(HTTPOnly)도 유지
     try:
@@ -539,6 +529,7 @@ async def naver_callback(
             samesite="lax",
             path="/",
             max_age=auth_response.token.expires_in,
+            domain=cookie_domain,
         )
     except Exception:
         pass
@@ -551,6 +542,7 @@ async def naver_callback(
             samesite="lax",
             path="/",
             max_age=auth_response.token.expires_in,
+            domain=cookie_domain,
         )
     except Exception:
         pass

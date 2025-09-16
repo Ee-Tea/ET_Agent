@@ -7,6 +7,9 @@ import os
 import json
 import sys
 import asyncio
+import logging
+import time
+import uuid
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
@@ -57,6 +60,11 @@ LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://localhost:8123")
 orchestrator = None
 teacher = None
 hybrid_session_service = None
+
+# 로거 설정
+logger = logging.getLogger("et_agent_bff")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 # langgraph-api 호출 함수 추가
 async def call_langgraph_api(endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -283,6 +291,27 @@ app.add_middleware(
 # 라우터는 메인과 중복을 피하기 위해 사용하지 않음 (중복 라우팅 제거)
 # auth 라우터는 별도 서비스(auth-api)로 분리되어 HTTP로 통신
 
+# ========== 요청 로깅 미들웨어 ==========
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    req_id = request.headers.get("x-request-id") or str(uuid.uuid4())[:8]
+    method = request.method
+    path = request.url.path
+    user_id_hdr = request.headers.get("x-user-id") or request.cookies.get("user_id")
+    chat_id_hdr = request.headers.get("x-chat-id") or request.cookies.get("chat_id")
+    logger.info(f"[{req_id}] -> {method} {path} uid={user_id_hdr} cid={chat_id_hdr}")
+    try:
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        logger.info(f"[{req_id}] <- {response.status_code} {method} {path} {duration_ms:.1f}ms")
+        response.headers["x-request-id"] = req_id
+        return response
+    except Exception as e:
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        logger.exception(f"[{req_id}] !! {method} {path} {duration_ms:.1f}ms error={e}")
+        raise
+
 from fastapi import Header
 
 @app.get("/me")
@@ -367,6 +396,7 @@ async def health_check():
             services=services
         )
     except Exception as e:
+        logger.exception(f"/health failed: {e}")
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
 
@@ -376,6 +406,7 @@ async def chat(request: Request):
     global orchestrator, hybrid_session_service
     
     try:
+        req_id = request.headers.get("x-request-id") or str(uuid.uuid4())[:8]
         # 프록시(프론트) 경유 시 바디가 비거나 포맷이 깨질 수 있어 관대한 파싱 적용
         try:
             payload = await request.json()
@@ -406,6 +437,8 @@ async def chat(request: Request):
         if not msg or not msg.strip():
             msg = os.getenv("DEFAULT_CHAT_PROMPT", "안녕하세요")
 
+        logger.info(f"[{req_id}] /chat uid={user_id} cid={chat_id} msg_len={len(msg)}")
+
         # 사용자 메시지를 하이브리드 서비스에 저장
         if hybrid_session_service:
             await hybrid_session_service.add_chat_message(
@@ -422,6 +455,7 @@ async def chat(request: Request):
             local_orchestrator = MainOrchestrator(user_id, chat_id, hybrid_session_service)
             response_text = local_orchestrator.process_query(msg)
         except ImportError as e:
+            logger.exception(f"[{req_id}] MainOrchestrator import failed: {e}")
             raise HTTPException(status_code=500, detail=f"MainOrchestrator import failed: {e}")
         
         # 결과 포맷팅
@@ -432,6 +466,8 @@ async def chat(request: Request):
             "session_id": f"{user_id}:{chat_id}",
             "artifacts": None
         }
+
+        logger.info(f"[{req_id}] /chat done uid={user_id} cid={chat_id} resp_len={len(str(result.get('response') or ''))}")
         
         # 보강: 챗봇 응답 저장 시점에 사용자 메시지도 한 번 더 저장 (중복 방지 메타태그 포함)
         if hybrid_session_service:
@@ -468,6 +504,7 @@ async def chat(request: Request):
         )
         
     except Exception as e:
+        logger.exception(f"/chat failed: {e}")
         raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
 
 
@@ -768,17 +805,50 @@ async def get_recent_questions(
 
         # 식별자 없으면 빈 결과 반환 (항상 questions 키 사용)
         if not user_id or not chat_id:
+            logger.info(f"/recent-questions missing ids uid={user_id} cid={chat_id}")
             return {"questions": [], "count": 0, "session": None}
 
         redis = hybrid_session_service.redis
         session_key = f"{user_id}_{chat_id}"
         pattern = f"questions:{session_key}:*"
+        # 최근 생성된 문항 수(added_count) 조회: short_term → shared 순서
+        added_count = 0
+        try:
+            st_key = f"short_term:{session_key}"
+            st_raw = redis.get(st_key)
+            if st_raw:
+                try:
+                    st = json.loads(st_raw)
+                    teacher_data = st.get("teacher", {})
+                    added_count = int(teacher_data.get("added_count", 0) or 0)
+                except Exception:
+                    added_count = 0
+            if added_count <= 0:
+                shared_key = f"shared:{user_id}:{chat_id}"
+                shared_raw = redis.get(shared_key)
+                if shared_raw:
+                    try:
+                        shared = json.loads(shared_raw)
+                        added_count = int(shared.get("added_count", 0) or 0)
+                    except Exception:
+                        added_count = 0
+        except Exception:
+            added_count = 0
+
+        # added_count를 우선하여 실제 반환 개수 결정
+        actual_limit = min(limit, added_count) if added_count > 0 else 0
+
         keys = list(redis.keys(pattern))
         # 키명 기준 역순 정렬 (완전한 시간 순서는 아니지만 근사치)
         keys.sort(reverse=True)
 
+        # 최근 생성된 개수가 0이면 빈 결과 반환
+        if actual_limit == 0:
+            logger.info(f"/recent-questions uid={user_id} cid={chat_id} added_count=0 -> empty")
+            return {"questions": [], "count": 0, "session": f"{user_id}:{chat_id}"}
+
         items: list[dict[str, Any]] = []
-        for key in keys[:limit]:
+        for key in keys[:actual_limit]:
             data = redis.hgetall(key) or {}
             if not data:
                 continue
@@ -797,9 +867,11 @@ async def get_recent_questions(
                 "explanation": data.get("explanation", ""),
                 "subject": data.get("subject", ""),
             })
-
+        
+        logger.info(f"/recent-questions uid={user_id} cid={chat_id} added_count={added_count} keys={len(keys)} items={len(items)}")
         return {"questions": items, "count": len(items), "session": f"{user_id}:{chat_id}"}
-    except Exception:
+    except Exception as e:
+        logger.exception(f"/recent-questions failed: {e}")
         # 어떤 예외가 나도 프론트는 빈 리스트로 계속 진행 가능해야 함
         return {"questions": [], "count": 0, "session": None}
 
@@ -824,6 +896,7 @@ async def get_pdf_status(
 
         # 식별자 없으면 idle로 응답 (프론트 422 방지)
         if not user_id or not chat_id:
+            logger.info(f"/pdf-status missing ids uid={user_id} cid={chat_id}")
             return {"status": "idle", "progress": 0.0, "session": None}
 
         redis = hybrid_session_service.redis
@@ -865,8 +938,10 @@ async def get_pdf_status(
         except Exception:
             progress = 0.0
 
+        logger.info(f"/pdf-status uid={user_id} cid={chat_id} status={status} progress={progress}")
         return {"status": status, "progress": progress, "session": session_key}
     except Exception as e:
+        logger.exception(f"/pdf-status failed: {e}")
         raise HTTPException(status_code=500, detail=f"PDF status retrieval failed: {str(e)}")
 
 # ========== PDF 파일 엔드포인트 ==========

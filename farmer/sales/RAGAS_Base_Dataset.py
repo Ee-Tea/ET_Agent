@@ -60,7 +60,7 @@ if not api_key or not api_id:
     sys.exit(1)
 
 # RAGAS 설정
-TARGET_QUESTIONS = 50  # RAGAS에서 생성할 질문 개수
+TARGET_QUESTIONS = 100  # RAGAS에서 생성할 질문 개수
 
 def fetch_api_data():
     """KAMIS API에서 농산물 가격 정보를 가져오는 함수입니다."""

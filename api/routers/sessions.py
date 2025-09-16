@@ -2,75 +2,104 @@
 세션 관리 API 라우터
 """
 
-from typing import List, Dict, Any
-from fastapi import APIRouter, HTTPException, Query
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, HTTPException, Query, Body
 from datetime import datetime
 
 from ..models import (
     SessionRequest, SessionResponse, SessionListResponse,
     ChatHistoryResponse, ChatHistoryItem
 )
+from api.services.hybrid_session_service import HybridSessionService
+import os
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+# 전역 서비스 (api/main.py에서 쓰는 것과 분리 사용시에는 별도로 초기화 필요)
+_redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
+_postgres_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@langgraph-postgres:5432/postgres")
+_hybrid = HybridSessionService(_redis_url, _postgres_url)
+
 
 # 임시 세션 저장소 (실제로는 Redis나 DB 사용)
 sessions_db: Dict[str, Dict[str, Any]] = {}
 
 @router.post("/", response_model=SessionResponse)
 async def create_session(request: SessionRequest):
-    """새 세션 생성"""
+    """새 세션 생성: 요구사항에 맞게 chat_id 증가, title은 최초 메시지 저장 시 설정"""
     try:
-        # 채팅 ID가 없으면 자동 생성
-        if not request.chat_id:
-            import uuid
-            request.chat_id = str(uuid.uuid4())[:8]
-        
-        session_id = f"{request.user_id}:{request.chat_id}"
-        
-        # 세션 정보 저장
+        # DB 준비
+        await _hybrid.init_postgres()
+
+        user_id = request.user_id or "guest_anon"
+        # chat_id 자동 증가 규칙
+        chat_id = request.chat_id or await _hybrid.get_next_chat_id(user_id)
+
+        # 해시 session_id 생성/보장
+        session_id = await _hybrid.get_or_create_session_id(user_id, chat_id, request.service_type)
+
+        # 메타데이터 저장(UPSERT)
+        await _hybrid.save_session_metadata(
+            user_id,
+            chat_id,
+            {
+                "session_id": session_id,
+                "status": "active",
+                "service_type": request.service_type,
+            },
+            title=None,
+        )
+
+        # 인메모리 캐시에도 보관(호환)
         session_data = {
             "session_id": session_id,
-            "user_id": request.user_id,
-            "chat_id": request.chat_id,
+            "user_id": user_id,
+            "chat_id": chat_id,
             "created_at": datetime.now().isoformat(),
             "status": "active",
             "service_type": request.service_type,
-            "message_count": 0
+            "message_count": 0,
         }
-        
         sessions_db[session_id] = session_data
-        
+
         return SessionResponse(**session_data)
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Session creation failed: {str(e)}")
 
 @router.get("/", response_model=SessionListResponse)
 async def list_sessions(
     user_id: str = Query(..., description="사용자 ID"),
-    limit: int = Query(10, description="최대 결과 수"),
+    limit: int = Query(50, description="최대 결과 수"),
     offset: int = Query(0, description="오프셋")
 ):
-    """사용자의 세션 목록 조회"""
+    """사용자의 세션 목록 조회 (오래된 것 하단 노출 요구에 맞게 created_at 오름차순 반환)"""
     try:
-        # 사용자 세션 필터링
-        user_sessions = [
-            session for session in sessions_db.values()
-            if session["user_id"] == user_id
-        ]
-        
-        # 정렬 (최신순)
-        user_sessions.sort(key=lambda x: x["created_at"], reverse=True)
-        
-        # 페이징
-        total = len(user_sessions)
-        sessions = user_sessions[offset:offset + limit]
-        
-        return SessionListResponse(
-            sessions=[SessionResponse(**session) for session in sessions],
-            total=total
-        )
-        
+        await _hybrid.init_postgres()
+        async with _hybrid.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT session_id, user_id, chat_id, created_at, 'active' AS status,
+                       COALESCE((session_data->>'service_type'),'teacher') AS service_type
+                FROM chat_sessions
+                WHERE user_id = $1
+                ORDER BY created_at ASC
+                LIMIT $2 OFFSET $3
+                """,
+                user_id, limit, offset,
+            )
+            sessions = [
+                SessionResponse(
+                    session_id=r["session_id"],
+                    user_id=r["user_id"],
+                    chat_id=str(r["chat_id"]),
+                    created_at=r["created_at"].isoformat() if hasattr(r["created_at"], 'isoformat') else str(r["created_at"]),
+                    status=r["status"],
+                    service_type=r["service_type"],
+                )
+                for r in rows
+            ]
+            total_row = await conn.fetchrow("SELECT COUNT(*) AS c FROM chat_sessions WHERE user_id=$1", user_id)
+            return SessionListResponse(sessions=sessions, total=int(total_row["c"]))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Session listing failed: {str(e)}")
 
@@ -110,45 +139,29 @@ async def delete_session(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Session deletion failed: {str(e)}")
 
-@router.get("/{session_id}/history", response_model=ChatHistoryResponse)
-async def get_session_history(
-    session_id: str,
-    limit: int = Query(50, description="최대 메시지 수"),
-    offset: int = Query(0, description="오프셋")
-):
-    """세션 히스토리 조회"""
+@router.get("/{session_id}/messages")
+async def get_session_messages(session_id: str, limit: int = Query(1000)):
+    """세션 메시지 조회 (오름차순)"""
     try:
-        if session_id not in sessions_db:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # 실제로는 orchestrator의 memory에서 히스토리를 가져와야 함
-        # 임시로 빈 히스토리 반환
-        history = []
-        
-        # 예시 히스토리 데이터
-        if session_id in sessions_db:
-            session_data = sessions_db[session_id]
-            if session_data.get("message_count", 0) > 0:
-                history = [
-                    ChatHistoryItem(
-                        timestamp=session_data["created_at"],
-                        user_message="안녕하세요",
-                        bot_response="안녕하세요! 무엇을 도와드릴까요?",
-                        service_used="teacher",
-                        confidence=1.0
-                    )
-                ]
-        
-        return ChatHistoryResponse(
-            session_id=session_id,
-            history=history[offset:offset + limit],
-            total_count=len(history)
-        )
-        
-    except HTTPException:
-        raise
+        await _hybrid.init_postgres()
+        messages = await _hybrid.get_messages_by_session_id(session_id, limit=limit)
+        return messages
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"History retrieval failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Messages retrieval failed: {str(e)}")
+
+@router.post("/{session_id}/messages")
+async def add_session_message(
+    session_id: str,
+    content: str = Body(..., embed=True),
+    role: str = Body(..., embed=True),
+):
+    """세션에 메시지 저장: role=user|assistant"""
+    try:
+        await _hybrid.init_postgres()
+        await _hybrid.add_message_by_session_id(session_id, role, content)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Message save failed: {str(e)}")
 
 @router.put("/{session_id}/status")
 async def update_session_status(

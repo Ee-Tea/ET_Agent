@@ -288,8 +288,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 라우터는 메인과 중복을 피하기 위해 사용하지 않음 (중복 라우팅 제거)
-# auth 라우터는 별도 서비스(auth-api)로 분리되어 HTTP로 통신
+# 세션 라우터 활성화 (프론트 요구: /api/chat/sessions)
+try:
+    from api.routers.sessions import router as sessions_router
+    app.include_router(sessions_router, prefix="/api/chat")
+except Exception as e:
+    logger.warning(f"sessions router include skipped: {e}")
 
 # ========== 요청 로깅 미들웨어 ==========
 @app.middleware("http")
@@ -429,23 +433,53 @@ async def chat(request: Request):
         msg = str(payload.get("message", "")) if isinstance(payload, dict) else ""
         user_id = str(payload.get("user_id", "")) if isinstance(payload, dict) else ""
         chat_id = str(payload.get("chat_id", "")) if isinstance(payload, dict) else ""
+        session_id_in = str(payload.get("session_id", "")) if isinstance(payload, dict) else ""
 
         if not user_id:
-            user_id = request.headers.get("x-user-id") or request.cookies.get("user_id") or os.getenv("DEFAULT_USER_ID", "api_user")
+            user_id = request.headers.get("x-user-id") or request.cookies.get("user_id") or os.getenv("DEFAULT_USER_ID", "")
+        # 미로그인 게스트 처리
+        if not user_id:
+            import uuid as _uuid
+            user_id = f"guest_{str(_uuid.uuid4())[:8]}"
+
+        # 세션/채팅 식별자 보강
         if not chat_id:
-            chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id") or os.getenv("DEFAULT_CHAT_ID", "api_chat")
+            chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id") or ""
+        if not session_id_in:
+            session_id_in = request.headers.get("x-session-id") or request.cookies.get("session_id") or ""
+        if hybrid_session_service:
+            try:
+                await hybrid_session_service.init_postgres()
+                # session_id로 chat_id 역참조
+                if not chat_id and session_id_in:
+                    row = await hybrid_session_service.get_session_by_session_id(session_id_in)
+                    if row and str(row.get("user_id")) == str(user_id):
+                        chat_id = str(row.get("chat_id"))
+                # 없으면 신규 채번
+                if not chat_id:
+                    chat_id = await hybrid_session_service.get_next_chat_id(user_id)
+                # 세션 보장: 해시 session_id 생성/유지 및 획득
+                ensured_sid = await hybrid_session_service.get_or_create_session_id(
+                    user_id,
+                    chat_id,
+                    service_type="general",
+                    title=None,
+                )
+                session_id_in = ensured_sid or session_id_in
+            except Exception:
+                pass
         if not msg or not msg.strip():
             msg = os.getenv("DEFAULT_CHAT_PROMPT", "안녕하세요")
 
         logger.info(f"[{req_id}] /chat uid={user_id} cid={chat_id} msg_len={len(msg)}")
 
-        # 사용자 메시지를 하이브리드 서비스에 저장
+        # 사용자 메시지를 하이브리드 서비스에 저장 (최초 user 메시지 시 title 자동 설정)
         if hybrid_session_service:
-            await hybrid_session_service.add_chat_message(
-                user_id, 
-                chat_id, 
-                "user", 
-                msg
+            msg_id = await hybrid_session_service.add_chat_message(
+                user_id,
+                chat_id,
+                "user",
+                msg,
             )
         
         # 직접 LangGraph 실행
@@ -469,37 +503,25 @@ async def chat(request: Request):
 
         logger.info(f"[{req_id}] /chat done uid={user_id} cid={chat_id} resp_len={len(str(result.get('response') or ''))}")
         
-        # 보강: 챗봇 응답 저장 시점에 사용자 메시지도 한 번 더 저장 (중복 방지 메타태그 포함)
+        # 에이전트 응답 저장
         if hybrid_session_service:
-            try:
-                await hybrid_session_service.add_chat_message(
-                    user_id,
-                    chat_id,
-                    "user",
-                    msg,
-                    {"source": "post_assistant_save"}
-                )
-            except Exception:
-                pass
-            
-            # 에이전트 응답을 하이브리드 서비스에 저장
-            await hybrid_session_service.add_chat_message(
-                user_id, 
-                chat_id, 
-                "assistant", 
+            _aid = await hybrid_session_service.add_chat_message(
+                user_id,
+                chat_id,
+                "assistant",
                 result.get("response", "응답을 생성할 수 없습니다."),
                 {
                     "service_used": result.get("service_used", "unknown"),
                     "confidence": result.get("confidence", 0.0),
-                    "artifacts": result.get("artifacts")
-                }
+                    "artifacts": result.get("artifacts"),
+                },
             )
         
         return ChatResponse(
             response=result.get("response", "응답을 생성할 수 없습니다."),
             service_used=result.get("service_used", "unknown"),
             confidence=result.get("confidence", 0.0),
-            session_id=result.get("session_id", f"{user_id}:{chat_id}"),
+            session_id=session_id_in or result.get("session_id", f"{user_id}:{chat_id}"),
             artifacts=result.get("artifacts")
         )
         
@@ -789,6 +811,7 @@ async def get_recent_questions(
     request: Request,
     user_id: Optional[str] = Query(None, description="사용자 ID"),
     chat_id: Optional[str] = Query(None, description="채팅 ID"),
+    session_id: Optional[str] = Query(None, description="세션 ID(해시)") ,
     limit: int = Query(10, ge=1, le=100, description="최대 반환 개수"),
 ):
     global hybrid_session_service
@@ -802,6 +825,26 @@ async def get_recent_questions(
             user_id = request.headers.get("x-user-id") or request.cookies.get("user_id")
         if not chat_id:
             chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id")
+
+        # 보강: chat_id가 없고 session_id가 오면 매핑 조회
+        if user_id and not chat_id and session_id:
+            try:
+                await hybrid_session_service.init_postgres()
+                row = await hybrid_session_service.get_session_by_session_id(session_id)
+                if row and str(row.get("user_id")) == str(user_id):
+                    chat_id = str(row.get("chat_id"))
+            except Exception:
+                pass
+
+        # 보강: user_id만 있고 chat_id가 없으면 최근 세션 chat_id로 대체
+        if user_id and not chat_id:
+            try:
+                await hybrid_session_service.init_postgres()
+                sessions = await hybrid_session_service.get_user_sessions(user_id, limit=1)
+                if sessions:
+                    chat_id = str(sessions[0].get("chat_id") or "")
+            except Exception:
+                pass
 
         # 식별자 없으면 빈 결과 반환 (항상 questions 키 사용)
         if not user_id or not chat_id:

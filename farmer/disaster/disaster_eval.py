@@ -1,8 +1,6 @@
 # =============================================================================
 # 환경 설정
 # =============================================================================
-# 프로젝트 루트 경로 설정 (.env가 있는 위치)
-PROJECT_ROOT = r"C:\FinalPrj\ET_Agent"
 
 # 평가할 데이터셋 파일 경로 설정
 CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250916_181133.csv"
@@ -32,6 +30,17 @@ METRIC_THRESHOLDS = {
     'reference_answer_alignment': 0.8,      # 참조-답변 정렬도
     'input_answer_alignment': 0.8           # 입력-답변 정렬도
 }
+
+# ✅ DeepEval metric 이름 ↔ threshold key 매핑 추가
+NAME_MAP = {
+    'input_quality': 'Input Quality',
+    'reference_quality': 'Reference Quality',
+    'answer_quality': 'Answer Quality',
+    'input_reference_alignment': 'Input-Reference Alignment',
+    'reference_answer_alignment': 'Reference-Answer Alignment',
+    'input_answer_alignment': 'Input-Answer Alignment'
+}
+
 
 # =============================================================================
 # 메트릭 평가 단계 설정 (작물 재해 대응 전용)
@@ -94,8 +103,8 @@ from datetime import datetime
 import pandas as pd
 import os
 from dotenv import load_dotenv
-env_path = os.path.join(PROJECT_ROOT, '.env')
-load_dotenv(env_path)
+
+load_dotenv()
 
 # DeepEval 관련 모듈들을 지연 로딩으로 import
 def import_deepeval_modules():
@@ -411,11 +420,11 @@ class DeepEvaluator:
                 # 모든 메트릭이 임계값을 넘는지 확인
                 all_above_threshold = True
                 for metric_name, threshold in METRIC_THRESHOLDS.items():
-                    if metric_name in metric_scores:
-                        score = metric_scores[metric_name].get('score', 0)
-                        if score < threshold:
-                            all_above_threshold = False
-                            break
+                    mapped_name = NAME_MAP[metric_name]   # ✅ 매핑된 이름 사용
+                    score = metric_scores.get(mapped_name, {}).get('score', 0)
+                    if score < threshold:
+                        all_above_threshold = False
+                        break
                     else:
                         all_above_threshold = False
                         break

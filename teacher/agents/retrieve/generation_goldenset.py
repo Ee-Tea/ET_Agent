@@ -75,6 +75,29 @@ def clean_text(text: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+SPLIT_CHARS = 850
+SPLIT_OVERLAP = 140
+
+def split_docs(documents: List[Document]) -> List[Document]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=SPLIT_CHARS,
+        chunk_overlap=SPLIT_OVERLAP,
+        separators=["\n\n", "\n", " ", ""],
+    )
+    chunks = []
+    for d in documents:
+        # 제목(있으면 1줄만) + 본문
+        title = (d.metadata.get("item_title") or "").strip()
+        prefixed = (f"{title}\n{d.page_content}" if title else d.page_content).strip()
+        d2 = Document(page_content=prefixed, metadata=d.metadata)
+        chunks.extend(splitter.split_documents([d2]))
+    # 너무 짧은 파편 제거
+    chunks = [c for c in chunks if len(c.page_content) >= 200]
+    return chunks
+
+
 # ===================== JSON → Document 로더 =====================
 def load_json_docs(root_dir: str) -> List[Document]:
     """
@@ -165,17 +188,29 @@ def get_concept_persona() -> List[Persona]:
     개념 정리/비교/사례 중심의 질문을 유도하는 학습자 페르소나.
     - 출처 묻기/메타 질문 금지, 개념 내용만 질문하도록 제약
     """
+    KOR_GUIDE = (
+        "질문과 정답은 반드시 제공된 컨텍스트의 사실에 근거해야 하며, "
+        "정답에는 컨텍스트 내 표현(정의·키워드)을 가급적 직접 인용하거나 동치로 재서술하라. "
+        "출처/메타질문 금지. 자료 밖 확장·추론 금지. 한 질문은 하나의 핵심 개념만 다뤄라."
+    )
     return [
         Persona(
             name="ConceptSeeker",
             role_description=(
-                "나는 정보처리기사(또는 유사 개념 학습)와 관련된 '개념'을 체계적으로 학습하려는 학습자다. "
-                "핵심 정의, 원리, 특징, 구성요소, 장단점, 유사 개념과의 비교, 적용 사례 등을 구체적으로 알고 싶다. "
-                "질문과 정답은 반드시 제공된 컨텍스트의 사실에 근거해야 하며, "
-                "문서의 출처나 저작권 등 메타 정보를 묻는 질문은 만들지 말고, "
-                "오직 개념 이해/적용/비교를 돕는 질문만 생성하라."
+                "정보처리기사 등 개념 학습용. 핵심 정의/구성요소/특징/비교/역할/제약 등만 묻는다. "
+                + KOR_GUIDE
             ),
         )
+        # Persona(
+        #     name="ConceptSeeker",
+        #     role_description=(
+        #         "나는 정보처리기사(또는 유사 개념 학습)와 관련된 '개념'을 체계적으로 학습하려는 학습자다. "
+        #         "핵심 정의, 원리, 특징, 구성요소, 장단점, 유사 개념과의 비교, 적용 사례 등을 구체적으로 알고 싶다. "
+        #         "질문과 정답은 반드시 제공된 컨텍스트의 사실에 근거해야 하며, "
+        #         "문서의 출처나 저작권 등 메타 정보를 묻는 질문은 만들지 말고, "
+        #         "오직 개념 이해/적용/비교를 돕는 질문만 생성하라."
+        #     ),
+        # )
     ]
 
 # ===================== 골든셋 생성 (한국어 패치 포함) =====================
@@ -234,7 +269,7 @@ def generate_golden_set_from_docs(documents: List[Document]) -> None:
 
     # ===== 저장 (UTF-8/UTF-8-SIG) =====
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join("teacher", "agents", "retrieve", "out")
+    out_dir = os.path.join("teacher", "agents", "retrieve", "goldensets")
     os.makedirs(out_dir, exist_ok=True)
     jsonl_path = os.path.join(out_dir, f"goldenset_{ts}.jsonl")
     csv_path   = os.path.join(out_dir, f"goldenset_{ts}.csv")
@@ -280,6 +315,7 @@ def main():
     print(f"   - 문서 상한 : {MAX_DOCS}, 최소 길이: {MIN_CHARS}, 타깃 문항: {TARGET_QUESTIONS}")
 
     docs = load_json_docs(JSON_CORPUS_DIR)
+    docs = split_docs(docs)
     if not docs:
         print("❌ 로컬 JSON에서 수집된 문서가 없습니다.")
         sys.exit(1)

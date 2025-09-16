@@ -30,7 +30,7 @@ from ragas.metrics import (
     answer_correctness,
 )
 from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 
 
@@ -54,25 +54,31 @@ def load_jsonl(path: str) -> List[Dict[str, Any]]:
 
 
 # ---------- 유틸: agent의 merged_context 문자열 → 리스트 ----------
+def _clip(s: str, n: int) -> str:
+    s = s or ""
+    return s if len(s) <= n else s[:n] + "…"
+
+MAX_CHARS_CTX = 1200
+MAX_CTX_BLOCKS = 5
+MAX_CHARS_ANS = 1500
+
 def split_contexts_from_merged(merged: str) -> List[str]:
-    """
-    retrieve_agent는 병합 컨텍스트를 큰 문자열로 반환하므로
-    - 두 줄 공백 기준 블록 분리
-    - "[문서 i]" 마커가 있으면 추가 분할
-    - 너무 짧은 블록 제거
-    - 상한 10개로 잘라 RAGAS 비용 제어
-    """
     if not merged:
         return []
     parts = [p.strip() for p in re.split(r"\n\s*\n", merged) if p.strip()]
-    refined: List[str] = []
+    refined = []
     for p in parts:
         if "[문서" in p:
             refined += [c.strip() for c in p.split("[문서") if c.strip()]
         else:
             refined.append(p)
     refined = [c for c in refined if len(c) > 20]
-    return refined[:10] or [""]  # 최소 1개 보장
+    refined = [_clip(c, MAX_CHARS_CTX) for c in refined]
+    return refined[:MAX_CTX_BLOCKS] or [""]
+
+
+
+
 
 
 # ---------- 유틸: Milvus 연결 정보 구성 (환경변수 기반) ----------
@@ -214,16 +220,23 @@ def run_evaluation(
     # 3) RAGAS 입력 Dataset 구성 (최소 안전화)
     data = {
         "question":      [_min_sanitize(p["question"]) for p in predictions],
-        "answer":        [_min_sanitize(p["answer"], hint=p["question"]) for p in predictions],
-        "contexts":      [[_min_sanitize(c, hint=p["question"]) for c in (p["contexts"] or [""])] for p in predictions],
-        "ground_truths": [[_min_sanitize(p["ground_truth"], hint=p["question"])] for p in predictions],
-        "reference":     [_min_sanitize(p["ground_truth"], hint=p["question"]) for p in predictions],
+        "answer":        [_clip(_min_sanitize(p["answer"], hint=p["question"]), MAX_CHARS_ANS)
+                        for p in predictions],
+        "contexts":      [[_min_sanitize(c, hint=p["question"]) for c in (p["contexts"] or [""])]
+                        for p in predictions],
+        # ground_truths: 리스트 형태 유지
+        "ground_truths": [[_min_sanitize(p["ground_truth"], hint=p["question"])]
+                        for p in predictions],
+        # reference: 단일 문자열 (대개 ground_truths[0]을 그대로 사용)
+        "reference":     [_min_sanitize(p["ground_truth"], hint=p["question"])
+                        for p in predictions],
     }
     ds = Dataset.from_dict(data)
 
+
     # 4) RAGAS 평가기
     eval_llm = LangchainLLMWrapper(ChatOpenAI(model=openai_model, temperature=0.0, max_tokens=2048))
-    eval_emb = HuggingFaceEmbeddings(model=embedding_model)
+    eval_emb = HuggingFaceEmbeddings(model_name=embedding_model) 
 
     metrics = [
         faithfulness,        # 답변-컨텍스트 충실성

@@ -60,12 +60,13 @@ def search_milvus_fn(state):
     try:
         from common.milvus_helpers import search_milvus_documents
         
-        # MilvusDB에서 검색 (개념 컬렉션)
+        collection_name = milvus_data.get("collection_name", "concepts")
+        k = int(milvus_data.get("top_k", 10))
         results = search_milvus_documents(
             milvus_data=milvus_data,
-            collection_name="concepts",  # 개념 컬렉션에서 검색
+            collection_name=collection_name,
             query=question,
-            k=10
+            k=k
         )
         
         if not results:
@@ -130,7 +131,7 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
     # 2️⃣ builder에 node/edge 추가
     builder.add_node("extract", RunnableLambda(extract_fn))
     builder.add_node("rewrite", RunnableLambda(rewrite_fn))
-    builder.add_node("search_wiki", RunnableLambda(search_wiki_fn))
+    # builder.add_node("search_wiki", RunnableLambda(search_wiki_fn))
     builder.add_node("search_ddg", RunnableLambda(search_ddg_fn))
     builder.add_node("search_milvus", RunnableLambda(search_milvus_fn))
     builder.add_node("merge", RunnableLambda(merge_fn))
@@ -142,16 +143,16 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
 
     # ✅ parallel 메서드는 builder에만 존재
     builder.add_edge("extract", "rewrite")
-    builder.add_edge("rewrite", "search_wiki")
+    # builder.add_edge("rewrite", "search_wiki")
     builder.add_edge("rewrite", "search_ddg")
     builder.add_edge("rewrite", "search_milvus")
-    builder.add_edge("search_wiki", "merge")
+    # builder.add_edge("search_wiki", "merge")
     builder.add_edge("search_ddg", "merge")
     builder.add_edge("search_milvus", "merge")
     builder.add_edge("merge", "answer")
     builder.add_edge("answer", "verify")
     builder.add_conditional_edges("verify",check_verdict, {"pass": END, "fail" : "reinforce"})
-    builder.add_edge("reinforce", "search_wiki")  # 보강된 질문으로 다시 검색 시작
+    # builder.add_edge("reinforce", "search_wiki")  # 보강된 질문으로 다시 검색 시작
     builder.add_edge("reinforce", "search_ddg")  # 보강된 질문으로 다시 검색 시작
     builder.add_edge("reinforce", "search_milvus")  # 보강된 질문으로 다시 검색 시작
 

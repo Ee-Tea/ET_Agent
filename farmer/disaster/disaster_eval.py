@@ -18,7 +18,7 @@ GOLDEN_DATASET_COLUMNS = {
 }
 
 # 평가 설정
-MAX_EVALUATION_ROWS = None      # 평가할 최대 행 수 (None이면 전체 평가)
+MAX_EVALUATION_ROWS = None      # 평가할 최대 행 수 (5개만 테스트)
 FILTER_BY_THRESHOLD = True      # True: 모든 메트릭 임계값을 넘는 것만 저장, False: 전체 저장
 
 # 메트릭 임계값 설정
@@ -423,9 +423,6 @@ class DeepEvaluator:
                     mapped_name = NAME_MAP[metric_name]   # ✅ 매핑된 이름 사용
                     score = metric_scores.get(mapped_name, {}).get('score', 0)
                     if score < threshold:
-                        all_above_threshold = False
-                        break
-                    else:
                         all_above_threshold = False
                         break
                 

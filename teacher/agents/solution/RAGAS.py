@@ -1,6 +1,6 @@
 # RAGAS_runner.py
 import os, json, glob, re, logging, traceback
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 # === 여러분이 올린 파일을 그대로 import ===
@@ -13,6 +13,66 @@ from datasets import Dataset
 # -----------------------------
 # 유틸/전처리/디버그 헬퍼
 # -----------------------------
+
+# === add near top (유틸 아래 아무 곳) ===
+_OPT_PAT = re.compile(
+    r"(?m)^\s*(?:\(?\s*([1-9][0-9]?)\s*\)?[.)]?\s*|([①②③④⑤⑥⑦⑧⑨]))\s*(.+?)\s*$"
+)
+
+_KOR_NUM = {"①":"1","②":"2","③":"3","④":"4","⑤":"5","⑥":"6","⑦":"7","⑧":"8","⑨":"9"}
+
+def _split_q_and_options_from_single_field(full: str) -> Tuple[str, List[str]]:    
+    """
+    '문제 본문 + 줄바꿈 + 1) 보기 ...' 형식을
+    (문제본문, [옵션...])으로 분리.
+    옵션 줄 포맷: '1) ...', '1. ...', '(1) ...', '① ...' 등 지원.
+    """
+    if not isinstance(full, str):
+        return "", []
+    lines = [l.rstrip() for l in full.splitlines()]
+    if not lines:
+        return "", []
+    # 옵션 줄만 골라내기
+    opts: List[Tuple[int, str]] = []
+    opt_rows = []
+    for i, ln in enumerate(lines):
+        m = _OPT_PAT.match(ln)
+        if m:
+            n = m.group(1) or _KOR_NUM.get(m.group(2) or "", "")
+            try:
+                num = int(n)
+            except Exception:
+                continue
+            opts.append((num, m.group(3).strip()))
+            opt_rows.append(i)
+
+    if not opts:
+        # 옵션이 전혀 없으면 원문 그대로 문제 본문만 반환
+        q_text = "\n".join(lines).strip()
+        return q_text, []
+
+    # 문제 본문은 '옵션 시작 이전 줄들'
+    first_opt_row = min(opt_rows)
+    q_text = "\n".join(lines[:first_opt_row]).strip()
+    # 1..N 순으로 정렬 후 텍스트만
+    opts_sorted = [t for _, t in sorted(opts, key=lambda x: x[0])]
+    return q_text, opts_sorted
+
+
+def _extract_gt_from_blob(gt_blob: str) -> Tuple[Optional[int], str]:
+    
+    """
+    '정답: 4\n풀이: ...\n과목: 소프트웨어 설계'에서
+    (정답번호, 과목)을 뽑는다.
+    """
+    if not isinstance(gt_blob, str):
+        return None, ""
+    m_num = re.search(r"정\s*답\s*[:：]\s*([0-9]+)", gt_blob)
+    gt_idx = int(m_num.group(1)) if m_num else None
+    m_sub = re.search(r"과\s*목\s*[:：]\s*([^\n\r]+)", gt_blob)
+    gt_sub = (m_sub.group(1).strip() if m_sub else "").strip()
+    return gt_idx, gt_sub
+
 from types import SimpleNamespace
 
 # 환경 스위치: 원문 그대로 쓸지 여부(1이면 그대로 사용)
@@ -324,40 +384,61 @@ def run_one_golden_json(
 ) -> Dict[str, Any]:
     os.makedirs(out_dir, exist_ok=True)
 
-    with open(json_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    def _load_golden_items(json_path: str) -> List[Dict[str, Any]]:
+        with open(json_path, "r", encoding="utf-8") as f:
+            txt = f.read().strip()
+        items: List[Dict[str, Any]] = []
+        # 1) JSON 배열/객체 시도
+        try:
+            raw = json.loads(txt)
+            if isinstance(raw, list):
+                items = raw
+            elif isinstance(raw, dict) and "questions" in raw and isinstance(raw["questions"], list):
+                items = raw["questions"]
+            elif isinstance(raw, dict):
+                items = [raw]
+        except Exception:
+            # 2) JSONL 시도
+            items = []
+            for line in txt.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    pass
+        if not items:
+            raise ValueError(f"지원하지 않는 JSON/JSONL 구조: {json_path}")
+        return items
 
-    # questions 배열/혹은 리스트 둘 다 지원 (여러 포맷을 위해)
-    if isinstance(raw, dict) and isinstance(raw.get("questions"), list):
-        items = raw["questions"]
-    elif isinstance(raw, list):
-        items = raw
-    else:
-        raise ValueError(f"지원하지 않는 JSON 구조: {json_path}")
+    items = _load_golden_items(json_path)
+
 
     agent = SolutionAgent()
     rows: List[EvalRow] = []
+
+    def _san(s: str, role: str, hint: str) -> str:
+        return sanitize_for_ragas(s, role=role, fallback_hint=hint)
+
 
     for i, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             continue
 
-        q_text   = (it.get("question") or "").strip()
-        options  = it.get("options") or []
-        if not isinstance(options, list):
-            # 이상치 방지
-            try:
-                options = list(options)
-            except Exception:
-                options = []
+        # 3-1) 새 포맷: question 에서 stem+options 분리
+        q_full_raw = (it.get("question") or "").strip()
+        q_text, options = _split_q_and_options_from_single_field(q_full_raw)
         options = [str(o) for o in options]
 
-        ans_str  = str(it.get("answer") or "").strip()
-        gt_idx   = int(ans_str) if ans_str.isdigit() else None
-        gt_text  = options[gt_idx - 1] if (gt_idx is not None and 1 <= gt_idx <= len(options)) else ""
-        gt_exp   = (it.get("explanation") or "").strip()
-        gt_sub   = (it.get("subject") or "").strip()
+        gt_blob_full = (it.get("ground_truth") or "").strip()
+        gt_idx, gt_sub = _extract_gt_from_blob(gt_blob_full)
+        gt_text = options[gt_idx - 1] if (isinstance(gt_idx, int) and 1 <= gt_idx <= len(options)) else ""
 
+        # 2) 골든셋 컨텍스트 (raw)
+        golden_ctx = [str(c).strip() for c in (it.get("contexts") or []) if str(c).strip()]
+
+        # 3) 에이전트 호출 (state 이후에만 agent 컨텍스트 사용 가능)
         user_input = "이 문제의 정답 번호와 풀이, 그리고 과목명을 알려주세요."
         state = agent.invoke(
             user_input_txt=user_input,
@@ -372,55 +453,37 @@ def run_one_golden_json(
             recursion_limit=1000,
         )
 
-        # 생성 결과
-        pred_num = str(state.get("generated_answer") or "").strip()
-        pred_idx = int(pred_num) if pred_num.isdigit() else None
-        pred_text = options[pred_idx - 1] if (pred_idx is not None and 1 <= pred_idx <= len(options)) else ""
-        pred_exp  = (state.get("generated_explanation") or "").strip()
-        pred_sub  = (state.get("generated_subject") or "").strip()
-
-        # 컨텍스트(문자열 리스트)
-        ctx_texts: List[str] = []
-        ctx_texts += _doc_to_text_list(state.get("problems_contexts") or [])
-        ctx_texts += _doc_to_text_list(state.get("concept_contexts") or [])
-
-        # *_text 가 있으면 블록으로 분리해서 추가
+        # 4) 에이전트에서 얻은 텍스트 블록을 두 컬럼에서만 추출
+        agent_blocks = []
         for key in ("problems_contexts_text", "concept_contexts_text"):
             t = (state.get(key) or "").strip()
             if t:
-                blocks = [b.strip() for b in re.split(r"\n\s*\n", t) if b.strip()]
-                ctx_texts.extend(blocks)
+                agent_blocks.extend([b.strip() for b in re.split(r"\n\s*\n", t) if b.strip()])
 
-        # 중복/공백 정리 + 문자열화
-        ctx_texts = [str(c).strip() for c in dict.fromkeys(ctx_texts) if str(c).strip()]
+        # 5) 컨텍스트 병합 → dedup → sanitize '한 번만'
+        merged_ctx = golden_ctx + agent_blocks
+        merged_ctx = [s for s in dict.fromkeys(merged_ctx) if s]  # dedup & drop blanks
+        ctx_texts = [_san(c, "context", q_text) for c in merged_ctx] or [_san(q_text, "context", q_text)]
 
-        def _san(s: str, role: str, hint: str) -> str:
-            return sanitize_for_ragas(s, role=role, fallback_hint=hint)
+        # 6) RAGAS 입력 구성 (question/gt/answer)
+        q_full_for_ragas = _san(_build_question_with_options(q_text, options), "question", q_text)
+        gt_blob_for_ragas = _san(gt_blob_full, "ground_truth", q_text)
 
-        # 컨텍스트 보정
-        ctx_texts = [_san(c, "context", q_text) for c in ctx_texts if str(c).strip()]
-        if not ctx_texts:
-            # 완전 빈 리스트 방지
-            ctx_texts = [_san(q_text or "컨텍스트 없음", "context", q_text)]
+        pred_num = str(state.get("generated_answer") or "").strip()
+        pred_idx = int(pred_num) if pred_num.isdigit() else None
+        pred_text = options[pred_idx - 1] if (isinstance(pred_idx, int) and 1 <= pred_idx <= len(options)) else ""
+        pred_exp  = (state.get("generated_explanation") or "").strip()
+        pred_sub  = (state.get("generated_subject") or "").strip()
 
-        # 질문/정답/정답지 포맷(+안전보정)
-        q_full = _build_question_with_options(q_text, options)
-        q_full = _san(q_full, "question", q_text)
-
-        gt_blob = f"정답: {gt_idx}) {gt_text}".strip() if gt_idx else f"정답: {gt_text}".strip()
-        # if gt_exp: gt_blob += f"\n풀이: {gt_exp}"
-        if gt_sub: gt_blob += f"\n과목: {gt_sub}"
-        gt_blob = _san(gt_blob, "ground_truth", q_text)
-
-        pred_blob = f"정답: {pred_num}) {pred_text}\n풀이: {pred_exp}\n과목: {pred_sub}".strip()
-        pred_blob = _san(pred_blob, "answer", q_text)
+        ans_part = f"정답: {pred_num}) {pred_text}" if pred_num else (f"정답: {pred_text}" if pred_text else "정답: ")
+        pred_blob = _san(f"{ans_part}\n풀이: {pred_exp}\n과목: {pred_sub}".strip(), "answer", q_text)
 
         rows.append(EvalRow(
-            question=q_full,
+            question=q_full_for_ragas,
             contexts=ctx_texts,
             answer=pred_blob,
-            ground_truth=gt_blob,
-            ground_truths=[gt_blob],
+            ground_truth=gt_blob_for_ragas,
+            ground_truths=[gt_blob_for_ragas],
             meta={
                 "options": options,
                 "gt_answer_idx": gt_idx,
@@ -430,6 +493,7 @@ def run_one_golden_json(
                 "validated": bool(state.get("validated", False)),
             }
         ))
+
 
     if not rows:
         return {"file": json_path, "n": 0, "ragas_csv": None, "leaderboard_csv": None}
@@ -509,45 +573,31 @@ def run_one_golden_json(
     return {"file": json_path, "n": len(rows), "ragas_csv": ragas_csv, "leaderboard_csv": lb_csv}
 
 def main():
-    # 환경변수/인자값으로 설정
-    GOLDEN_DIR = "./teacher/exam/test_parsed_exam_json"
-    OUT_DIR    = os.getenv("EVAL_OUT_DIR", "./teacher/agents/solution/eval_results")
+    # OUT_DIR 등 기존 변수는 그대로 두세요
+    OUT_DIR     = "./teacher/agents/solution/eval_results"
     MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
     MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
     EMB_MODEL   = os.getenv("EMB_MODEL", "jhgan/ko-sroberta-multitask")
 
-    # 버전/로그레벨(디버그에 도움)
-    try:
-        import ragas, datasets
-        logging.getLogger("ragas").setLevel(logging.DEBUG)
-        print(f"[VER] ragas={getattr(ragas, '__version__', 'unknown')}, datasets={getattr(datasets, '__version__', 'unknown')}")
-        print(f"[CFG] RAGAS_KEEP_RAW={'ON' if KEEP_RAW else 'OFF'}")
-    except Exception:
-        pass
+    # 여기서 특정 파일만 직접 지정
+    target_file = r"teacher/agents/solution/goldensets/ipa_golden_20250916_165800.jsonl"
 
-    milvus_data = {
-        "connection_status": True,
-        "host": MILVUS_HOST,
-        "port": MILVUS_PORT,
-        "embedding_model_name": EMB_MODEL,
-    }
-
-    # 연결 사전 점검(선택): 실패해도 계속 시도
-    try:
-        _ = get_milvus_connection_info(milvus_data)
-    except Exception as e:
-        print(f"[경고] Milvus 연결 사전 점검 중 오류: {e}")
-
-    files = sorted(glob.glob(os.path.join(GOLDEN_DIR, "*.json")))
-    if not files:
-        print(f"[알림] 골든셋 JSON이 없습니다: {GOLDEN_DIR}")
+    if not os.path.isfile(target_file):
+        print(f"[에러] 지정한 파일이 존재하지 않습니다: {target_file}")
         return
+
+    files = [target_file]   # 딱 이 파일만 평가
 
     summary = []
     for fp in files:
         print(f"\n=== {os.path.basename(fp)} 평가 시작 ===")
         try:
-            res = run_one_golden_json(fp, OUT_DIR, milvus_data)
+            res = run_one_golden_json(fp, OUT_DIR, {
+                "connection_status": True,
+                "host": MILVUS_HOST,
+                "port": MILVUS_PORT,
+                "embedding_model_name": EMB_MODEL,
+            })
             summary.append(res)
             print(f"→ RAGAS: {res['ragas_csv']}, Leaderboard: {res['leaderboard_csv']}")
         except Exception as e:

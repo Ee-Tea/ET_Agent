@@ -394,6 +394,85 @@ class SolutionAgent(BaseAgent):
             return []
 
         return [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+    
+    def _normalize_ctx_key(self, text: str) -> str:
+        """
+        컨텍스트 비교용 키 정규화:
+        - '[유사문제 ...]' 등 머리말 제거
+        - 공백/개행 축약
+        """
+        if not text:
+            return ""
+        t = str(text)
+        t = re.sub(r"^\s*\[CTX\s*\d+\s*\|\s*(유사문제|개념컨텍스트|기타)\]\s*", "", t, flags=re.I)
+        t = re.sub(r"^\s*\[유사문제[^\]]*\]\s*", "", t, flags=re.I)
+        t = re.sub(r"^\s*\[(개념|개념컨텍스트)[^\]]*\]\s*", "", t, flags=re.I)
+        t = re.sub(r"\s+", " ", t).strip()
+        return t
+
+    def _dedup_keep_order_list(self, blocks: List[str], max_n: int | None = None) -> List[str]:
+        """정규화 키로 순서 유지 중복 제거."""
+        seen = set()
+        out = []
+        for b in blocks or []:
+            k = self._normalize_ctx_key(b)
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            out.append(b)
+            if max_n is not None and len(out) >= max_n:
+                break
+        return out
+
+    def _select_cross_source(self, p_blocks_all: List[str], c_blocks_all: List[str],
+                            max_p: int, max_c: int) -> List[str]:
+        """
+        유사문제/개념 블록을 합쳐가며 교차 dedup + 소스별 상한 적용.
+        먼저 두 리스트를 interleave하되, 이미 본 내용은 건너뜀.
+        """
+        sel, seen = [], set()
+        p_left, c_left = max_p, max_c
+
+        def push(block, is_problem):
+            nonlocal p_left, c_left
+            if not block: 
+                return
+            k = self._normalize_ctx_key(block)
+            if not k or k in seen:
+                return
+            if is_problem and p_left <= 0: 
+                return
+            if (not is_problem) and c_left <= 0:
+                return
+            sel.append(block)
+            seen.add(k)
+            if is_problem:
+                p_left -= 1
+            else:
+                c_left -= 1
+
+        # interleave 방식: 긴 쪽도 모두 소진되도록
+        L = max(len(p_blocks_all), len(c_blocks_all))
+        for i in range(L):
+            if i < len(p_blocks_all):
+                push(p_blocks_all[i], True)
+            if i < len(c_blocks_all):
+                push(c_blocks_all[i], False)
+            if p_left <= 0 and c_left <= 0:
+                break
+
+        # 혹시 한쪽을 못 채웠으면 남은 쪽에서 충원(여전히 dedup/상한 준수)
+        if p_left > 0:
+            for b in p_blocks_all:
+                if p_left <= 0: break
+                push(b, True)
+        if c_left > 0:
+            for b in c_blocks_all:
+                if c_left <= 0: break
+                push(b, False)
+
+        return sel
+
 
 
 
@@ -1293,29 +1372,27 @@ class SolutionAgent(BaseAgent):
 
         preselected = state.get("ctx_blocks_used")
 
-        if isinstance(preselected, list) and preselected:
-
-            final_ctx_blocks = preselected
-
-        else:
-
-            p_blocks_all = self._split_blocks(state.get("problems_contexts_text", ""))
-
-            c_blocks_all = self._split_blocks(state.get("concept_contexts_text", ""))
-
-            final_ctx_blocks = (p_blocks_all[: self.USE_P_BLOCKS]) + (c_blocks_all[: self.USE_C_BLOCKS])
-
-
-
-        # 2) 소스별 전체 블록(라벨링용) 준비
-
         problems_ctx_text = state.get("problems_contexts_text", "")
-
         concept_ctx_text  = state.get("concept_contexts_text", "")
 
         p_blocks_all = self._split_blocks(problems_ctx_text)
-
         c_blocks_all = self._split_blocks(concept_ctx_text)
+
+        if isinstance(preselected, list) and preselected:
+            # 이미 외부에서 지정된 블록이 있으면 그 안에서도 중복 제거
+            # final_ctx_blocks = self._dedup_keep_order_list(preselected, None)
+            # 최종 안전 dedup (필요시)
+            final_ctx_blocks = self._dedup_keep_order_list(final_ctx_blocks, self.USE_P_BLOCKS + self.USE_C_BLOCKS)
+
+        else:
+            # ✅ 교차 dedup + 소스별 상한 적용
+            final_ctx_blocks = self._select_cross_source(
+                self._dedup_keep_order_list(p_blocks_all, None),
+                self._dedup_keep_order_list(c_blocks_all, None),
+                self.USE_P_BLOCKS,
+                self.USE_C_BLOCKS,
+            )
+
 
 
 
@@ -1324,6 +1401,7 @@ class SolutionAgent(BaseAgent):
         max_chars = int(os.getenv("PROMPT_CTX_MAX_CHARS", "900"))
 
         ctx_structured = self._format_ctx_for_prompt(final_ctx_blocks, p_blocks_all, c_blocks_all, max_chars=max_chars)
+
 
 
 

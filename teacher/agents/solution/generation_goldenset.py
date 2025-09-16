@@ -14,30 +14,22 @@
 동작:
 - 각 문항(question+options 텍스트) 임베딩 → 개념 코퍼스에서 top-2, 유사문제에서 top-2 검색
 - contexts = [개념2, 문제2] (총 4개)  ※ 문제 자기자신 제외
-- ground_truth = {"answer","solution","subject"} 를 JSON 문자열로 저장
+- ground_truth = 평문("정답:~\n풀이:~\n과목:~")
 
 출력:
-- ./goldensets_ipa/ipa_golden_{YYYYmmdd_HHMMSS}.jsonl
-- ./goldensets_ipa/ipa_golden_{YYYYmmdd_HHMMSS}.csv  (엑셀 호환 UTF-8-SIG)
+- OUT_DIR/ipa_golden_{YYYYmmdd_HHMMSS}.jsonl
+- OUT_DIR/ipa_golden_{YYYYmmdd_HHMMSS}.csv  (엑셀 호환 UTF-8-SIG)
 
 필요:
-- pip install "ragas>=0.3.3" "langchain>=0.2" "langchain-text-splitters" "langchain-openai"
-- pip install "pandas" "numpy"
-- 임베딩: intfloat/multilingual-e5-large (로컬로 자동 다운로드)
-
-환경변수(.env 가능):
-- EXAMS_PATH              : 기본 ./data/exams/2022년1회_기사필기_전체문제.json
-- SIMILAR_PROBLEMS_PATH   : 기본 ./data/similar_problems
-- CONCEPTS_DIR            : 기본 ./data/concepts
-- MIN_CHARS               : 50
-- LIMIT                   : None (숫자로 주면 앞에서부터 제한)
+- pip install -U "langchain-huggingface" "langchain-openai" "langchain-text-splitters" "pandas" "numpy" "python-dotenv"
+- 임베딩: intfloat/multilingual-e5-large (자동 다운로드)
+- OPENAI_API_KEY=REDACTED 풀이 생성에 필요; 없으면 폴백 생성)
 """
 
 import os
 import re
 import glob
 import json
-import math
 import uuid
 import time
 import random
@@ -47,19 +39,23 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from dotenv import load_dotenv
 
-# 임베딩: ragas의 HF 래퍼(내부적으로 sentence-transformers)
+# 임베딩
 from langchain_huggingface import HuggingFaceEmbeddings
+# LLM (풀이 생성용)
+from langchain_openai import ChatOpenAI
 
 # 텍스트 전처리/분할(개념 문서용)
 from langchain.schema import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-
-# ---- 디버그 헬퍼 ----
+# ---- 디버그/옵션 ----
+load_dotenv()
 DEBUG = os.getenv("DEBUG", "1") == "1"
+USE_AGENT_PROMPT = os.getenv("USE_AGENT_PROMPT", "1") == "1"
+AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4o-mini")
+PROMPT_CTX_MAX_CHARS = int(os.getenv("PROMPT_CTX_MAX_CHARS", "900"))
 
 def log(msg: str):
-    """표준화된 로그 출력"""
     now = datetime.now().strftime("%H:%M:%S")
     print(f"[{now}] {msg}")
 
@@ -77,41 +73,29 @@ def log_list(name: str, arr, n=3):
     for i, it in enumerate(head):
         log(f"  - {i+1}: {str(it)[:120]}{'...' if len(str(it))>120 else ''}")
 
-
-# ===================== 설정/유틸 =====================
-load_dotenv()
-
+# ===================== 경로 설정 =====================
 # 이 파일 위치: teacher/agents/solution/generation_goldenset.py
 HERE = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))  # -> teacher/
 
 # 기본 경로(프로젝트 루트 기준)
-# - 문항 소스 폴더(오피셜 정답 JSON이 모여있는 폴더 = 과거에 만든 골든셋 출력 폴더)
-#   예: teacher/agents/solution/goldensets
-# - 유사 문제 폴더(컨텍스트용): teacher/exam/parsed_exam_json
-# - 유사 개념 폴더(컨텍스트용): teacher/agents/retrieve/data/json
-# - 새로 생성될 결과 저장 폴더(이번 실행 아웃풋): teacher/agents/solution/goldensets_out
-DEFAULT_EXAMS_PATH            = os.path.join(PROJECT_ROOT, "exam", "test_parsed_exam_json")          # ← 소스
-DEFAULT_SIMILAR_PROBLEMS_PATH = os.path.join(PROJECT_ROOT, "exam", "parsed_exam_json")                  # ← context(유사문제)
-DEFAULT_CONCEPTS_DIR          = os.path.join(PROJECT_ROOT, "agents", "retrieve", "data", "json")        # ← context(유사개념)
-DEFAULT_OUT_DIR               = os.path.join(PROJECT_ROOT, "agents", "solution", "goldensets")      # ← 결과 저장
+DEFAULT_EXAMS_PATH            = os.path.join(PROJECT_ROOT, "exam", "test_parsed_exam_json")        # ← 소스(오피셜 정답 JSON 폴더)
+DEFAULT_SIMILAR_PROBLEMS_PATH = os.path.join(PROJECT_ROOT, "exam", "parsed_exam_json")             # ← context(유사문제)
+DEFAULT_CONCEPTS_DIR          = os.path.join(PROJECT_ROOT, "agents", "retrieve", "data", "json")   # ← context(유사개념)
+DEFAULT_OUT_DIR               = os.path.join(PROJECT_ROOT, "agents", "solution", "goldensets")     # ← 결과 저장
 
-# 환경변수로 덮어쓰기 가능 (.env에서 경로 지정 시 폴더 경로만 넣으세요)
-# - EXAMS_PATH            : 문항 소스 폴더(오피셜 정답 JSON들이 들어있는 폴더)
-# - SIMILAR_PROBLEMS_PATH : 유사 문제 폴더 (context)
-# - CONCEPTS_DIR          : 유사 개념 폴더 (context)
-# - OUT_DIR               : 이번 실행 결과를 저장할 폴더
-EXAMS_PATH            = os.getenv("EXAMS_PATH", DEFAULT_EXAMS_PATH)
-SIMILAR_PROBLEMS_PATH = os.getenv("SIMILAR_PROBLEMS_PATH", DEFAULT_SIMILAR_PROBLEMS_PATH)
-CONCEPTS_DIR          = os.getenv("CONCEPTS_DIR", DEFAULT_CONCEPTS_DIR)
-OUT_DIR               = os.getenv("OUT_DIR", DEFAULT_OUT_DIR)
-
-# 출력 폴더 보장
+EXAMS_PATH            = os.getenv("EXAMS_PATH", DEFAULT_EXAMS_PATH)                  # 폴더
+SIMILAR_PROBLEMS_PATH = os.getenv("SIMILAR_PROBLEMS_PATH", DEFAULT_SIMILAR_PROBLEMS_PATH)  # 폴더
+CONCEPTS_DIR          = os.getenv("CONCEPTS_DIR", DEFAULT_CONCEPTS_DIR)              # 폴더
+OUT_DIR               = os.getenv("OUT_DIR", DEFAULT_OUT_DIR)                        # 폴더
 os.makedirs(OUT_DIR, exist_ok=True)
 
-MIN_CHARS             = int(os.getenv("MIN_CHARS", "50"))
-LIMIT_ENV             = os.getenv("LIMIT", None)
-LIMIT: Optional[int]  = int(LIMIT_ENV) if (LIMIT_ENV and LIMIT_ENV.isdigit()) else None
+MIN_CHARS  = int(os.getenv("MIN_CHARS", "50"))
+LIMIT_ENV  = os.getenv("LIMIT", None)
+LIMIT: Optional[int] = int(LIMIT_ENV) if (LIMIT_ENV and LIMIT_ENV.isdigit()) else None
+
+USE_OFFICIAL_SOLUTION = os.getenv("USE_OFFICIAL_SOLUTION", "1") == "1"  # 공식풀이가 있으면 우선 사용
+MERGE_OFFICIAL_AND_GEN = os.getenv("MERGE_OFFICIAL_AND_GEN", "0") == "1"  # 공식풀이+생성풀이 병합
 
 random.seed(42)
 
@@ -123,7 +107,7 @@ log(f"SIMILAR_PATH   = {SIMILAR_PROBLEMS_PATH} (exists: {os.path.isdir(SIMILAR_P
 log(f"CONCEPTS_DIR   = {CONCEPTS_DIR}  (exists: {os.path.isdir(CONCEPTS_DIR)})")
 log(f"OUT_DIR        = {OUT_DIR}       (exists: {os.path.isdir(OUT_DIR)})")
 
-
+# ===================== 유틸 =====================
 def clean_text(s: str) -> str:
     if s is None:
         return ""
@@ -146,6 +130,36 @@ def as_list_path_or_dir(path_or_dir: str, pattern="*.json") -> List[str]:
         return [path_or_dir]
     log(f"❌ 경로가 존재하지 않습니다: {path_or_dir}")
     return []
+
+# --- 컨텍스트 중복 제거 유틸 ---
+def _normalize_ctx_key(text: str) -> str:
+    """
+    컨텍스트 비교용 키로 정규화:
+    - [개념]/[유사문제] 헤더 제거
+    - 공백/개행 축약
+    """
+    if not text:
+        return ""
+    t = str(text)
+    # 헤더 제거
+    t = re.sub(r"^\s*\[(개념|유사문제)\]\s*", "", t, flags=re.I)
+    # 공백/개행 축약
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def _dedup_keep_order(blocks: List[str], max_n: int) -> List[str]:
+    """정규화 키로 중복 제거(순서 유지) 후 최대 max_n개까지 반환"""
+    seen = set()
+    out = []
+    for b in blocks:
+        k = _normalize_ctx_key(b)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(b)
+        if len(out) >= max_n:
+            break
+    return out
 
 # ===================== 개념 로딩/분할 =====================
 SPLIT_CHARS = 850
@@ -190,7 +204,6 @@ def load_concept_docs(root_dir: str) -> List[Document]:
                 if isinstance(it, dict):
                     _push(it, idx)
 
-    # 분할
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=SPLIT_CHARS, chunk_overlap=SPLIT_OVERLAP, separators=["\n\n", "\n", " ", ""]
     )
@@ -206,17 +219,6 @@ def load_concept_docs(root_dir: str) -> List[Document]:
 def load_problem_bank(paths: List[str]) -> List[Dict[str, Any]]:
     """
     문제은행: 검색용으로 flatten
-    반환 item 예시:
-    {
-      "qid": "<uuid>",
-      "question": "지문",
-      "options": ["...","..."],
-      "answer": "1",
-      "explanation": "풀이",
-      "subject": "과목",
-      "source_exam": "exam_title",
-      "source_path": "..."
-    }
     """
     bank: List[Dict[str, Any]] = []
     for path in paths:
@@ -271,9 +273,7 @@ def embed_query(text: str, embedder: HuggingFaceEmbeddings) -> np.ndarray:
     log(f"질의 임베딩 완료: dim={arr.shape[0]}, 텍스트 길이={len(text)}")
     return arr
 
-
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    # a: (d,), b: (N,d)
     a_norm = a / (np.linalg.norm(a) + 1e-12)
     b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
     return b_norm @ a_norm
@@ -286,6 +286,106 @@ def search_top_k(qvec: np.ndarray, mat: np.ndarray, k: int = 2, exclude_idx: Opt
     idx = idx[np.argsort(-sims[idx])]
     return idx.tolist()
 
+# ===================== 에이전트 프롬프트(정답 고정) =====================
+def _split_blocks(text: str) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = [b.strip() for b in re.split(r"\n{2,}", text) if b and b.strip()]
+    return parts
+
+def _format_ctx_for_prompt(final_blocks: List[Tuple[str, str]], max_chars: int = 900) -> str:
+    lines, used = [], 0
+    for i, (kind, block) in enumerate(final_blocks, 1):
+        src = "유사문제" if kind == "problem" else "개념"
+        header = f"[CTX {i} | {src}]"
+        body = block.strip()
+        remain = max(0, max_chars - used)
+        if remain <= 0:
+            break
+        if len(body) > remain:
+            body = body[:remain]
+        lines.append(f"{header}\n{body}")
+        used += len(body)
+    return "\n\n".join(lines)
+
+def _strip_md(txt: str) -> str:
+    t = re.sub(r"^```.*?```", "", txt, flags=re.S)
+    t = re.sub(r"[*_`>]+", "", t)
+    return t.strip()
+
+def generate_explanation_fixed_answer(answer_idx: str,
+                                      question_txt: str,
+                                      options: List[str],
+                                      concept_ctxs: List[str],
+                                      problem_ctxs: List[str]) -> Tuple[str, str]:
+    """
+    정답 번호(answer_idx)는 확정.
+    컨텍스트만 근거로 '왜 그 답이 맞는지' 풀이를 생성.
+    반환: (explanation, maybe_subject)  # subject는 공란일 수 있음
+    """
+    # 블록 구성: 유사문제 2 + 개념 2
+    p_text = "\n\n".join(problem_ctxs or [])
+    c_text = "\n\n".join(concept_ctxs or [])
+    p_blocks = _split_blocks(p_text)[:2]
+    c_blocks = _split_blocks(c_text)[:2]
+    final_blocks: List[Tuple[str, str]] = [("problem", b) for b in p_blocks] + [("concept", b) for b in c_blocks]
+    ctx_structured = _format_ctx_for_prompt(final_blocks, max_chars=PROMPT_CTX_MAX_CHARS)
+
+    # 보기
+    opts_lines = "\n".join(f"{i+1}) {o}" for i, o in enumerate(options or []))
+    sel_txt = ""
+    try:
+        idx_int = int(answer_idx) - 1
+        if 0 <= idx_int < len(options):
+            sel_txt = options[idx_int]
+    except:
+        pass
+
+    prompt = f"""
+너는 정보처리기사 해설 작성자다.
+정답 번호는 이미 확정되었다: {answer_idx}번. 정답 번호를 바꾸지 말고,
+'왜 {answer_idx}번이 정답인지'를 아래 컨텍스트 블록만을 근거로 3~6문장 한국어 평문 풀이로 작성하라.
+오직 컨텍스트에 명시된 사실만 사용하고, 새로운 지식/추론을 추가하지 말 것.
+가능하면 근거 키워드를 원문 표현과 동치로 재서술하라. 마크다운 금지.
+
+[문제]
+{question_txt}
+
+[보기]
+{opts_lines}
+
+[정답 보기 텍스트]
+{sel_txt}
+
+[컨텍스트 블록들]
+{ctx_structured}
+
+출력 형식:
+풀이: ...
+과목(선택): ...
+""".strip()
+
+    try:
+        llm = ChatOpenAI(model=AGENT_MODEL, temperature=0.3, max_tokens=600)
+        res = llm.invoke(prompt)
+        raw = (getattr(res, "content", None) or str(res)).strip()
+        clean = _strip_md(raw)
+        # 풀이 추출
+        sol_m = re.search(r"풀이\s*[:：]\s*(.+?)(?:\n\s*과목|$)", clean, flags=re.S)
+        sub_m = re.search(r"과목\s*[:：]\s*([^\n]+)", clean)
+        explanation = (sol_m.group(1).strip() if sol_m else clean).strip()
+        subject = (sub_m.group(1).strip() if sub_m else "").strip()
+        return explanation[:1000], subject
+    except Exception as e:
+        log(f"⚠️ LLM 풀이 생성 실패(정답 고정): {e}")
+        # 폴백: 컨텍스트 한두 문장 인용
+        base_ctx = (concept_ctxs[:1] + problem_ctxs[:1])
+        snippet = (base_ctx[0] if base_ctx else "")
+        snippet = " ".join(snippet.splitlines()[:3])[:400]
+        fallback = f"{answer_idx}번이 정답인 근거는 컨텍스트에 제시된 내용 때문이다. {snippet}"
+        return fallback, ""
+
 # ===================== 본 생성 로직 =====================
 def main():
     log_head("프로그램 시작")
@@ -297,6 +397,7 @@ def main():
     print(f"OUT_DIR               : {OUT_DIR}")
     print(f"MIN_CHARS             : {MIN_CHARS}")
     print(f"LIMIT                 : {LIMIT}")
+    print(f"USE_AGENT_PROMPT      : {USE_AGENT_PROMPT} (model={AGENT_MODEL})")
 
     # 1) 개념 로딩
     concept_docs = load_concept_docs(CONCEPTS_DIR)
@@ -333,7 +434,7 @@ def main():
     ]
     log(f"개념텍스트={len(concept_texts)}, 문제텍스트={len(problem_texts)}")
 
-    # ---- 임베더 1회 초기화 (권장 모델명 고정)
+    # 임베더 초기화
     model_name = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
     try:
         log_head("임베더 초기화")
@@ -343,7 +444,7 @@ def main():
         log(f"❌ 임베더 초기화 실패: {e}")
         raise
 
-    # ---- 행렬 계산
+    # 행렬 계산
     try:
         if concept_texts:
             concept_vecs = embedder.embed_documents([f"passage: {t}" for t in concept_texts])
@@ -385,32 +486,39 @@ def main():
             continue
 
         # 개념 top-2
+        # 개념 top-2 (여유분에서 중복 제거)
         concept_ctxs: List[str] = []
         if len(concept_docs) > 0 and concept_mat.shape[0] > 0:
             try:
-                c_idx = search_top_k(qvec, concept_mat, k=2)
-                if DEBUG: log(f"[{i}] 개념 인덱스: {c_idx}")
-                for j in c_idx:
+                # 여유분을 넉넉히 뽑고(최대 12), 그중 유니크 2개만 사용
+                cand_idx = search_top_k(qvec, concept_mat, k=min(12, concept_mat.shape[0]))
+                if DEBUG: log(f"[{i}] 개념 후보 인덱스(여유분): {cand_idx}")
+                cand_blocks: List[str] = []
+                for j in cand_idx:
                     d = concept_docs[j]
                     title = d.metadata.get("item_title") or ""
                     ctx = f"[개념] {title}\n{d.page_content}" if title else f"[개념]\n{d.page_content}"
-                    concept_ctxs.append(ctx)
+                    cand_blocks.append(ctx)
+                concept_ctxs = _dedup_keep_order(cand_blocks, max_n=2)
             except Exception as e:
                 log(f"⚠️ 개념 검색 실패 (i={i}): {e}")
 
-        # 유사문제 top-2 (자기 자신 제외)
+        # 유사문제 top-2 (자기 자신 제외 + 여유분에서 중복 제거)
         problem_ctxs: List[str] = []
         if len(similar_bank) > 0 and problem_mat.shape[0] > 0:
             try:
+                # 동일 문제 텍스트 제외 인덱스
                 exclude_idx = None
                 base = clean_text(item["question"] + " " + " ".join(item.get("options") or []))
                 for idx, ptxt in enumerate(problem_texts):
                     if ptxt == base:
                         exclude_idx = idx
                         break
-                p_idx = search_top_k(qvec, problem_mat, k=2, exclude_idx=exclude_idx)
-                if DEBUG: log(f"[{i}] 유사문제 인덱스: {p_idx}")
-                for j in p_idx:
+
+                cand_idx = search_top_k(qvec, problem_mat, k=min(12, problem_mat.shape[0]), exclude_idx=exclude_idx)
+                if DEBUG: log(f"[{i}] 유사문제 후보 인덱스(여유분): {cand_idx}")
+                cand_blocks: List[str] = []
+                for j in cand_idx:
                     p = similar_bank[j]
                     ctx_q = p["question"]
                     ctx_opts = "\n".join([f"{k+1}) {o}" for k, o in enumerate(p.get("options") or [])])
@@ -425,29 +533,77 @@ def main():
                         f"정답: {ctx_ans}\n"
                         f"풀이: {ctx_exp}"
                     ).strip()
-                    problem_ctxs.append(block)
+                    cand_blocks.append(block)
+
+                problem_ctxs = _dedup_keep_order(cand_blocks, max_n=2)
             except Exception as e:
                 log(f"⚠️ 유사문제 검색 실패 (i={i}): {e}")
 
-        gt_obj = {
-            "answer": str(item.get("answer", "")),
-            "solution": item.get("explanation", ""),
-            "subject": item.get("subject", ""),
-        }
-        gt_str = json.dumps(gt_obj, ensure_ascii=False)
+        # ---- 정답/과목(오피셜)
+        official_answer  = str(item.get("answer", "")).strip()
+        official_subject = (item.get("subject", "") or "").strip()
+        official_solution = (item.get("explanation", "") or "").strip()
 
+        explanation = ""
+        maybe_subject = ""
+
+        if USE_OFFICIAL_SOLUTION and official_solution:
+            # 1) 공식 풀이 우선 사용
+            explanation = official_solution.strip()
+            # 과목은 오피셜이 비면 나중에 LLM로 보강할 수도 있으므로 maybe_subject는 비워둠
+            log(f"[{i}] 공식 풀이 사용(길이: {len(explanation)}자)")
+        else:
+            # 2) 공식 풀이가 없으면 컨텍스트 기반으로 생성
+            if USE_AGENT_PROMPT:
+                explanation, maybe_subject = generate_explanation_fixed_answer(
+                    answer_idx=official_answer,
+                    question_txt=q_text,
+                    options=opts,
+                    concept_ctxs=concept_ctxs[:2],
+                    problem_ctxs=problem_ctxs[:2],
+                )
+                log(f"[{i}] 생성 풀이 사용(길이: {len(explanation)}자)")
+            else:
+                base_ctx = (concept_ctxs[:1] + problem_ctxs[:1])
+                snippet = (base_ctx[0] if base_ctx else "")
+                snippet = " ".join(snippet.splitlines()[:3])[:400]
+                explanation, maybe_subject = (
+                    f"{official_answer}번이 정답인 근거는 컨텍스트에 제시된 내용 때문이다. {snippet}",
+                    ""
+                )
+                log(f"[{i}] 폴백 풀이 사용(길이: {len(explanation)}자)")
+
+        # (선택) 병합 모드: 공식풀이 + 생성풀이를 함께 담고 싶다면
+        if MERGE_OFFICIAL_AND_GEN and official_solution and USE_AGENT_PROMPT:
+            # 위에서 공식 풀이를 우선 사용한 경우, 생성 풀이를 추가로 붙임
+            if explanation.strip() != official_solution.strip():
+                merged = f"{official_solution.strip()}\n(컨텍스트 근거) {explanation.strip()}"
+                explanation = merged[:1200]  # 너무 길어지지 않도록 컷
+                log(f"[{i}] 공식+생성 풀이 병합")
+
+        # 과목 결정: 오피셜 우선, 없으면 LLM 힌트 사용
+        final_subject = official_subject if official_subject else maybe_subject
+
+        # ground_truth = 평문
+        ground_truth_text = f"정답: {official_answer}\n풀이: {explanation}\n과목: {final_subject}".strip()
+
+
+        # question 문자열(선택지 포함)
         display_q = q_text
         if opts:
             numbered = "\n".join([f"{k+1}) {o}" for k, o in enumerate(opts)])
             display_q = f"{q_text}\n{numbered}"
 
-        contexts = concept_ctxs[:2] + problem_ctxs[:2]
+        # contexts = concept_ctxs[:2] + problem_ctxs[:2]
+        contexts = _dedup_keep_order(concept_ctxs[:2] + problem_ctxs[:2], max_n=4)
+
         rows.append({
             "question": display_q,
-            "ground_truth": gt_str,
+            "ground_truth": ground_truth_text,
             "contexts": contexts,
         })
 
+    # 저장
     log_head("저장 단계")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     jsonl_path = os.path.join(OUT_DIR, f"ipa_golden_{ts}.jsonl")

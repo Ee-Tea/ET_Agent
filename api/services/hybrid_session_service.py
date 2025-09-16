@@ -92,8 +92,20 @@ class HybridSessionService:
                 );
 
                 -- Ensure new columns exist
+                ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS chat_id TEXT;
                 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
                 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title TEXT;
+
+                -- Ensure UNIQUE(user_id, chat_id) exists for ON CONFLICT
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints 
+                        WHERE table_name='chat_sessions' AND constraint_name='uq_chat_sessions_user_chat'
+                    ) THEN
+                        ALTER TABLE chat_sessions ADD CONSTRAINT uq_chat_sessions_user_chat UNIQUE (user_id, chat_id);
+                    END IF;
+                END$$;
                 
                 -- FK to users
                 DO $$
@@ -121,6 +133,7 @@ class HybridSessionService:
                 );
 
                 -- Ensure new columns exist
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS chat_id TEXT;
                 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
                 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS speaker TEXT;
 
@@ -334,25 +347,50 @@ class HybridSessionService:
         async with self.pool.acquire() as conn:
             await self._ensure_user(user_id)
             session_id = self._generate_session_id(user_id, chat_id)
-            await conn.execute(
-                """
-                INSERT INTO chat_sessions (user_id, chat_id, session_id, title, session_data, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (user_id, chat_id) DO UPDATE SET
-                    session_id = $3,
-                    title = COALESCE($4, chat_sessions.title),
-                    session_data = $5,
-                    metadata = $6,
-                    updated_at = NOW(),
-                    is_active = TRUE
-                """,
-                user_id,
-                chat_id,
-                session_id,
-                title,
-                json.dumps(session_data, ensure_ascii=False, default=str),
-                json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
-            )
+            # session_id는 UNIQUE라 충돌 가능성이 있어 기존 값 유지 우선
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO chat_sessions (user_id, chat_id, session_id, title, session_data, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (user_id, chat_id) DO UPDATE SET
+                        -- 기존 session_id가 있으면 유지, 없을 때만 갱신
+                        session_id = COALESCE(chat_sessions.session_id, EXCLUDED.session_id),
+                        title = COALESCE(EXCLUDED.title, chat_sessions.title),
+                        session_data = EXCLUDED.session_data,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = NOW(),
+                        is_active = TRUE
+                    """,
+                    user_id,
+                    chat_id,
+                    session_id,
+                    title,
+                    json.dumps(session_data, ensure_ascii=False, default=str),
+                    json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
+                )
+            except Exception as err:
+                # session_id 유니크 제약 관련 충돌은 무시하고 메타만 갱신 시도
+                try:
+                    await conn.execute(
+                        """
+                        UPDATE chat_sessions
+                        SET title = COALESCE($3::text, title),
+                            session_data = $4,
+                            metadata = $5,
+                            updated_at = NOW(),
+                            is_active = TRUE
+                        WHERE user_id = $1 AND chat_id = $2
+                        """,
+                        user_id,
+                        chat_id,
+                        title,
+                        json.dumps(session_data, ensure_ascii=False, default=str),
+                        json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
+                    )
+                except Exception:
+                    # 최종 실패 시에는 상위에서 처리하도록 전파
+                    raise
     
     async def save_message_to_postgres(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None):
         """메시지를 PostgreSQL에 영구 저장"""
@@ -500,7 +538,7 @@ class HybridSessionService:
             await conn.execute(
                 """
                 UPDATE chat_sessions
-                SET title = COALESCE(title, $3), updated_at = NOW()
+                SET title = COALESCE($3::text, title), updated_at = NOW()
                 WHERE user_id = $1 AND chat_id = $2
                 """,
                 user_id,

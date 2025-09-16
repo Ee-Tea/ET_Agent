@@ -69,6 +69,7 @@ dependencies = [
     "pandas>=2.3.2",
     "rapidfuzz>=3.14.1",
     "fitz>=0.0.1.dev2",
+    "duckduckgo-search>=8.1.1",
 ]
 
 [build-system]

@@ -710,7 +710,13 @@ class MainOrchestrator:
         try:
             # 세션 상태 저장
             import asyncio
-            asyncio.run(self.save_session(state))
+            try:
+                # 이미 이벤트 루프가 돌고 있으면 비동기로 스케줄만 함
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.save_session(state))
+            except RuntimeError:
+                # 루프가 없으면 동기 컨텍스트에서 실행
+                asyncio.run(self.save_session(state))
             print("💾 세션 상태 저장 완료")
         except Exception as e:
             print(f"❌ 세션 상태 저장 실패: {e}")

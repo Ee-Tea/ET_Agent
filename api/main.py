@@ -4,18 +4,19 @@ ET-Agent의 LangGraph 기반 에이전트 시스템을 REST API로 제공
 """
 
 import os
+import json
 import sys
 import asyncio
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 import httpx
-from api.routers import chat, health, sessions
 from api.services.hybrid_session_service import HybridSessionService
 from api.clients.auth_client import verify_token
 # supervisor import는 런타임에 처리
@@ -24,7 +25,7 @@ from api.clients.auth_client import verify_token
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
 
-LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:8000")
+LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://localhost:8123")
 
 # try:
 #     # 프로젝트 루트의 main.py에서 MainOrchestrator import
@@ -81,7 +82,8 @@ async def call_langgraph_api(endpoint: str, data: Dict[str, Any]) -> Dict[str, A
 
 async def call_langgraph_chat(data: Dict[str, Any]) -> Dict[str, Any]:
     """LangGraph API를 사용한 채팅 처리 - 올바른 API 사용법"""
-    async with httpx.AsyncClient() as client:
+    # 채팅 관련 통신은 10분(600초) 타임아웃
+    async with httpx.AsyncClient(timeout=600.0) as client:
         try:
             # 1. 어시스턴트 조회/생성
             assistant_id = await get_or_create_assistant(client)
@@ -110,7 +112,7 @@ async def get_or_create_assistant(client: httpx.AsyncClient) -> str:
         response = await client.post(
             f"{LANGGRAPH_API_URL}/assistants/search",
             json={"graph_id": "agent", "limit": 1},
-            timeout=10.0
+            timeout=600.0
         )
         
         if response.status_code == 200:
@@ -126,7 +128,7 @@ async def get_or_create_assistant(client: httpx.AsyncClient) -> str:
                 "name": "ET-Agent",
                 "description": "농업 자격증 및 교육 관련 AI 에이전트"
             },
-            timeout=10.0
+            timeout=600.0
         )
         response.raise_for_status()
         assistant = response.json()
@@ -147,7 +149,7 @@ async def create_thread(client: httpx.AsyncClient, user_id: str, chat_id: str) -
                     "chat_id": chat_id
                 }
             },
-            timeout=10.0
+            timeout=600.0
         )
         response.raise_for_status()
         thread = response.json()
@@ -169,7 +171,7 @@ async def run_thread(client: httpx.AsyncClient, assistant_id: str, thread_id: st
                     "chat_id": thread_id.split("_")[1]
                 }
             },
-            timeout=60.0
+            timeout=600.0
         )
         response.raise_for_status()
         result = response.json()
@@ -216,10 +218,6 @@ async def lifespan(app: FastAPI):
         await hybrid_session_service.init_postgres()
         print("✅ 하이브리드 세션 서비스 초기화 완료")
         
-        # 채팅 라우터에 서비스 주입
-        import api.routers.chat as chat_module
-        chat_module.set_services(orchestrator, teacher, hybrid_session_service)
-        
     except Exception as e:
         print(f"⚠️ 하이브리드 세션 서비스 초기화 실패: {e}")
         hybrid_session_service = None
@@ -261,6 +259,7 @@ def _parse_allowed_origins() -> list[str]:
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://172.29.208.1:3000",
+            "http://192.168.0.199:3000",
             "http://localhost",
         ]
     try:
@@ -281,11 +280,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 라우터 등록
-from .routers import chat, health, sessions
-app.include_router(chat.router)
-app.include_router(health.router)
-app.include_router(sessions.router)
+# 라우터는 메인과 중복을 피하기 위해 사용하지 않음 (중복 라우팅 제거)
 # auth 라우터는 별도 서비스(auth-api)로 분리되어 HTTP로 통신
 
 from fastapi import Header
@@ -332,6 +327,11 @@ class SessionResponse(BaseModel):
     created_at: str = Field(..., description="생성 시간")
     status: str = Field(..., description="세션 상태")
 
+class ClearRequest(BaseModel):
+    """세션 정리 요청 모델"""
+    user_id: str = Field(..., description="사용자 ID")
+    chat_id: str = Field(..., description="채팅 ID")
+
 # ========== API 엔드포인트 ==========
 
 @app.get("/", response_model=Dict[str, str])
@@ -346,59 +346,81 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """헬스 체크 엔드포인트"""
+    """헬스 체크 엔드포인트 (루터와 정합 유지)"""
     try:
-        # langgraph-api 헬스 체크 (LangGraph API는 /health 엔드포인트가 없음)
         try:
             async with httpx.AsyncClient() as client:
-                # LangGraph API의 루트 경로나 docs 엔드포인트로 확인
                 response = await client.get(f"{LANGGRAPH_API_URL}/docs", timeout=5.0)
                 langgraph_status = "healthy" if response.status_code == 200 else "unhealthy"
-        except:
+        except Exception:
             langgraph_status = "unreachable"
-        
-        # 각 서비스 상태 확인
+
         services = {
             "bff_api": "healthy",
             "langgraph_api": langgraph_status,
-            "redis": "unknown"  # Redis는 langgraph-api에서 관리
+            "redis": "unknown"
         }
-        
-        overall_status = "healthy" if langgraph_status == "healthy" else "unhealthy"
-        
+
         return HealthResponse(
-            status=overall_status,
+            status="healthy" if langgraph_status == "healthy" else "unhealthy",
             version="1.0.0",
             services=services
         )
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: Request):
     """메인 채팅 엔드포인트 - 직접 LangGraph 실행"""
     global orchestrator, hybrid_session_service
     
     try:
-        # 로컬 오케스트레이터 사용
-        
+        # 프록시(프론트) 경유 시 바디가 비거나 포맷이 깨질 수 있어 관대한 파싱 적용
+        try:
+            payload = await request.json()
+        except Exception:
+            raw = await request.body()
+            payload = {}
+            if raw:
+                try:
+                    payload = json.loads(raw.decode("utf-8", "ignore"))
+                except Exception:
+                    try:
+                        form = await request.form()
+                        payload = dict(form)
+                    except Exception:
+                        payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        # 관대한 파싱 + 헤더/쿠키 보완
+        msg = str(payload.get("message", "")) if isinstance(payload, dict) else ""
+        user_id = str(payload.get("user_id", "")) if isinstance(payload, dict) else ""
+        chat_id = str(payload.get("chat_id", "")) if isinstance(payload, dict) else ""
+
+        if not user_id:
+            user_id = request.headers.get("x-user-id") or request.cookies.get("user_id") or os.getenv("DEFAULT_USER_ID", "api_user")
+        if not chat_id:
+            chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id") or os.getenv("DEFAULT_CHAT_ID", "api_chat")
+        if not msg or not msg.strip():
+            msg = os.getenv("DEFAULT_CHAT_PROMPT", "안녕하세요")
+
         # 사용자 메시지를 하이브리드 서비스에 저장
         if hybrid_session_service:
             await hybrid_session_service.add_chat_message(
-                request.user_id, 
-                request.chat_id, 
+                user_id, 
+                chat_id, 
                 "user", 
-                request.message
+                msg
             )
         
         # 직접 LangGraph 실행
         try:
             # 동적 import로 순환 의존 회피
             from supervisor import MainOrchestrator
-            local_orchestrator = MainOrchestrator(request.user_id, request.chat_id, hybrid_session_service)
-            response_text = local_orchestrator.process_query(request.message)
+            local_orchestrator = MainOrchestrator(user_id, chat_id, hybrid_session_service)
+            response_text = local_orchestrator.process_query(msg)
         except ImportError as e:
             raise HTTPException(status_code=500, detail=f"MainOrchestrator import failed: {e}")
         
@@ -407,7 +429,7 @@ async def chat(request: ChatRequest):
             "response": response_text,
             "service_used": "orchestrator",
             "confidence": 1.0,
-            "session_id": f"{request.user_id}:{request.chat_id}",
+            "session_id": f"{user_id}:{chat_id}",
             "artifacts": None
         }
         
@@ -415,10 +437,10 @@ async def chat(request: ChatRequest):
         if hybrid_session_service:
             try:
                 await hybrid_session_service.add_chat_message(
-                    request.user_id,
-                    request.chat_id,
+                    user_id,
+                    chat_id,
                     "user",
-                    request.message,
+                    msg,
                     {"source": "post_assistant_save"}
                 )
             except Exception:
@@ -426,8 +448,8 @@ async def chat(request: ChatRequest):
             
             # 에이전트 응답을 하이브리드 서비스에 저장
             await hybrid_session_service.add_chat_message(
-                request.user_id, 
-                request.chat_id, 
+                user_id, 
+                chat_id, 
                 "assistant", 
                 result.get("response", "응답을 생성할 수 없습니다."),
                 {
@@ -441,7 +463,7 @@ async def chat(request: ChatRequest):
             response=result.get("response", "응답을 생성할 수 없습니다."),
             service_used=result.get("service_used", "unknown"),
             confidence=result.get("confidence", 0.0),
-            session_id=result.get("session_id", f"{request.user_id}:{request.chat_id}"),
+            session_id=result.get("session_id", f"{user_id}:{chat_id}"),
             artifacts=result.get("artifacts")
         )
         
@@ -660,6 +682,213 @@ async def get_session_history(session_id: str):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"History retrieval failed: {str(e)}")
+
+@app.post("/clear")
+async def clear_session_endpoint(request: Request):
+    """세션 관련 캐시/락/히스토리를 정리"""
+    global hybrid_session_service
+    try:
+        if not hybrid_session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
+
+        # 관대한 바디 파싱
+        try:
+            payload = await request.json()
+        except Exception:
+            raw = await request.body()
+            payload = {}
+            if raw:
+                try:
+                    payload = json.loads(raw.decode("utf-8", "ignore"))
+                except Exception:
+                    try:
+                        form = await request.form()
+                        payload = dict(form)
+                    except Exception:
+                        payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        user_id = str(payload.get("user_id", "api_user"))
+        chat_id = str(payload.get("chat_id", "api_chat"))
+        session_key = f"{user_id}_{chat_id}"
+
+        redis = hybrid_session_service.redis
+
+        # 삭제 대상 키들
+        keys_to_delete = []
+        # 락
+        keys_to_delete.append(f"lock:{session_key}")
+        # 숏텀/히스토리/세션
+        keys_to_delete.append(f"short_term:{session_key}")
+        keys_to_delete.append(f"history:{user_id}:{chat_id}")
+        keys_to_delete.append(f"active_session:{user_id}:{chat_id}")
+        keys_to_delete.append(f"shared:{user_id}:{chat_id}")
+        # 질문들 (패턴)
+        q_keys = redis.keys(f"questions:{session_key}:*")
+
+        deleted = 0
+        for k in keys_to_delete:
+            try:
+                deleted += int(redis.delete(k) or 0)
+            except Exception:
+                pass
+        if q_keys:
+            try:
+                deleted += int(redis.delete(*q_keys) or 0)
+            except Exception:
+                pass
+
+        return {"message": "cleared", "deleted": deleted, "session": f"{user_id}:{chat_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Clear failed: {str(e)}")
+
+# ========== 추가 유틸 엔드포인트 ==========
+
+@app.get("/recent-questions")
+async def get_recent_questions(
+    request: Request,
+    user_id: Optional[str] = Query(None, description="사용자 ID"),
+    chat_id: Optional[str] = Query(None, description="채팅 ID"),
+    limit: int = Query(10, ge=1, le=100, description="최대 반환 개수"),
+):
+    global hybrid_session_service
+    if not hybrid_session_service:
+        # 서비스 준비 전에도 프론트가 동작하도록 빈 결과 반환 (항상 questions 키 사용)
+        return {"questions": [], "count": 0, "session": None}
+
+    try:
+        # 파라미터 보완: 헤더/쿠키에서 보조 취득
+        if not user_id:
+            user_id = request.headers.get("x-user-id") or request.cookies.get("user_id")
+        if not chat_id:
+            chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id")
+
+        # 식별자 없으면 빈 결과 반환 (항상 questions 키 사용)
+        if not user_id or not chat_id:
+            return {"questions": [], "count": 0, "session": None}
+
+        redis = hybrid_session_service.redis
+        session_key = f"{user_id}_{chat_id}"
+        pattern = f"questions:{session_key}:*"
+        keys = list(redis.keys(pattern))
+        # 키명 기준 역순 정렬 (완전한 시간 순서는 아니지만 근사치)
+        keys.sort(reverse=True)
+
+        items: list[dict[str, Any]] = []
+        for key in keys[:limit]:
+            data = redis.hgetall(key) or {}
+            if not data:
+                continue
+            # options JSON 파싱
+            options_val = data.get("options", "[]")
+            try:
+                options = json.loads(options_val) if isinstance(options_val, str) else []
+            except Exception:
+                options = []
+
+            items.append({
+                "qid": key,
+                "question": data.get("question", ""),
+                "options": options,
+                "correctAnswer": data.get("answer", ""),
+                "explanation": data.get("explanation", ""),
+                "subject": data.get("subject", ""),
+            })
+
+        return {"questions": items, "count": len(items), "session": f"{user_id}:{chat_id}"}
+    except Exception:
+        # 어떤 예외가 나도 프론트는 빈 리스트로 계속 진행 가능해야 함
+        return {"questions": [], "count": 0, "session": None}
+
+
+@app.get("/pdf-status")
+async def get_pdf_status(
+    request: Request,
+    user_id: Optional[str] = Query(None, description="사용자 ID"),
+    chat_id: Optional[str] = Query(None, description="채팅 ID"),
+):
+    global hybrid_session_service
+    if not hybrid_session_service:
+        # 서비스 준비 전에도 프론트가 동작하도록 idle 반환
+        return {"status": "idle", "progress": 0.0, "session": None}
+
+    try:
+        # 파라미터 보완: 헤더/쿠키에서 보조 취득
+        if not user_id:
+            user_id = request.headers.get("x-user-id") or request.cookies.get("user_id")
+        if not chat_id:
+            chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id")
+
+        # 식별자 없으면 idle로 응답 (프론트 422 방지)
+        if not user_id or not chat_id:
+            return {"status": "idle", "progress": 0.0, "session": None}
+
+        redis = hybrid_session_service.redis
+        session_key = f"{user_id}:{chat_id}"
+
+        # 가능한 상태 키 후보들을 순차적으로 조회
+        status_keys = [
+            f"pdf_status:{user_id}:{chat_id}",
+            f"pdf:{user_id}_{chat_id}:status",
+            f"pdf:status:{user_id}:{chat_id}",
+        ]
+        progress_keys = [
+            f"pdf_progress:{user_id}:{chat_id}",
+            f"pdf:{user_id}_{chat_id}:progress",
+            f"pdf:progress:{user_id}:{chat_id}",
+        ]
+
+        status = None
+        for k in status_keys:
+            status = redis.get(k)
+            if status:
+                break
+        if isinstance(status, bytes):
+            status = status.decode("utf-8", "ignore")
+        status = status or "idle"
+
+        progress_val = None
+        for k in progress_keys:
+            progress_val = redis.get(k)
+            if progress_val is not None:
+                break
+        if isinstance(progress_val, bytes):
+            try:
+                progress_val = progress_val.decode("utf-8", "ignore")
+            except Exception:
+                pass
+        try:
+            progress = float(progress_val) if progress_val is not None else 0.0
+        except Exception:
+            progress = 0.0
+
+        return {"status": status, "progress": progress, "session": session_key}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF status retrieval failed: {str(e)}")
+
+# ========== PDF 파일 엔드포인트 ==========
+
+@app.get("/pdfs")
+async def list_pdfs():
+    base_dir = os.getenv("PDF_DIR", os.path.join(os.getcwd(), "teacher", "agents", "solution", "pdf_outputs"))
+    try:
+        if not os.path.isdir(base_dir):
+            return {"pdfs": []}
+        files = [f for f in os.listdir(base_dir) if f.lower().endswith(".pdf")]
+        return {"pdfs": files}
+    except Exception:
+        return {"pdfs": []}
+
+@app.get("/pdf/{filename}")
+async def download_pdf(filename: str):
+    base_dir = os.getenv("PDF_DIR", os.path.join(os.getcwd(), "teacher", "agents", "solution", "pdf_outputs"))
+    path = os.path.join(base_dir, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(path, media_type="application/pdf", filename=filename)
 
 # ========== 에러 핸들러 ==========
 

@@ -12,10 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 의존성 설치 (auth 전용 requirements 우선)
+# 의존성 설치 (uv + 루트 락파일로 버전 고정, auth 전용 requirements만 설치)
+COPY pyproject.toml uv.lock /app/
 COPY auth/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system --no-cache-dir -r /app/requirements.txt
 
 # Auth 코드 및 마이그레이션 파일 복사
 COPY auth/ /app/auth

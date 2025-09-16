@@ -1,7 +1,15 @@
 from langchain.tools import Tool
 from langchain_community.utilities import WikipediaAPIWrapper
-from ddgs import DDGS
 from .milvus_search import milvus_tool
+
+# DDG 검색 클라이언트 호환 임포트 (ddgs → duckduckgo_search 순서로 시도)
+try:
+    from ddgs import DDGS as _DDGS
+except Exception:
+    try:
+        from duckduckgo_search import DDGS as _DDGS
+    except Exception:
+        _DDGS = None
 
 wiki_tool = Tool(
     name="Wikipedia Search",
@@ -13,8 +21,10 @@ def ddg_search(query: str, max_results: int = 5) -> list:
     """
     DuckDuckGo 검색 결과를 가져오는 함수
     """
+    if _DDGS is None:
+        return []
     results = []
-    with DDGS() as ddgs:
+    with _DDGS() as ddgs:
         for r in ddgs.text(query, safesearch="off", max_results=max_results):
             results.append({
                 "title": r.get("title"),

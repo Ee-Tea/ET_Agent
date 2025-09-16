@@ -24,7 +24,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from ragas.testset import TestsetGenerator
 from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import embedding_factory
+from ragas.embeddings import OpenAIEmbeddings
 from ragas.testset.persona import Persona
 from ragas.testset.transforms.splitters import HeadlineSplitter
 from ragas.testset.transforms.extractors.llm_based import NERExtractor
@@ -40,12 +40,12 @@ if not OPENAI_API_KEY:
     print("❌ OPENAI_API_KEY 없음")
     sys.exit(1)
 
-PDF_DIR = "./farmer/disaster/pdfs"
+PDF_DIR = "./farmer/disaster/data"
 SINGLE_PDF_PATH = "./farmer/disaster/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
 IMAGE_DIR = ""
 TARGET_QUESTIONS = 50   # 🔥 생성할 질문 수
-CHUNK_SIZE = 2000      # 더 긴 context로 변경
-CHUNK_OVERLAP = 300    # overlap도 비례적으로 증가
+CHUNK_SIZE = 900       # db_disaster.py와 동일하게 설정
+CHUNK_OVERLAP = 150    # db_disaster.py와 동일하게 설정
 
 # ===================== 전처리 (OCR + 표 파싱) =====================
 ocr_reader = None
@@ -229,7 +229,7 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         temperature=0.4,  # 창의성과 일관성의 균형
         max_tokens=2000   # 더 긴 답변 생성
     ))
-    generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")
+    generator_embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 
     personas = get_personas(mode)
     transforms = [HeadlineSplitter(), NERExtractor()]
@@ -241,7 +241,9 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
     )
 
     # 안정성: SingleHop만 사용 (단일 페르소나)
-    query = SingleHopSpecificQuerySynthesizer(llm=generator_llm)
+    query = SingleHopSpecificQuerySynthesizer(
+        llm=generator_llm
+    )
     # 한국어 프롬프트 설정 (동기 방식)
     try:
         # adapt_prompts를 동기적으로 호출
@@ -267,7 +269,9 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         print(f"\n질문 {i+1}")
         print("  Question:", sample.user_input)
         print("  Ground Truth:", sample.reference)
-        print("  Contexts:", sample.reference_contexts)
+        print(f"  Contexts ({len(sample.reference_contexts)}개):")
+        for j, ctx in enumerate(sample.reference_contexts):
+            print(f"    [{j+1}] {ctx[:100]}..." if len(ctx) > 100 else f"    [{j+1}] {ctx}")
         results.append({
             "question": sample.user_input,
             "ground_truth": sample.reference,

@@ -3,8 +3,11 @@ Docling을 사용한 문서 처리 및 MilvusDB 업로드 RAG 시스템
 공식 예시 참조: https://docling-project.github.io/docling/examples/hybrid_chunking/
 """
 import os
-from typing import List, Dict
+import re
+from typing import List, Dict, Any, Optional
 from pathlib import Path
+from tqdm import tqdm
+import numpy as np
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
 from pymilvus import (
@@ -13,7 +16,25 @@ from pymilvus import (
 # Docling 관련
 from docling.document_converter import DocumentConverter
 
+# OCR과 표 파싱을 위한 추가 라이브러리 (db_disaster.py에서 가져옴)
+import fitz  # PyMuPDF
+import easyocr
+import numpy as np
+
+# pdfplumber import (표 파싱용)
+try:
+    import pdfplumber
+    _HAS_PDFPLUMBER = True
+except Exception:
+    _HAS_PDFPLUMBER = False
+
 load_dotenv()
+
+# HuggingFace 캐시 디렉토리 설정 (권한 문제 해결)
+import os
+os.environ['HF_HOME'] = os.path.join(os.getcwd(), 'hf_cache')
+os.environ['TRANSFORMERS_CACHE'] = os.path.join(os.getcwd(), 'hf_cache')
+
 # =========[ 전역 설정 변수 ]=========
 # PDF 파일 경로 설정
 PDF_FILE_PATH = "./farmer/disaster/data/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
@@ -31,7 +52,7 @@ EMBEDDING_DIM = 768  # ko-sroberta-multitask 모델의 차원
 
 
 class DoclingRAGProcessor:
-    """Docling을 사용한 문서 처리 및 MilvusDB 업로드 클래스"""
+    """Docling 텍스트 + OCR + 표 파싱 하이브리드 문서 처리 클래스"""
     
     def __init__(self, 
                  collection_name: str = COLLECTION_NAME):
@@ -43,8 +64,11 @@ class DoclingRAGProcessor:
         """
         self.collection_name = collection_name
         
-        # Docling 변환기 초기화
+        # Docling 변환기 초기화 (텍스트만)
         self.converter = self._init_docling_converter()
+        
+        # OCR 리더 초기화 (db_disaster.py에서 가져옴)
+        self.ocr_reader = None
         
         # 임베딩 모델 초기화 (기존 한국어 모델)
         self.embeddings = self._init_embeddings()
@@ -54,31 +78,29 @@ class DoclingRAGProcessor:
         
     
     def _init_docling_converter(self) -> DocumentConverter:
-        """Docling 변환기 초기화 (모든 방법 동시 적용)"""
+        """Docling 변환기 초기화 (텍스트만 추출)"""
         try:
-            print("🔄 Docling 변환기 초기화 중...")
+            print("🔄 Docling 변환기 초기화 중... (텍스트만)")
             
-            # 모든 방법을 동시에 적용
+            # 텍스트만 추출하도록 설정 (OCR과 표 파싱은 별도 처리)
             from docling.datamodel.pipeline_options import PdfPipelineOptions
             from docling.datamodel.base_models import InputFormat
             from docling.document_converter import PdfFormatOption
             from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
             from docling.datamodel.accelerator_options import AcceleratorOptions, AcceleratorDevice
             
-            # 방법 1 + 2 + 3을 모두 적용한 최적 설정
             pipeline_options = PdfPipelineOptions()
             
-            # 방법 1: 최소한의 설정 (안정적)
+            # OCR과 표 파싱 비활성화 (별도 처리)
             pipeline_options.do_ocr = False  # OCR 비활성화
-            pipeline_options.do_table_structure = False  # 테이블 구조 비활성화
+            pipeline_options.do_table_structure = False  # 표 구조 비활성화
             
-            # 방법 3: CPU만 사용 (GPU 문제 방지)
+            # CPU만 사용
             pipeline_options.accelerator_options = AcceleratorOptions(
                 num_threads=2, 
                 device=AcceleratorDevice.CPU
             )
             
-            # 방법 2: PyPdfium 백엔드 사용 (더 안정적)
             converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(
@@ -88,7 +110,7 @@ class DoclingRAGProcessor:
                 }
             )
             
-            print("✅ Docling 변환기 초기화 완료")
+            print("✅ Docling 변환기 초기화 완료 (텍스트만)")
             return converter
             
         except Exception as e:
@@ -130,32 +152,239 @@ class DoclingRAGProcessor:
             raise
     
     
-    def process_document(self, file_path: str) -> List[str]:
+    def clean_text(self, text: str) -> str:
+        """텍스트 전처리 (db_disaster.py와 동일)"""
+        text = re.sub(r"[^\w\s\.\,\(\)\/%\:\-\~가-힣]", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    
+    def detect_years(self, text: str) -> List[int]:
+        """연도 추출 (db_disaster.py와 동일)"""
+        _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+        years = set()
+        for m in _YEAR_RE.finditer(text or ""):
+            y = int(m.group(1))
+            if 1900 <= y <= 2100:
+                years.add(y)
+        return sorted(years)
+    
+    def detect_regions(self, text: str) -> List[str]:
+        """지역 추출 (db_disaster.py와 동일)"""
+        REGION_CANON = {
+            "강원":"강원도","강원도":"강원도", "경기":"경기도","경기도":"경기도", "충북":"충청북도","충청북도":"충청북도",
+            "충남":"충청남도","충청남도":"충청남도", "전북":"전라북도","전라북도":"전라북도", "전남":"전라남도","전라남도":"전라남도",
+            "경북":"경상북도","경상북도":"경상북도", "경남":"경상남도","경상남도":"경상남도", "제주":"제주특별자치도","제주특별자치도":"제주특별자치도",
+            "세종":"세종","세종특별자치시":"세종", "인천":"인천광역시","서울":"서울특별시","부산":"부산광역시","대구":"대구광역시",
+            "광주":"광주광역시","대전":"대전광역시","울산":"울산광역시"
+        }
+        REGION_KEYS = sorted(set(REGION_CANON.keys()), key=len, reverse=True)
+        
+        def canon_region(tok: str) -> str:
+            t = (tok or "").strip().replace(" ", "")
+            if t in REGION_CANON: return REGION_CANON[t]
+            if t.endswith("도"): return t
+            if t in ("강원","경기","충북","충남","전북","전남","경북","경남","제주"): return t+"도"
+            return t
+        
+        t = (text or "").replace(" ", "")
+        hits = []
+        for k in REGION_KEYS:
+            if k in t: hits.append(canon_region(k))
+        return sorted(list(set(hits)))
+    
+    def _get_ocr_reader(self) -> easyocr.Reader:
+        """OCR 리더 초기화 (db_disaster.py에서 가져옴)"""
+        if self.ocr_reader is None:
+            print("EasyOCR Reader 로드 중...")
+            self.ocr_reader = easyocr.Reader(["ko", "en"], gpu=True)
+        return self.ocr_reader
+    
+    def _process_pdf_with_ocr_and_tables(self, file_path: str) -> List[Dict[str, Any]]:
+        """PDF를 OCR과 표 파싱으로 처리 (db_disaster.py와 완전 동일)"""
+        if not _HAS_PDFPLUMBER:
+            raise RuntimeError("pdfplumber가 설치되어 있지 않습니다. `pip install pdfplumber` 필요")
+
+        chunks_data = []
+        try:
+            # --- 텍스트 + OCR ---
+            doc_fitz = fitz.open(file_path)
+            for page_num, page in enumerate(doc_fitz, start=1):
+                text = page.get_text()
+                try:
+                    reader = self._get_ocr_reader()
+                    pix = page.get_pixmap()
+                    img_bytes = pix.tobytes("png")
+                    ocr_results = reader.readtext(img_bytes)
+                    ocr_text = " ".join([res[1] for res in ocr_results])
+                    text = text + " " + ocr_text
+                    ocr_applied = True
+                except Exception as e:
+                    print(f"OCR 실패: {file_path} p.{page_num} - {e}")
+                    ocr_applied = False
+
+                cleaned_text = self.clean_text(text)
+                if cleaned_text:
+                    # Docling 하이브리드 청킹 사용
+                    texts = self._hybrid_chunking_from_text(cleaned_text)
+                    page_regions = self.detect_regions(cleaned_text)
+                    page_years = self.detect_years(cleaned_text)
+                    for i, chunk_text in enumerate(texts):
+                        chunks_data.append({
+                            "text": chunk_text,
+                            "file_name": os.path.basename(file_path),
+                            "page": page_num,
+                            "type": "pdf_text",
+                            "regions": page_regions,
+                            "years": page_years,
+                            "chunk_index": i,
+                            "ocr_applied": ocr_applied
+                        })
+
+            # --- 표 추출 ---
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    try:
+                        tables = page.extract_tables()
+                        for table in tables:
+                            table_str = "\n".join(
+                                ["\t".join([(cell or "") for cell in row]) for row in table if row]
+                            )
+                            cleaned = self.clean_text(table_str)
+                            if not cleaned:
+                                continue
+                            # Docling 하이브리드 청킹 사용
+                            texts = self._hybrid_chunking_from_text(cleaned)
+                            page_regions = self.detect_regions(cleaned)
+                            page_years = self.detect_years(cleaned)
+                            for i, chunk_text in enumerate(texts):
+                                chunks_data.append({
+                                    "text": chunk_text,
+                                    "file_name": os.path.basename(file_path),
+                                    "page": page_num,
+                                    "type": "pdf_table",
+                                    "regions": page_regions,
+                                    "years": page_years,
+                                    "chunk_index": i
+                                })
+                    except Exception as e:
+                        print(f"표 파싱 실패: {file_path} p.{page_num} - {e}")
+
+        except Exception as e:
+            print(f"PDF 처리 실패 {file_path}: {e}")
+        return chunks_data
+    
+    def _hybrid_chunking_from_text(self, text: str) -> List[str]:
+        """텍스트에서 Docling 하이브리드 청킹 사용"""
+        try:
+            print("🧠 Docling Hybrid Chunking 시작...")
+            
+            # Docling의 공식 HybridChunker 사용
+            import tiktoken
+            from docling.chunking import HybridChunker
+            from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
+            
+            # 토크나이저 설정
+            tokenizer = OpenAITokenizer(
+                tokenizer=tiktoken.encoding_for_model("gpt-4o-mini"),
+                max_tokens=1200,  # 약 900자에 해당하는 토큰 수
+            )
+            
+            chunker = HybridChunker(
+                tokenizer=tokenizer,
+                merge_peers=True,
+            )
+            
+            # 임시 DoclingDocument 생성
+            from docling.datamodel.document import DoclingDocument
+            doc = DoclingDocument(
+                name="temp",
+                text=text,
+                elements=[]
+            )
+            
+            # 문서를 청크로 분할
+            chunk_iter = chunker.chunk(dl_doc=doc)
+            
+            # 청크를 텍스트 리스트로 변환
+            texts = []
+            for chunk in chunk_iter:
+                texts.append(chunk.text)
+            
+            # 작은 청크들 병합
+            merged_texts = self._merge_small_chunks(texts)
+            
+            print(f"✅ Docling Hybrid Chunking 성공: {len(texts)}개 → {len(merged_texts)}개 청크")
+            return merged_texts
+            
+        except Exception as e:
+            print(f"❌ Docling Hybrid Chunking 실패: {e}")
+            # 폴백: 기본 텍스트 분할
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=900,
+                chunk_overlap=150,
+                length_function=len
+            )
+            return splitter.split_text(text)
+    
+    def process_document(self, file_path: str) -> List[Dict[str, Any]]:
         """
-        문서를 Docling으로 처리하여 텍스트 청크 리스트 반환
+        하이브리드 문서 처리: Docling 텍스트 + OCR + 표 파싱
         
         Args:
             file_path: 처리할 문서 파일 경로
             
         Returns:
-            텍스트 청크 리스트
+            청크와 메타데이터가 포함된 딕셔너리 리스트
         """
         try:
             file_path = Path(file_path)
             if not file_path.exists():
                 raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_path}")
             
-            print(f"📄 문서 처리 시작: {file_path.name}")
+            print(f"📄 하이브리드 문서 처리 시작: {file_path.name}")
             
-            # Docling으로 문서 변환 (공식 방법)
-            result = self.converter.convert(str(file_path))
-            doc = result.document  # DoclingDocument 객체
+            # 1. Docling으로 텍스트 추출 (구조적 텍스트)
+            docling_chunks = []
+            try:
+                print("🔄 Docling 텍스트 추출 중...")
+                result = self.converter.convert(str(file_path))
+                doc = result.document
+                texts = self._hybrid_chunking(doc)
+                
+                for i, text in enumerate(texts):
+                    cleaned_text = self.clean_text(text)
+                    if cleaned_text:
+                        regions = self.detect_regions(cleaned_text)
+                        years = self.detect_years(cleaned_text)
+                        
+                        docling_chunks.append({
+                            "text": cleaned_text,
+                            "file_name": file_path.name,
+                            "page": 1,  # Docling은 페이지 정보를 별도로 제공하지 않음
+                            "type": "docling_text",
+                            "regions": regions,
+                            "years": years,
+                            "chunk_index": i
+                        })
+                print(f"✅ Docling 텍스트 추출 완료: {len(docling_chunks)}개 청크")
+            except Exception as e:
+                print(f"⚠️ Docling 텍스트 추출 실패: {e}")
             
-            # 하이브리드 청킹 시도 (Docling 구조 기반)
-            texts = self._hybrid_chunking(doc)
+            # 2. OCR + 표 파싱 처리 (db_disaster.py 방식 - 항상 실행)
+            print("🔄 OCR + 표 파싱 처리 중...")
+            ocr_table_chunks = self._process_pdf_with_ocr_and_tables(str(file_path))
+            print(f"✅ OCR + 표 파싱 완료: {len(ocr_table_chunks)}개 청크")
             
-            print(f"✅ 문서 처리 완료: {file_path.name} - {len(texts)}개 청크")
-            return texts
+            # 3. 모든 청크 통합
+            all_chunks = docling_chunks + ocr_table_chunks
+            
+            print(f"✅ 하이브리드 문서 처리 완료: {file_path.name} - {len(all_chunks)}개 청크")
+            print(f"   - Docling 텍스트: {len(docling_chunks)}개")
+            print(f"   - OCR + 표: {len(ocr_table_chunks)}개")
+            
+            return all_chunks
             
         except Exception as e:
             print(f"❌ 문서 처리 실패: {file_path} - {e}")
@@ -171,10 +400,10 @@ class DoclingRAGProcessor:
             from docling.chunking import HybridChunker
             from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
             
-            # 토크나이저 설정
+            # 토크나이저 설정 (db_disaster.py와 비슷한 크기로 조정)
             tokenizer = OpenAITokenizer(
                 tokenizer=tiktoken.encoding_for_model("gpt-4o-mini"),
-                max_tokens=128 * 1024,  # context window length required for OpenAI tokenizers
+                max_tokens=1200,  # 약 900자에 해당하는 토큰 수 (db_disaster.py CHUNK_SIZE=900과 비슷)
             )
             
             chunker = HybridChunker(
@@ -202,8 +431,8 @@ class DoclingRAGProcessor:
             print(f"❌ Docling Hybrid Chunking 실패: {e}")
             return []
     
-    def _merge_small_chunks(self, texts: List[str], min_size: int = 50) -> List[str]:
-        """50자 미만 청크들을 앞뒤 청크에 붙이기"""
+    def _merge_small_chunks(self, texts: List[str], min_size: int = 100) -> List[str]:
+        """100자 미만 청크들을 앞뒤 청크에 붙이기 (db_disaster.py와 비슷한 크기)"""
         try:
             if not texts:
                 return texts
@@ -220,12 +449,12 @@ class DoclingRAGProcessor:
                     prev_chunk = merged_texts[-1] if merged_texts else None
                     next_chunk = texts[i + 1] if i + 1 < len(texts) else None
                     
-                    # 앞 청크가 있고 병합 가능하면 앞에 붙이기
-                    if prev_chunk and len(prev_chunk + " " + current_chunk.strip()) <= 2000:
+                    # 앞 청크가 있고 병합 가능하면 앞에 붙이기 (db_disaster.py CHUNK_SIZE+OVERLAP=1050과 비슷)
+                    if prev_chunk and len(prev_chunk + " " + current_chunk.strip()) <= 1200:
                         merged_texts[-1] = prev_chunk + " " + current_chunk.strip()
                         i += 1
                     # 뒤 청크가 있고 병합 가능하면 뒤에 붙이기
-                    elif next_chunk and len(current_chunk.strip() + " " + next_chunk) <= 2000:
+                    elif next_chunk and len(current_chunk.strip() + " " + next_chunk) <= 1200:
                         merged_chunk = current_chunk.strip() + " " + next_chunk
                         merged_texts.append(merged_chunk)
                         i += 2  # 두 청크를 건너뛰기
@@ -243,6 +472,7 @@ class DoclingRAGProcessor:
         except Exception as e:
             print(f"⚠️ 청크 병합 실패: {e}")
             return texts
+    
     
     def get_embedding(self, text: str) -> List[float]:
         """텍스트 임베딩 생성 (기존 한국어 모델 사용)"""
@@ -290,44 +520,49 @@ class DoclingRAGProcessor:
             print(f"❌ 컬렉션 생성 실패: {e}")
             return False
     
-    def upload_documents_to_milvus(self, texts: List[str], file_path: str) -> bool:
-        """문서들을 MilvusDB에 업로드 (기존 방식과 동일)"""
+    def upload_documents_to_milvus(self, chunks_data: List[Dict[str, Any]], file_path: str) -> bool:
+        """문서들을 MilvusDB에 업로드 (메타데이터 포함)"""
         try:
-            if not texts:
+            if not chunks_data:
                 print("⚠️ 업로드할 문서가 없습니다")
                 return False
             
-            print(f"📤 {len(texts)}개 청크를 MilvusDB에 업로드 중...")
+            print(f"📤 {len(chunks_data)}개 청크를 MilvusDB에 업로드 중...")
             
             # 컬렉션 가져오기
             collection = Collection(name=self.collection_name)
             
             # 배치 처리
             batch_size = 100
-            file_name = os.path.basename(file_path)
             
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i+batch_size]
-                print(f"  - 배치 {i//batch_size + 1}: {i+1} ~ {i+len(batch_texts)}")
+            for i in range(0, len(chunks_data), batch_size):
+                batch_chunks = chunks_data[i:i+batch_size]
+                print(f"  - 배치 {i//batch_size + 1}: {i+1} ~ {i+len(batch_chunks)}")
                 
                 # 임베딩 생성
                 vectors = []
-                for text in batch_texts:
-                    embedding = self.get_embedding(text)
+                texts = []
+                file_names = []
+                pages = []
+                types = []
+                regions = []
+                years = []
+                
+                for chunk_data in batch_chunks:
+                    embedding = self.get_embedding(chunk_data["text"])
                     if embedding:
                         vectors.append(embedding)
-                
-                # 메타데이터 준비 (기존 방식과 동일)
-                file_names = [file_name] * len(batch_texts)
-                pages = [1] * len(batch_texts)  # Docling은 페이지 정보를 별도로 제공하지 않음
-                types = ["docling_text"] * len(batch_texts)
-                regions = [[]] * len(batch_texts)  # 빈 리스트
-                years = [[]] * len(batch_texts)    # 빈 리스트
+                        texts.append(chunk_data["text"])
+                        file_names.append(chunk_data["file_name"])
+                        pages.append(chunk_data["page"])
+                        types.append(chunk_data["type"])
+                        regions.append(chunk_data["regions"])
+                        years.append(chunk_data["years"])
                 
                 # MilvusDB에 삽입
                 try:
-                    collection.insert([batch_texts, vectors, file_names, pages, types, regions, years])
-                    print(f"    > ✅ 삽입 성공: {len(batch_texts)}개")
+                    collection.insert([texts, vectors, file_names, pages, types, regions, years])
+                    print(f"    > ✅ 삽입 성공: {len(batch_chunks)}개")
                 except Exception as e:
                     print(f"    > ⚠️ 삽입 실패: {e}")
             
@@ -336,7 +571,7 @@ class DoclingRAGProcessor:
             collection.flush()
             print(f"📊 num_entities: {collection.num_entities}")
             
-            print(f"✅ 문서 업로드 완료: {len(texts)}개 문서")
+            print(f"✅ 문서 업로드 완료: {len(chunks_data)}개 문서")
             return True
             
         except Exception as e:
@@ -347,25 +582,28 @@ class DoclingRAGProcessor:
         """문서 처리 결과를 미리보기 (확장된 정보 표시)"""
         try:
             # 문서 처리
-            texts = self.process_document(file_path)
+            chunks_data = self.process_document(file_path)
             
-            if not texts:
+            if not chunks_data:
                 print("❌ 처리할 문서가 없습니다.")
                 return
             
             file_path = Path(file_path)
-            print(f"📁 파일명: {file_path.name} ({len(texts)}개 청크)")
+            print(f"📁 파일명: {file_path.name} ({len(chunks_data)}개 청크)")
             print("=" * 100)
             
-            for i, text in enumerate(texts[:show_chunks]):
-                print(f"청크 {i+1}/{len(texts)}:")
-                print(f"길이: {len(text)}자")
+            for i, chunk_data in enumerate(chunks_data[:show_chunks]):
+                print(f"청크 {i+1}/{len(chunks_data)}:")
+                print(f"길이: {len(chunk_data['text'])}자")
+                print(f"지역: {chunk_data['regions']}")
+                print(f"연도: {chunk_data['years']}")
+                print(f"타입: {chunk_data['type']}")
                 print(f"전체 내용:")
-                print(text)  # 전체 내용 표시
+                print(chunk_data['text'])  # 전체 내용 표시
                 print("-" * 100)
             
-            if len(texts) > show_chunks:
-                print(f"... 및 {len(texts) - show_chunks}개 청크 더")
+            if len(chunks_data) > show_chunks:
+                print(f"... 및 {len(chunks_data) - show_chunks}개 청크 더")
             
             print("=" * 100)
             
@@ -376,8 +614,8 @@ class DoclingRAGProcessor:
         """파일을 처리하고 MilvusDB에 업로드하는 통합 함수"""
         try:
             # 1. 문서 처리
-            texts = self.process_document(file_path)
-            if not texts:
+            chunks_data = self.process_document(file_path)
+            if not chunks_data:
                 print("❌ 문서 처리 실패")
                 return False
             
@@ -388,7 +626,7 @@ class DoclingRAGProcessor:
                     return False
             
             # 3. 문서 업로드
-            if not self.upload_documents_to_milvus(texts, file_path):
+            if not self.upload_documents_to_milvus(chunks_data, file_path):
                 print("❌ 문서 업로드 실패")
                 return False
             
@@ -420,9 +658,9 @@ class DoclingRAGProcessor:
                     print("❌ 컬렉션 생성 실패")
                     return {}
             
-            # 각 파일 처리
+            # 각 파일 처리 (진행률 표시)
             results = {}
-            for pdf_file in pdf_files:
+            for pdf_file in tqdm(pdf_files, desc="PDF 파일 처리"):
                 print(f"🔄 처리 중: {os.path.basename(pdf_file)}")
                 success = self.process_and_upload_file(pdf_file)
                 results[pdf_file] = success

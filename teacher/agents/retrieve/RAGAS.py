@@ -64,19 +64,21 @@ MAX_CHARS_ANS = 1500
 
 def split_contexts_from_merged(merged: str) -> List[str]:
     if not merged:
-        return []
-    parts = [p.strip() for p in re.split(r"\n\s*\n", merged) if p.strip()]
-    refined = []
-    for p in parts:
-        if "[문서" in p:
-            refined += [c.strip() for c in p.split("[문서") if c.strip()]
-        else:
-            refined.append(p)
-    refined = [c for c in refined if len(c) > 20]
-    refined = [_clip(c, MAX_CHARS_CTX) for c in refined]
-    return refined[:MAX_CTX_BLOCKS] or [""]
+        return ["[컨텍스트 없음]"]  # ✅ 최소 1개 보장
 
+    blocks = re.findall(
+        r"\[문서\s*\d+\]\s*(.+?)(?=\n\s*\[문서\s*\d+\]|\Z)",
+        merged,
+        flags=re.DOTALL,
+    )
+    if not blocks:
+        blocks = [p.strip() for p in re.split(r"\n\s*\n", merged) if p.strip()]
 
+    refined = [b.strip() for b in blocks if len(b.strip()) > 20]
+    refined = [_clip(b, MAX_CHARS_CTX) for b in refined]
+
+    # ⬇️ 여기만 바꿉니다
+    return refined[:MAX_CTX_BLOCKS] or ["[컨텍스트 없음]"]
 
 
 
@@ -205,6 +207,25 @@ def run_evaluation(
             pred_ctx = [""]
             merged = f"(error: {e})"
 
+        try:
+            res = agent.invoke({"retrieval_question": q, "milvus_data": milvus_data})
+            ans = res.get("retrieve_answer", "")
+            merged = (res.get("retrieval") or {}).get("merged_context", "")
+            pred_ctx = split_contexts_from_merged(merged)
+        except Exception as e:
+            ans = ""
+            pred_ctx = []
+            merged = f"(error: {e})"
+
+        # ✅ 빈값 최종 가드 (에이전트가 빈 문자열/빈 리스트를 주더라도 안전)
+        ans = (ans or "").strip()
+        if not ans:
+            ans = "컨텍스트가 부족하여 확정적인 답변을 내기 어렵습니다."
+
+        pred_ctx = [c for c in (pred_ctx or []) if str(c).strip()]
+        if not pred_ctx:
+            pred_ctx = ["[컨텍스트 없음] 검색 결과가 비어있습니다."]
+
         predictions.append({
             "question": q,
             "answer": ans,
@@ -222,8 +243,9 @@ def run_evaluation(
         "question":      [_min_sanitize(p["question"]) for p in predictions],
         "answer":        [_clip(_min_sanitize(p["answer"], hint=p["question"]), MAX_CHARS_ANS)
                         for p in predictions],
-        "contexts":      [[_min_sanitize(c, hint=p["question"]) for c in (p["contexts"] or [""])]
-                        for p in predictions],
+        "contexts": [[_min_sanitize(c, hint=p["question"]) 
+              for c in (p.get("contexts") or ["[컨텍스트 없음]"])]
+            for p in predictions],
         # ground_truths: 리스트 형태 유지
         "ground_truths": [[_min_sanitize(p["ground_truth"], hint=p["question"])]
                         for p in predictions],
@@ -269,7 +291,7 @@ def run_evaluation(
 
 # ---------- CLI ----------
 def main():
-    input_path = "teacher/agents/retrieve/goldensets/goldenset_20250913_154620.jsonl"
+    input_path = "teacher/agents/retrieve/goldensets/goldenset_20250916_124703.jsonl"
     out_dir = "teacher/agents/retrieve/eval_results"
     limit = None
     sleep_sec = 0.0

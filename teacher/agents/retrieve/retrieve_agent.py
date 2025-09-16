@@ -1,32 +1,36 @@
 from .nodes.extractor import extract_query_elements, query_rewrite, query_reinforce
 from .nodes.merge_responder import merge_context, generate_answer
-from .nodes.search import wiki_tool, ddg_tool
+# ⛔ wiki_tool 제거
+from .nodes.search import ddg_tool
 from langgraph.graph import END, StateGraph
 from langchain_core.runnables import RunnableLambda
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, NotRequired
 from .nodes.verifier import fact_check
 from ..base_agent import BaseAgent
-from typing import Dict, List, TypedDict, Annotated
+from typing import Dict, List, Annotated
 
 class RetrievalState(TypedDict):
     retrieval_question: str
-    keywords: list[str]
+    keywords: List[str]
     rewritten_question: str
-    wiki: str
-    ddg: str
-    milvus: str
-    merged_context: str
-    answer: str
-    fact_check_result: dict
-    milvus_data: dict  # MilvusDB 연결 정보
+    # ⛔ wiki는 더 이상 필수 아님
+    wiki: NotRequired[str]
+    ddg: NotRequired[str]
+    milvus: NotRequired[str]
+    merged_context: NotRequired[str]
+    answer: NotRequired[str]
+    fact_check_result: NotRequired[dict]
+    milvus_data: Dict  # MilvusDB 연결 정보
 
 def extract_fn(state):
     """키워드 추출 노드"""
     question = state["retrieval_question"]
     keywords = extract_query_elements(question)
     print(f"추출된 키워드: {keywords}")
-    return {"retrieval_question": question,
-            "keywords" : keywords}
+    return {
+        "retrieval_question": question,
+        "keywords": keywords
+    }
 
 def rewrite_fn(state):
     """질문 재작성 노드"""
@@ -36,11 +40,8 @@ def rewrite_fn(state):
     print(f"재작성된 질문: {rewritten_question}")
     return {"rewritten_question": rewritten_question}
 
-def search_wiki_fn(state):
-    """위키백과 검색 노드"""
-    question = state["rewritten_question"]
-    wiki_result = wiki_tool.run(question)
-    return {"wiki": wiki_result}
+# ⛔ wiki 검색 노드/함수 제거
+# def search_wiki_fn(state): ...
 
 def search_ddg_fn(state):
     """DuckDuckGo 검색 노드"""
@@ -52,14 +53,14 @@ def search_milvus_fn(state):
     """MilvusDB 벡터 유사도 검색 노드"""
     question = state["rewritten_question"]
     milvus_data = state.get("milvus_data", {})
-    
+
     if not milvus_data:
         print("⚠️ milvus_data 없음 → MilvusDB 검색 건너뜀")
         return {"milvus": ""}
-    
+
     try:
         from common.milvus_helpers import search_milvus_documents
-        
+
         collection_name = milvus_data.get("collection_name", "concepts")
         k = int(milvus_data.get("top_k", 10))
         results = search_milvus_documents(
@@ -68,39 +69,34 @@ def search_milvus_fn(state):
             query=question,
             k=k
         )
-        
+
         if not results:
             print("⚠️ MilvusDB에서 관련 문서를 찾을 수 없음")
             return {"milvus": ""}
-        
+
         # 검색 결과를 텍스트로 변환 (Document 객체 사용)
         milvus_text = "\n\n".join([
-            f"[문서 {i+1}] {result.page_content}" 
+            f"[문서 {i+1}] {result.page_content}"
             for i, result in enumerate(results)
         ])
-        
+
         print(f"✅ MilvusDB에서 {len(results)}개 문서 검색 완료")
         return {"milvus": milvus_text}
-        
+
     except Exception as e:
         print(f"❌ MilvusDB 검색 실패: {e}")
         return {"milvus": ""}
 
 def merge_fn(state):
-    """검색 결과 병합 노드"""
-    wiki_result = state["wiki"]
-    ddg_result = state["ddg"]
+    ddg_result = state.get("ddg", "")
     milvus_result = state.get("milvus", "")
-    
-    # merge_context 함수를 사용하여 검색 결과 병합
-    merged_context = merge_context(wiki_result, ddg_result, milvus_result)
-    print(f"병합된 컨텍스트: {merged_context}")
+    merged_context = merge_context(ddg_result, milvus_result)  # ← 2-인자 버전
     return {"merged_context": merged_context}
 
 def answer_fn(state):
     """답변 생성 노드"""
     question = state["retrieval_question"]
-    context = state["merged_context"]
+    context = state.get("merged_context", "")
     answer = generate_answer(question, context)
     return {"answer": answer}
 
@@ -123,15 +119,20 @@ def check_verdict(state):
     else:
         return "fail"
 
-def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn):
+def build_retrieval_graph(
+    extract_fn,
+    rewrite_fn,
+    # ⛔ search_wiki_fn 제거
+    search_ddg_fn,
+    search_milvus_fn,
+    merge_fn,
+    answer_fn
+):
     """검색 그래프 빌드"""
-
     builder = StateGraph(RetrievalState)
 
-    # 2️⃣ builder에 node/edge 추가
     builder.add_node("extract", RunnableLambda(extract_fn))
     builder.add_node("rewrite", RunnableLambda(rewrite_fn))
-    # builder.add_node("search_wiki", RunnableLambda(search_wiki_fn))
     builder.add_node("search_ddg", RunnableLambda(search_ddg_fn))
     builder.add_node("search_milvus", RunnableLambda(search_milvus_fn))
     builder.add_node("merge", RunnableLambda(merge_fn))
@@ -141,34 +142,34 @@ def build_retrieval_graph(extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn,
 
     builder.set_entry_point("extract")
 
-    # ✅ parallel 메서드는 builder에만 존재
     builder.add_edge("extract", "rewrite")
-    # builder.add_edge("rewrite", "search_wiki")
     builder.add_edge("rewrite", "search_ddg")
     builder.add_edge("rewrite", "search_milvus")
-    # builder.add_edge("search_wiki", "merge")
     builder.add_edge("search_ddg", "merge")
     builder.add_edge("search_milvus", "merge")
     builder.add_edge("merge", "answer")
     builder.add_edge("answer", "verify")
-    builder.add_conditional_edges("verify",check_verdict, {"pass": END, "fail" : "reinforce"})
-    # builder.add_edge("reinforce", "search_wiki")  # 보강된 질문으로 다시 검색 시작
-    builder.add_edge("reinforce", "search_ddg")  # 보강된 질문으로 다시 검색 시작
-    builder.add_edge("reinforce", "search_milvus")  # 보강된 질문으로 다시 검색 시작
+    builder.add_conditional_edges("verify", check_verdict, {"pass": END, "fail": "reinforce"})
+    builder.add_edge("reinforce", "search_ddg")
+    builder.add_edge("reinforce", "search_milvus")
 
-    # 3️⃣ 최종 컴파일된 graph 얻기
     graph = builder.compile()
-
     return graph
 
 class retrieve_agent(BaseAgent):
     """
     검색 에이전트 클래스입니다.
-    위키백과와 DuckDuckGo를 사용하여 질문에 대한 답변을 생성합니다.
+    DuckDuckGo와 Milvus를 사용하여 질문에 대한 답변을 생성합니다.
     """
     def __init__(self):
         self.graph = build_retrieval_graph(
-            extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn
+            extract_fn,
+            rewrite_fn,
+            # ⛔ search_wiki_fn 인자 제거
+            search_ddg_fn,
+            search_milvus_fn,
+            merge_fn,
+            answer_fn
         )
 
     @property
@@ -177,37 +178,22 @@ class retrieve_agent(BaseAgent):
 
     @property
     def description(self) -> str:
-        return "위키백과와 DuckDuckGo를 사용하여 질문에 대한 답변을 생성하는 에이전트입니다."
+        return "DuckDuckGo와 Milvus를 사용하여 질문에 대한 답변을 생성하는 에이전트입니다."
 
     def invoke(self, input_data: Dict) -> Dict:
         """
         입력 데이터를 기반으로 검색 에이전트를 실행합니다.
-        
-        Args:
-            input_data (Dict[str, Any]): 에이전트 실행에 필요한 입력 데이터입니다.
-            
-        Returns:
-            Dict[str, Any]: 에이전트 실행 결과 데이터입니다.
         """
-        initial_state = {
+        initial_state: RetrievalState = {
             "retrieval_question": input_data.get("retrieval_question", ""),
-            "milvus_data": input_data.get("milvus_data", {})  # MilvusDB 연결 정보 추가
+            "milvus_data": input_data.get("milvus_data", {}),
+            # ⛔ wiki는 사용하지 않지만 병합 함수가 3-인자면 빈값으로 둬도 안전
+            "wiki": ""
         }
         result = self.graph.invoke(initial_state)
-        
+
         # teacher graph에서 기대하는 형태로 변환
         return {
             "retrieve_answer": result.get("answer", ""),
             "retrieval": result  # 전체 결과도 포함
         }
-
-# initial_state = {
-#     "retrieval_question": "소프트웨어 생명 주기 (소프트웨어 수명 주기)의 정의와 종류에 대해 알려줘"
-# }
-# print(initial_state["retrieval_question"])
-# graph = build_retrieval_graph(
-#             extract_fn, rewrite_fn, search_wiki_fn, search_ddg_fn, search_milvus_fn, merge_fn, answer_fn
-#         )
-# result = graph.invoke(initial_state)
-# print("답변 시작")
-# print(result["answer"])  # 그래프 실행 후 답변 출력

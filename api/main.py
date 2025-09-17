@@ -1053,7 +1053,18 @@ async def list_pdfs():
         if not os.path.isdir(base_dir):
             return {"pdfs": []}
         files = [f for f in os.listdir(base_dir) if f.lower().endswith(".pdf")]
-        return {"pdfs": files}
+        out = []
+        for f in files:
+            try:
+                p = os.path.join(base_dir, f)
+                stat = os.stat(p)
+                out.append({
+                    "filename": f,
+                    "created_at": stat.st_mtime,
+                })
+            except Exception:
+                out.append({"filename": f})
+        return {"pdfs": out}
     except Exception:
         return {"pdfs": []}
 

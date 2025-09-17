@@ -1,6 +1,7 @@
 # redis_memory.py  (et_agent/common/short_term/redis_memory.py)
 import json
 import redis
+import os
 import time
 import hashlib
 from typing import Any, Dict, List, Optional
@@ -51,7 +52,18 @@ class RedisLangGraphMemory:
         self.service = service
         self.chat_id = chat_id
         self.ttl_seconds = ttl_seconds
-        self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        # 컨테이너 환경 호환: REDIS_URL 우선, 없으면 REDIS_HOST/REDIS_PORT 사용
+        try:
+            redis_url = os.getenv("REDIS_URL")
+            if redis_url:
+                self.redis = redis.from_url(redis_url, decode_responses=True)
+            else:
+                host = os.getenv("REDIS_HOST", redis_host)
+                port = int(os.getenv("REDIS_PORT", str(redis_port)))
+                self.redis = redis.Redis(host=host, port=port, decode_responses=True)
+        except Exception:
+            # 최후 수단: 전달된 기본값으로 시도
+            self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         
         # 문제 중심 스키마를 위한 네임스페이스
         self.question_ns = f"{user_id}:{chat_id}:questions"

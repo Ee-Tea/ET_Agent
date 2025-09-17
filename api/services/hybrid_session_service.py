@@ -1,9 +1,12 @@
 # api/services/hybrid_session_service.py
+import os
 import redis
 import asyncpg
 import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
+import hashlib
+import uuid
 
 class HybridSessionService:
     def __init__(self, redis_url: str, postgres_url: str):
@@ -13,11 +16,17 @@ class HybridSessionService:
         # PostgreSQL: 영구 저장소
         self.postgres_url = postgres_url
         self.pool = None
+        # 한번만 테이블 생성하도록 플래그
+        self._tables_ready: bool = False
+        # 세션 기반 Redis 키 사용 여부 (신규 키 스킴)
+        self.use_session_redis_keys: bool = str(os.getenv("USE_SESSION_REDIS_KEYS", "")).lower() in {"1", "true", "yes", "on"}
     
     async def init_postgres(self):
-        """PostgreSQL 연결 풀 초기화"""
-        self.pool = await asyncpg.create_pool(self.postgres_url)
-        await self.create_tables_if_not_exists()
+        """PostgreSQL 연결 풀 초기화 (idempotent)"""
+        await self._ensure_pool()
+        if not getattr(self, "_tables_ready", False):
+            await self.create_tables_if_not_exists()
+            self._tables_ready = True
     
     async def _ensure_pool(self):
         """연결 풀 보장: None/closed 상태이면 재생성"""
@@ -92,8 +101,20 @@ class HybridSessionService:
                 );
 
                 -- Ensure new columns exist
+                ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS chat_id TEXT;
                 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
                 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title TEXT;
+
+                -- Ensure UNIQUE(user_id, chat_id) exists for ON CONFLICT
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints 
+                        WHERE table_name='chat_sessions' AND constraint_name='uq_chat_sessions_user_chat'
+                    ) THEN
+                        ALTER TABLE chat_sessions ADD CONSTRAINT uq_chat_sessions_user_chat UNIQUE (user_id, chat_id);
+                    END IF;
+                END$$;
                 
                 -- FK to users
                 DO $$
@@ -121,6 +142,7 @@ class HybridSessionService:
                 );
 
                 -- Ensure new columns exist
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS chat_id TEXT;
                 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
                 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS speaker TEXT;
 
@@ -142,23 +164,97 @@ class HybridSessionService:
                 END$$;
 
                 -- FK from chat_messages to chat_sessions(session_id)
+                -- 항상 ON UPDATE CASCADE 보장: 기존 제약은 드롭 후 재생성
                 DO $$
                 BEGIN
-                    IF NOT EXISTS (
+                    IF EXISTS (
                         SELECT 1 FROM information_schema.table_constraints 
                         WHERE constraint_name = 'fk_chat_messages_session'
                     ) THEN
-                        ALTER TABLE chat_messages 
-                        ADD CONSTRAINT fk_chat_messages_session 
-                        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE;
+                        ALTER TABLE chat_messages DROP CONSTRAINT fk_chat_messages_session;
                     END IF;
                 END$$;
+                ALTER TABLE chat_messages 
+                    ADD CONSTRAINT fk_chat_messages_session 
+                    FOREIGN KEY (session_id) 
+                    REFERENCES chat_sessions(session_id)
+                    ON UPDATE CASCADE
+                    ON DELETE CASCADE;
+
+                -- 보조 인덱스 (session_id, created_at)
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created ON chat_messages(session_id, created_at);
             """)
 
     # ===== Helpers =====
     @staticmethod
     def _generate_session_id(user_id: str, chat_id: str) -> str:
+        """Deprecated: kept for backward compat. Not used for new sessions."""
         return f"{user_id}:{chat_id}"
+
+    async def get_or_create_session_id(
+        self,
+        user_id: str,
+        chat_id: str,
+        service_type: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> str:
+        """(user_id, chat_id)로 세션을 조회하고 없으면 시간기반 해시 session_id로 생성 후 반환"""
+        await self._ensure_pool()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT session_id FROM chat_sessions
+                WHERE user_id = $1 AND chat_id = $2
+                """,
+                user_id,
+                chat_id,
+            )
+            if row and row.get("session_id"):
+                existing_sid = row["session_id"]
+                # 기존 포맷(user:chat) 발견 시 해시로 마이그레이션
+                if isinstance(existing_sid, str) and ":" in existing_sid:
+                    raw = f"{user_id}:{chat_id}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
+                    new_sid = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+                    # chat_sessions.session_id를 먼저 새 해시로 변경하면
+                    # FK(ON UPDATE CASCADE)에 의해 chat_messages.session_id도 자동 업데이트됩니다.
+                    await conn.execute(
+                        """
+                        UPDATE chat_sessions
+                        SET session_id = $3, updated_at = NOW(), is_active = TRUE
+                        WHERE user_id = $1 AND chat_id = $2 AND session_id = $4
+                        """,
+                        user_id,
+                        chat_id,
+                        new_sid,
+                        existing_sid,
+                    )
+                    return new_sid
+                return existing_sid
+
+            # 새 session_id 생성: 시간 + uuid 기반 해시(짧게 24자)
+            raw = f"{user_id}:{chat_id}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
+            sid = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+            await conn.execute(
+                """
+                INSERT INTO chat_sessions (user_id, chat_id, session_id, title, session_data, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (user_id, chat_id) DO UPDATE SET
+                    session_id = COALESCE(chat_sessions.session_id, EXCLUDED.session_id),
+                    title = COALESCE(EXCLUDED.title, chat_sessions.title),
+                    session_data = COALESCE(EXCLUDED.session_data, chat_sessions.session_data),
+                    metadata = COALESCE(EXCLUDED.metadata, chat_sessions.metadata),
+                    updated_at = NOW(),
+                    is_active = TRUE
+                """,
+                user_id,
+                chat_id,
+                sid,
+                title,
+                json.dumps({"service_type": service_type} if service_type else {}, ensure_ascii=False, default=str),
+                json.dumps({"created_via": "get_or_create_session_id", "ts": datetime.utcnow().isoformat()}, ensure_ascii=False, default=str),
+            )
+            return sid
 
     @staticmethod
     def _normalize_speaker(message_type: str) -> str:
@@ -198,23 +294,34 @@ class HybridSessionService:
     
     # ==================== Redis (실시간 세션) ====================
     
-    def get_active_session_key(self, user_id: str, chat_id: str) -> str:
-        """활성 세션 Redis 키"""
+    def get_active_session_key(self, user_id: str, chat_id: str, session_id: Optional[str] = None) -> str:
+        """활성 세션 Redis 키 (토글 가능): session_id 우선"""
+        if self.use_session_redis_keys and session_id:
+            return f"active_session:{session_id}"
         return f"active_session:{user_id}:{chat_id}"
     
-    def get_shared_key(self, user_id: str, chat_id: str) -> str:
-        """공유 메모리 Redis 키"""
+    def get_shared_key(self, user_id: str, chat_id: str, session_id: Optional[str] = None) -> str:
+        """공유 메모리 Redis 키 (토글 가능): session_id 우선"""
+        if self.use_session_redis_keys and session_id:
+            return f"shared:{session_id}"
         return f"shared:{user_id}:{chat_id}"
     
-    def get_history_key(self, user_id: str, chat_id: str) -> str:
-        """채팅 히스토리 Redis 키"""
+    def get_history_key(self, user_id: str, chat_id: str, session_id: Optional[str] = None) -> str:
+        """채팅 히스토리 Redis 키 (토글 가능): session_id 우선"""
+        if self.use_session_redis_keys and session_id:
+            return f"history:{session_id}"
         return f"history:{user_id}:{chat_id}"
     
     async def start_session(self, user_id: str, chat_id: str, initial_data: Dict[str, Any] = None, title: Optional[str] = None):
         """새 세션 시작 (Redis에 저장)"""
-        session_key = self.get_active_session_key(user_id, chat_id)
-        shared_key = self.get_shared_key(user_id, chat_id)
-        history_key = self.get_history_key(user_id, chat_id)
+        # session_id 확보 (신규 키 스킴 사용 시 필요)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        session_key = self.get_active_session_key(user_id, chat_id, sid)
+        shared_key = self.get_shared_key(user_id, chat_id, sid)
+        history_key = self.get_history_key(user_id, chat_id, sid)
         
         # Redis에 실시간 세션 데이터 저장
         session_data = {
@@ -248,7 +355,11 @@ class HybridSessionService:
     
     async def update_active_session(self, user_id: str, chat_id: str, updates: Dict[str, Any]):
         """활성 세션 업데이트 (Redis)"""
-        session_key = self.get_active_session_key(user_id, chat_id)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        session_key = self.get_active_session_key(user_id, chat_id, sid)
         
         # 기존 데이터 로드
         existing = self.redis.get(session_key)
@@ -266,22 +377,44 @@ class HybridSessionService:
     
     async def get_active_session(self, user_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
         """활성 세션 조회 (Redis)"""
-        session_key = self.get_active_session_key(user_id, chat_id)
-        data = self.redis.get(session_key)
+        sid = None
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        # 신규 키 우선
+        primary_key = self.get_active_session_key(user_id, chat_id, sid)
+        data = self.redis.get(primary_key)
+        if not data:
+            # 구 키 폴백
+            legacy_key = self.get_active_session_key(user_id, chat_id, None)
+            data = self.redis.get(legacy_key)
         return json.loads(data) if data else None
     
     async def save_shared_memory(self, user_id: str, chat_id: str, shared_data: Dict[str, Any]):
         """공유 메모리 저장 (Redis)"""
-        shared_key = self.get_shared_key(user_id, chat_id)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        shared_key = self.get_shared_key(user_id, chat_id, sid)
         self.redis.setex(shared_key, 86400, json.dumps(shared_data))
     
     async def get_shared_memory(self, user_id: str, chat_id: str) -> Dict[str, Any]:
         """공유 메모리 조회 (Redis)"""
-        shared_key = self.get_shared_key(user_id, chat_id)
-        data = self.redis.get(shared_key)
+        sid = None
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        primary_key = self.get_shared_key(user_id, chat_id, sid)
+        data = self.redis.get(primary_key)
+        if not data:
+            legacy_key = self.get_shared_key(user_id, chat_id, None)
+            data = self.redis.get(legacy_key)
         return json.loads(data) if data else {}
     
-    async def add_chat_message(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None):
+    async def add_chat_message(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None) -> Optional[int]:
         """채팅 메시지 추가 (Redis + PostgreSQL)
         세션 FK 제약 보장을 위해 메시지 저장 전에 세션 레코드를 업서트합니다.
         """
@@ -293,7 +426,11 @@ class HybridSessionService:
         }
         
         # Redis에 실시간 히스토리 추가 (최근 50개만)
-        history_key = self.get_history_key(user_id, chat_id)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        history_key = self.get_history_key(user_id, chat_id, sid)
         history = self.redis.get(history_key)
         if history:
             history_list = json.loads(history)
@@ -320,12 +457,12 @@ class HybridSessionService:
             # 세션 보강 실패해도 메시지 저장 시 FK로 다시 오류 나므로 그대로 전파
             pass
 
-        await self.save_message_to_postgres(user_id, chat_id, message_type, content, metadata)
+        msg_id = await self.save_message_to_postgres(user_id, chat_id, message_type, content, metadata)
 
         # 세션 타이틀이 없으면 첫 사용자 메시지로 설정
         if message_type == "user":
             await self._ensure_session_title(user_id, chat_id, content)
-    
+        return msg_id
     # ==================== PostgreSQL (영구 저장) ====================
     
     async def save_session_metadata(self, user_id: str, chat_id: str, session_data: Dict[str, Any], title: Optional[str] = None):
@@ -333,32 +470,82 @@ class HybridSessionService:
         await self._ensure_pool()
         async with self.pool.acquire() as conn:
             await self._ensure_user(user_id)
-            session_id = self._generate_session_id(user_id, chat_id)
-            await conn.execute(
+            # 해시 session_id 사용
+            # 먼저 기존 존재 여부 확인 후 없으면 생성
+            row = await conn.fetchrow(
                 """
-                INSERT INTO chat_sessions (user_id, chat_id, session_id, title, session_data, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (user_id, chat_id) DO UPDATE SET
-                    session_id = $3,
-                    title = COALESCE($4, chat_sessions.title),
-                    session_data = $5,
-                    metadata = $6,
-                    updated_at = NOW(),
-                    is_active = TRUE
+                SELECT session_id FROM chat_sessions WHERE user_id=$1 AND chat_id=$2
                 """,
                 user_id,
                 chat_id,
-                session_id,
-                title,
-                json.dumps(session_data, ensure_ascii=False, default=str),
-                json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
             )
+            if row and row.get("session_id"):
+                session_id = row["session_id"]
+            else:
+                raw = f"{user_id}:{chat_id}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
+                session_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+            # session_id는 UNIQUE라 충돌 가능성이 있어 기존 값 유지 우선
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO chat_sessions (user_id, chat_id, session_id, title, session_data, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (user_id, chat_id) DO UPDATE SET
+                        -- 기존 session_id가 있으면 유지, 없을 때만 갱신
+                        session_id = COALESCE(chat_sessions.session_id, EXCLUDED.session_id),
+                        title = COALESCE(EXCLUDED.title, chat_sessions.title),
+                        session_data = EXCLUDED.session_data,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = NOW(),
+                        is_active = TRUE
+                    """,
+                    user_id,
+                    chat_id,
+                    session_id,
+                    title,
+                    json.dumps(session_data, ensure_ascii=False, default=str),
+                    json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
+                )
+            except Exception as err:
+                # session_id 유니크 제약 관련 충돌은 무시하고 메타만 갱신 시도
+                try:
+                    await conn.execute(
+                        """
+                        UPDATE chat_sessions
+                        SET title = COALESCE($3::text, title),
+                            session_data = $4,
+                            metadata = $5,
+                            updated_at = NOW(),
+                            is_active = TRUE
+                        WHERE user_id = $1 AND chat_id = $2
+                        """,
+                        user_id,
+                        chat_id,
+                        title,
+                        json.dumps(session_data, ensure_ascii=False, default=str),
+                        json.dumps({"last_sync": datetime.now().isoformat()}, ensure_ascii=False, default=str)
+                    )
+                except Exception:
+                    # 최종 실패 시에는 상위에서 처리하도록 전파
+                    raise
     
-    async def save_message_to_postgres(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None):
+    async def save_message_to_postgres(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None) -> Optional[int]:
         """메시지를 PostgreSQL에 영구 저장"""
         await self._ensure_pool()
         async with self.pool.acquire() as conn:
-            session_id = self._generate_session_id(user_id, chat_id)
+            # ensure existing session_id (hashed)
+            session_id = await self.get_or_create_session_id(user_id, chat_id)
+
+            # 메시지 인덱스(chat_id)를 세션 내 1부터 증가로 부여
+            next_index_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(MAX(CASE WHEN chat_id ~ '^[0-9]+$' THEN chat_id::int ELSE 0 END), 0) + 1 AS next_idx
+                FROM chat_messages
+                WHERE session_id = $1
+                """,
+                session_id,
+            )
+            msg_index = str(int(next_index_row["next_idx"]) if next_index_row and "next_idx" in next_index_row else 1)
             # speaker 표준화
             normalized_speaker = self._normalize_speaker(message_type)
             try:
@@ -369,18 +556,32 @@ class HybridSessionService:
             except Exception:
                 pass
             try:
-                await conn.execute(
+                row = await conn.fetchrow(
                     """
                     INSERT INTO chat_messages (user_id, chat_id, session_id, speaker, content, metadata)
                     VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING id
                     """,
                     user_id,
-                    chat_id,
+                    msg_index,
                     session_id,
                     normalized_speaker,
                     content,
                     json.dumps(metadata or {})
                 )
+                # 세션 타이틀 자동 설정(최초 user 메시지일 때만)
+                if normalized_speaker == "user":
+                    await conn.execute(
+                        """
+                        UPDATE chat_sessions
+                        SET title = COALESCE(title, $3), updated_at = NOW()
+                        WHERE user_id = $1 AND chat_id = $2 AND (title IS NULL OR title = '')
+                        """,
+                        user_id,
+                        chat_id,
+                        content[:80],
+                    )
+                return int(row["id"]) if row and "id" in row else None
             except Exception as err:
                 try:
                     print(f"[HybridSessionService][ERROR] insert failed: {err}")
@@ -418,6 +619,83 @@ class HybridSessionService:
             )
             
             return [dict(row) for row in rows]
+
+    # ==================== Helpers for chat sessions/messages ====================
+
+    async def get_next_chat_id(self, user_id: str) -> str:
+        """해당 사용자에 대한 다음 chat_id(1부터 증가)를 문자열로 반환"""
+        await self._ensure_pool()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COALESCE(MAX(CASE WHEN chat_id ~ '^[0-9]+$' THEN chat_id::int ELSE 0 END), 0) AS max_id
+                FROM chat_sessions
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            max_id = int(row["max_id"] or 0)
+            return str(max_id + 1)
+
+    async def get_session_by_session_id(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """session_id로 세션 조회"""
+        await self._ensure_pool()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, chat_id, session_id, title, created_at, updated_at, is_active
+                FROM chat_sessions
+                WHERE session_id = $1
+                """,
+                session_id,
+            )
+            return dict(row) if row else None
+
+    async def get_messages_by_session_id(self, session_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
+        """session_id 기준 메시지 조회 (오름차순)"""
+        await self._ensure_pool()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT 
+                    id,
+                    CASE WHEN speaker = 'chatbot' THEN 'assistant' ELSE speaker END AS role,
+                    content,
+                    metadata,
+                    created_at
+                FROM chat_messages
+                WHERE session_id = $1
+                ORDER BY created_at ASC
+                LIMIT $2
+                """,
+                session_id,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def add_message_by_session_id(
+        self,
+        session_id: str,
+        message_type: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """session_id로 user_id/chat_id를 찾아 메시지 저장"""
+        await self._ensure_pool()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, chat_id
+                FROM chat_sessions
+                WHERE session_id = $1
+                """,
+                session_id,
+            )
+            if not row:
+                raise ValueError("Session not found")
+            user_id = row["user_id"]
+            chat_id = row["chat_id"]
+        await self.add_chat_message(user_id, chat_id, message_type, content, metadata or {})
     
     async def archive_session(self, user_id: str, chat_id: str):
         """세션 아카이브 (Redis → PostgreSQL)"""
@@ -500,7 +778,7 @@ class HybridSessionService:
             await conn.execute(
                 """
                 UPDATE chat_sessions
-                SET title = COALESCE(title, $3), updated_at = NOW()
+                SET title = COALESCE($3::text, title), updated_at = NOW()
                 WHERE user_id = $1 AND chat_id = $2
                 """,
                 user_id,

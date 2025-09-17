@@ -12,6 +12,7 @@ def _parse_allowed_origins() -> list[str]:
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://172.29.208.1:3000",
+            "http://192.168.0.199:3000",
         ]
         # Ensure FRONTEND_BASE_URL is included
         if settings.FRONTEND_BASE_URL and settings.FRONTEND_BASE_URL not in defaults:

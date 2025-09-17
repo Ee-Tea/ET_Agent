@@ -70,6 +70,7 @@ dependencies = [
     "rapidfuzz>=3.14.1",
     "PyMuPDF>=1.23.0",
     "fitz>=0.0.1.dev2",
+    "duckduckgo-search>=8.1.1",
 ]
 
 [build-system]

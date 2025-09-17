@@ -1997,7 +1997,7 @@ class Teacher:
             safe_uq = ("".join(ch for ch in uq if ch.isalnum()))[:20] or "exam"
             suffix = "" if (start == 0 and end == total_n - 1) else f"_{start+1}-{end+1}"
             ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 밀리초까지
-            output_path = os.path.join(base_dir, f"{safe_uq}_분석리포트{suffix}_{ts}.pdf")
+            output_path = os.path.join(base_dir, f"{safe_uq}_문제집{suffix}_{ts}.pdf")
 
             # 일부 구현은 반환값이 None → 변수에 안 받습니다.
             generator.generate_problem_booklet(problems, output_path, f"{safe_uq} 문제집")

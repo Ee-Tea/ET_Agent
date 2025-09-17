@@ -657,7 +657,12 @@ class HybridSessionService:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, speaker, content, metadata, created_at
+                SELECT 
+                    id,
+                    CASE WHEN speaker = 'chatbot' THEN 'assistant' ELSE speaker END AS role,
+                    content,
+                    metadata,
+                    created_at
                 FROM chat_messages
                 WHERE session_id = $1
                 ORDER BY created_at ASC

@@ -4,7 +4,9 @@
 
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Query, Body, Request
+import logging
 from datetime import datetime
+import hashlib, uuid
 
 from ..models import (
     SessionRequest, SessionResponse, SessionListResponse,
@@ -14,6 +16,7 @@ from api.services.hybrid_session_service import HybridSessionService
 import os
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+logger = logging.getLogger("sessions_router")
 
 # 전역 서비스 (api/main.py에서 쓰는 것과 분리 사용시에는 별도로 초기화 필요)
 _redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
@@ -113,22 +116,118 @@ async def list_sessions(
                 """,
                 user_id, limit, offset,
             )
-            sessions = [
-                SessionResponse(
-                    session_id=r["session_id"],
-                    user_id=r["user_id"],
-                    chat_id=str(r["chat_id"]),
-                    title=r["title"],
-                    created_at=r["created_at"].isoformat() if hasattr(r["created_at"], 'isoformat') else str(r["created_at"]),
-                    status=r["status"],
-                    service_type=r["service_type"],
+            try:
+                logger.info("list_sessions uid=%s limit=%s offset=%s -> %d rows", user_id, limit, offset, len(rows))
+            except Exception:
+                pass
+            # 세션ID 보정: 빈 값/콜론(:) 포함/24-hex 아님 → 해시 session_id로 마이그레이션
+            def _is_valid_sid(s: str | None) -> bool:
+                if not s or not isinstance(s, str):
+                    return False
+                if ":" in s:
+                    return False
+                if len(s) != 24:
+                    return False
+                try:
+                    int(s, 16)
+                    return True
+                except Exception:
+                    return False
+
+            normalized: list[SessionResponse] = []
+            invalid: list[Dict[str, Any]] = []
+            for r in rows:
+                sid = r["session_id"]
+                if not _is_valid_sid(sid):
+                    invalid.append({
+                        "user_id": r["user_id"],
+                        "chat_id": str(r["chat_id"]),
+                        "session_id": sid,
+                    })
+                    continue
+                # 메시지 존재 여부 조회(경량화)
+                has_messages = False
+                try:
+                    cnt = await conn.fetchval(
+                        "SELECT 1 FROM chat_messages WHERE session_id=$1 LIMIT 1",
+                        sid,
+                    )
+                    has_messages = bool(cnt is not None)
+                except Exception:
+                    has_messages = False
+                normalized.append(
+                    SessionResponse(
+                        session_id=sid,
+                        user_id=r["user_id"],
+                        chat_id=str(r["chat_id"]),
+                        title=r["title"],
+                        created_at=r["created_at"].isoformat() if hasattr(r["created_at"], 'isoformat') else str(r["created_at"]),
+                        status=r["status"],
+                        service_type=r["service_type"],
+                        has_messages=has_messages,
+                    )
                 )
-                for r in rows
-            ]
+
+            if invalid:
+                try:
+                    logger.warning("list_sessions: filtered invalid sessions count=%d examples=%s", len(invalid), invalid[:3])
+                except Exception:
+                    pass
+
+            sessions = normalized
             total_row = await conn.fetchrow("SELECT COUNT(*) AS c FROM chat_sessions WHERE user_id=$1", user_id)
             return SessionListResponse(sessions=sessions, total=int(total_row["c"]))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Session listing failed: {str(e)}")
+
+@router.post("/migrate")
+async def migrate_user_sessions(user_id: str = Query(...)):
+    """한 번만 호출해도 되는 유지보수용: 해당 사용자의 구형 session_id를 해시로 일괄 교체"""
+    try:
+        await _hybrid.init_postgres()
+        async with _hybrid.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT session_id, chat_id
+                FROM chat_sessions
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            def _is_valid_sid(s: str | None) -> bool:
+                if not s or not isinstance(s, str):
+                    return False
+                if ":" in s:
+                    return False
+                if len(s) != 24:
+                    return False
+                try:
+                    int(s, 16)
+                    return True
+                except Exception:
+                    return False
+            migrated = 0
+            for r in rows:
+                sid = r["session_id"]
+                if _is_valid_sid(sid):
+                    continue
+                raw = f"{user_id}:{r['chat_id']}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
+                new_sid = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+                await conn.execute(
+                    """
+                    UPDATE chat_sessions
+                    SET session_id = $3, updated_at = NOW(), is_active = TRUE
+                    WHERE user_id = $1 AND chat_id = $2 AND session_id = $4
+                    """,
+                    user_id,
+                    str(r["chat_id"]),
+                    new_sid,
+                    sid,
+                )
+                migrated += 1
+            return {"user_id": user_id, "migrated": migrated}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
 
 @router.get("/{session_id}", response_model=SessionResponse)
 async def get_session(session_id: str):

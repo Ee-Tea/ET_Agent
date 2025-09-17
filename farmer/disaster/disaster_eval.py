@@ -3,7 +3,7 @@
 # =============================================================================
 
 # 평가할 데이터셋 파일 경로 설정
-CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250916_214439.csv"
+CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250917_115047.csv"
 
 # 결과 저장 설정
 OUTPUT_DIRECTORY = "./farmer/disaster/data"                # 결과 저장 디렉토리

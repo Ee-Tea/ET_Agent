@@ -44,7 +44,7 @@ if not OPENAI_API_KEY:
 PDF_DIR = "./farmer/disaster/data"
 SINGLE_PDF_PATH = "./farmer/disaster/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
 IMAGE_DIR = ""
-TARGET_QUESTIONS = 50   # 🔥 생성할 질문 수
+TARGET_QUESTIONS = 300  # 🔥 생성할 질문 수
 CHUNK_SIZE = 900      # 더 긴 context로 변경
 CHUNK_OVERLAP = 150    # overlap도 비례적으로 증가
 
@@ -227,7 +227,7 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
     # 더 강력한 LLM 사용 (질문 품질 향상)
     generator_llm = LangchainLLMWrapper(ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0.4,  # 창의성과 일관성의 균형
+        temperature=0.5,  # 창의성과 일관성의 균형
         max_tokens=2000   # 더 긴 답변 생성
     ))
     generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")

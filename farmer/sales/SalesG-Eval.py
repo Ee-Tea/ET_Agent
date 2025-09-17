@@ -5,7 +5,7 @@
 PROJECT_ROOT = r"C:\FinalPrj\ET_Agent"
 
 # 평가할 데이터셋 파일 경로 설정
-CSV_FILE_PATH = "./farmer/sales/data/sales_golden_dataset_20250912_161133.csv"
+CSV_FILE_PATH = "./farmer/sales/data/sales_golden_dataset_20250916_1006.csv"
 
 # 결과 저장 설정
 OUTPUT_DIRECTORY = "./farmer/sales/data"                # 결과 저장 디렉토리

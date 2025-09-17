@@ -4,43 +4,47 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# =========[ 벡터스토어 / 임베딩 관련 Import (맨 위) ]=========
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
-
 # =========[ 표준/외부 라이브러리 ]=========
 import os
 import re
 import json
 import time
-import asyncio
 import threading
+import sys
+import math
 from typing import TypedDict, Optional, Any, Dict, List
 from operator import itemgetter
 from argparse import ArgumentParser
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import sys
 
 import numpy as np
 import pandas as pd
-import math
 from dotenv import load_dotenv
-from tavily import TavilyClient
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
-from langchain.schema import Document
 
 # =========[ LangChain / LangGraph / LLM ]=========
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+from langchain.schema import Document
+
+# =========[ 외부 서비스 ]=========
+from tavily import TavilyClient
+
+# =========[ 공통 모듈 ]=========
+from common.milvus_helpers import search_milvus_documents
+
+# =========[ 지연 로딩을 위한 전역 변수 ]=========
+_disaster_app = None
+_llm_instance = None
+_tavily_client = None
 
 load_dotenv()
 
 # =========[ 환경설정 ]=========
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jhgan/ko-sroberta-multitask")
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "agri_disaster_docs")
@@ -111,16 +115,38 @@ class GraphState(TypedDict):
     retrieved_docs: Optional[List[Document]]
     is_retrieval_sufficient: bool
     temporal: Optional[Dict[str, Any]]
+    milvus_data: Optional[Dict[str, Any]]
 
-def make_llm() -> ChatOpenAI:
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY가 .env에 없습니다.")
-    return ChatOpenAI(model_name=OPENAI_MODEL, temperature=TEMPERATURE, api_key=OPENAI_API_KEY)
+def _get_llm():
+    """LLM 인스턴스를 지연 로딩으로 가져오기"""
+    global _llm_instance
+    if _llm_instance is None:
+        print("🤖 LLM 모듈 로딩 중...")
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY가 .env에 없습니다.")
+        _llm_instance = ChatOpenAI(model_name=OPENAI_MODEL, temperature=TEMPERATURE, api_key=OPENAI_API_KEY)
+        print("✅ LLM 모듈 로딩 완료")
+    return _llm_instance
 
-# === 프롬프트들 ===
-DRAFT_PROMPT = ChatPromptTemplate.from_template(
+def _get_tavily_client():
+    """Tavily 클라이언트를 지연 로딩으로 가져오기"""
+    global _tavily_client
+    if _tavily_client is None:
+        print("🔍 Tavily 클라이언트 로딩 중...")
+        _tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+        print("✅ Tavily 클라이언트 로딩 완료")
+    return _tavily_client
+
+# === 프롬프트들 (지연 로딩) ===
+def _get_draft_prompt():
+    """초안 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
     """너는 농작물 재해 정보 전문가야.
 아래 문맥을 참고하여 질문에 대한 초안 답변을 작성해줘.
+**문맥에 표(pdf_table)가 있으면 이를 중심으로 답변해줘.**
+**문맥에 없는 정보는 절대 넣지마.**
+**질문에서 요청한 연도와 문맥의 연도가 다르면 반드시 "해당 연도의 정보를 찾을 수 없습니다"라고 답변해줘.**
+
 답변은 딱딱한 보고서 형식이 아닌, 대화하듯이 친절하게 설명하는 스타일로 작성해야 해.
 
 **답변 형식 규칙:**
@@ -143,12 +169,16 @@ DRAFT_PROMPT = ChatPromptTemplate.from_template(
 [질문(상대시점 해석)] {question_resolved}
 
 초안:"""
-)
+    )
 
-WEB_SEARCH_PROMPT = ChatPromptTemplate.from_template(
-    """너는 농업재해 및 농업 정보 전문가야.
+def _get_web_search_prompt():
+    """웹 검색 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
+    """너는 농업재해 및 작물 재해대응 정보 전문가야.
 아래에는 로컬 인덱스 문맥과 웹 검색 결과가 함께 있어.
 이 모든 정보를 활용하여 초안 답변을 작성해줘. 답변은 대화체로, 친절하게 설명하는 스타일로 작성해야 해.
+
+**중요**: 질문에서 요청한 연도와 문맥의 연도가 다르면 반드시 "해당 연도의 정보를 찾을 수 없습니다"라고 답변해줘.
 
 **답변 형식 규칙:**
 - 시작, 개요, 상세 내용, 출처, 마무리 규칙은 로컬 인덱스 초안과 동일하게 적용해.
@@ -165,9 +195,11 @@ WEB_SEARCH_PROMPT = ChatPromptTemplate.from_template(
 [질문(상대시점 해석)] {question_resolved}
 
 초안:"""
-)
+    )
 
-REFINE_PROMPT = ChatPromptTemplate.from_template(
+def _get_refine_prompt():
+    """리파인 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
     """질문, 초안 답변, 그리고 문맥이 주어졌어.
 초안 답변을 검토하여 **최종 답변**을 완전하고 간결하게 한국어로 작성해줘.
 답변은 딱딱한 보고서 형식이 아닌, 대화하듯이 친절하게 설명하는 스타일을 유지해야 해.
@@ -187,9 +219,11 @@ REFINE_PROMPT = ChatPromptTemplate.from_template(
 초안: {answer_draft}
 
 최종 답변:"""
-)
+    )
 
-WEB_SEARCH_REFINE_PROMPT = ChatPromptTemplate.from_template(
+def _get_web_search_refine_prompt():
+    """웹 검색 리파인 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
     """다음은 문맥(로컬+웹 검색), 질문, 그리고 초안 답변이야.
 초안을 검토해서 최종 답변을 완전하고 간결하게 한국어로 작성해줘. 답변은 대화체 스타일을 유지해야 해.
 
@@ -210,10 +244,12 @@ WEB_SEARCH_REFINE_PROMPT = ChatPromptTemplate.from_template(
 초안: {answer_draft}
 
 최종 답변:"""
-)
+    )
 
-# ===== LLM 기반 검증 프롬프트들 =====
-LLM_RETRIEVAL_VALIDATION_PROMPT = ChatPromptTemplate.from_template(
+# ===== LLM 기반 검증 프롬프트들 (지연 로딩) =====
+def _get_llm_retrieval_validation_prompt():
+    """LLM 검증 프롬프트를 지연 로딩으로 가져오기"""
+    return ChatPromptTemplate.from_template(
     """당신은 농업재해 정보 검색 품질을 평가하는 AI 전문가입니다.
 주어진 질문에 대해 검색된 문서가 충분한 정보를 담고 있는지 판단해주세요.
 
@@ -237,7 +273,7 @@ LLM_RETRIEVAL_VALIDATION_PROMPT = ChatPromptTemplate.from_template(
 {context}
 
 [판단]:"""
-)
+    )
 
 # (삭제됨) LLM_ANSWER_VALIDATION_PROMPT
 # 답변 품질에 대한 2차 검증 프롬프트는 요구사항에 따라 제거되었습니다.
@@ -246,24 +282,15 @@ def _has_web_results(context_text: str) -> bool:
     c = (context_text or "")
     return "[웹 검색 결과]" in c
 
-# =========[ 전역 변수 ]=========
-_vectorstore = None
-
 # =========[ LangGraph 노드 ]=========
 def load_store_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 벡터스토어 연결 (LangChain-Milvus)")
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL_NAME,
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    vectorstore = Milvus(
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME,
-        connection_args={"host": MILVUS_HOST, "port": MILVUS_PORT},
-    )
-    # Milvus 객체를 상태에 저장하지 않고 전역 변수로 관리
-    global _vectorstore
-    _vectorstore = vectorstore
+    print("🧩 노드: MilvusDB 연결 정보 확인")
+    # milvus_data가 제공되지 않으면 기본값으로 설정
+    milvus_data = state.get("milvus_data", {})
+    if not milvus_data:
+        print("⚠️ MilvusDB 연결 정보가 제공되지 않음")
+    else:
+        print(f"✅ MilvusDB 연결 정보 확인: {milvus_data.get('connection_status', False)}")
     return {**state}
 
 def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
@@ -276,49 +303,45 @@ def temporal_enrich_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "question": q_raw, "temporal": temporal, "question_resolved": q_resolved}
 
 def retrieve_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 검색 (메타데이터 필터링 활용)")
+    print("🧩 노드: 검색 (milvus_helpers 사용)")
     q = state.get("question_resolved", state.get("question", ""))
-    vectorstore = _vectorstore
+    milvus_data = state.get("milvus_data", {})
 
-    region = extract_region_from_question(q)
-    results_with_score = []
+    # milvus_helpers를 사용하여 문서 검색
+    try:
+        documents = search_milvus_documents(
+            milvus_data=milvus_data,
+            collection_name=COLLECTION_NAME,
+            query=q,
+            k=30
+        )
+        
+        if not documents:
+            print("   - ⚠️ 검색된 문서가 없습니다.")
+            context = "관련 문서를 찾을 수 없습니다."
+            return {**state, "db_context": context, "retrieved_docs": []}
+        
+        # 문서를 컨텍스트로 변환
+        ctx_parts = []
+        for doc in documents:
+            meta = getattr(doc, "metadata", {})
+            fname = meta.get("file_name") or meta.get("source") or "unknown"
+            page = meta.get("page")
+            tag = meta.get("type") or "text"
+            years = meta.get("years") or []
+            header = f"[{tag}][{fname}{f' p.{page}' if page else ''}][years={years}]"
+            ctx_parts.append(f"{header}\n{doc.page_content}")
+        
+        context = "\n\n".join(ctx_parts)
+        print(f"   - ✅ 검색 완료: {len(documents)}개 문서")
+        
+        return {**state, "db_context": context, "retrieved_docs": documents}
+        
+    except Exception as e:
+        print(f"   - ❌ 검색 중 오류 발생: {e}")
+        context = "관련 문서를 찾을 수 없습니다."
+        return {**state, "db_context": context, "retrieved_docs": []}
 
-    if region:
-        print(f"   - 지역명 '{region}'을(를) 사용하여 필터링된 검색 수행")
-        try:
-            expr = f"json_contains(regions, '\"{region}\"')"
-            filtered_results_with_score = vectorstore.similarity_search_with_score(q, k=5, expr=expr)
-            print(f"   - 필터링된 검색 결과: {len(filtered_results_with_score)}개")
-            results_with_score.extend(filtered_results_with_score)
-            if len(results_with_score) < 3:
-                print("   - 결과가 부족하여 일반 검색을 추가로 수행합니다.")
-                unfiltered_results_with_score = vectorstore.similarity_search_with_score(q, k=5)
-                existing_content = {doc.page_content for doc, _ in results_with_score}
-                for doc, score in unfiltered_results_with_score:
-                    if doc.page_content not in existing_content:
-                        results_with_score.append((doc, score))
-                        existing_content.add(doc.page_content)
-        except Exception as e:
-            print(f"   - ⚠️ 메타데이터 필터링 검색 실패, 일반 검색으로 대체: {e}")
-            results_with_score = vectorstore.similarity_search_with_score(q, k=8)
-    else:
-        print("   - 지역명이 없어 일반 유사도 검색 수행")
-        results_with_score = vectorstore.similarity_search_with_score(q, k=8)
-
-    results_with_score.sort(key=lambda x: x[1])
-    docs = [doc for doc, score in results_with_score]
-
-    ctx_parts = []
-    for d, score in results_with_score[:8]:
-        meta = getattr(d, "metadata", {})
-        fname = meta.get("file_name") or meta.get("source") or "unknown"
-        page = meta.get("page")
-        tag = meta.get("type") or "text"
-        header = f"[유사도:{score:.4f}][{tag}][{fname}{f' p.{page}' if page else ''}]"
-        ctx_parts.append(f"{header}\n{d.page_content}")
-
-    context = "\n\n".join(ctx_parts) or "관련 문서를 찾을 수 없습니다."
-    return {**state, "db_context": context, "retrieved_docs": docs}
 
 def combine_context_node(state: GraphState) -> Dict[str, Any]:
     print("🧩 노드: 컨텍스트 결합")
@@ -337,7 +360,7 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     question = state.get("question_resolved", state.get("question", ""))
     try:
         print(f"   - '{question}'에 대한 웹 검색을 시작합니다...")
-        tavily = TavilyClient(api_key=TAVILY_API_KEY)
+        tavily = _get_tavily_client()
         results = tavily.search(query=question, max_results=TAVILY_MAX_RESULTS)
         if not results or not results.get("results"):
             print("   - ⚠️ 웹 검색 결과가 없습니다.")
@@ -350,12 +373,16 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
         return {**state, "web_context": f"[웹 검색 실패: {e}]"}
 
 def generate_draft_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 초안 생성")
+    print("🧩 노드: 최종 답변 생성")
     if not state.get("context"):
         raise ValueError("context 누락")
     t = state.get("temporal") or {}
     use_web_prompt = _has_web_results(state.get("context", ""))
-    prompt = WEB_SEARCH_PROMPT if use_web_prompt else DRAFT_PROMPT
+    
+    # 지연 로딩으로 프롬프트와 LLM 가져오기
+    prompt = _get_web_search_prompt() if use_web_prompt else _get_draft_prompt()
+    llm = _get_llm()
+    
     chain = (
         {
             "context": itemgetter("context"),
@@ -363,7 +390,7 @@ def generate_draft_node(state: GraphState) -> Dict[str, Any]:
             "question_resolved": lambda s: s.get("question_resolved", s.get("question", "")),
         }
         | prompt.partial(today=t.get("today", ""))
-        | make_llm()
+        | llm
         | StrOutputParser()
     )
     ans = chain.invoke({
@@ -371,33 +398,9 @@ def generate_draft_node(state: GraphState) -> Dict[str, Any]:
         "question_raw": state.get("question", ""),
         "question_resolved": state.get("question_resolved", state.get("question", "")),
     })
-    return {**state, "answer_draft": ans.strip()}
-
-def refine_answer_node(state: GraphState) -> Dict[str, Any]:
-    print("🧩 노드: 답변 개선 및 최종 생성")
-    if not state.get("answer_draft"):
-        raise ValueError("answer_draft 누락")
-    t = state.get("temporal") or {}
-    use_web_prompt = _has_web_results(state.get("context", ""))
-    prompt = WEB_SEARCH_REFINE_PROMPT if use_web_prompt else REFINE_PROMPT
-    chain = (
-        {
-            "context": itemgetter("context"),
-            "question_raw": lambda s: s.get("question", ""),
-            "question_resolved": lambda s: s.get("question_resolved", s.get("question", "")),
-            "answer_draft": itemgetter("answer_draft"),
-        }
-        | prompt.partial(today=t.get("today", ""))
-        | make_llm()
-        | StrOutputParser()
-    )
-    ans = chain.invoke({
-        "context": state.get("context", ""),
-        "question_raw": state.get("question", ""),
-        "question_resolved": state.get("question_resolved", state.get("question", "")),
-        "answer_draft": state["answer_draft"],
-    })
     return {**state, "answer": ans.strip()}
+
+# refine_answer_node 제거됨 - 초안 답변을 그대로 최종 답변으로 사용
 
 # ===== LLM 기반 검증 노드들 =====
 # (삭제됨) MAX_RETRIES
@@ -415,14 +418,17 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
     try:
         print("   - 🤖 LLM이 검색 품질을 평가 중...")
         
-        # LLM 기반 검증 체인
+        # LLM 기반 검증 체인 (지연 로딩)
+        validation_prompt = _get_llm_retrieval_validation_prompt()
+        llm = _get_llm()
+        
         validation_chain = (
             {
                 "question": itemgetter("question"),
                 "context": itemgetter("context")
             }
-            | LLM_RETRIEVAL_VALIDATION_PROMPT
-            | make_llm()
+            | validation_prompt
+            | llm
             | StrOutputParser()
         )
         
@@ -433,7 +439,6 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         
         # JSON 결과 파싱
         try:
-            import json
             result_json = json.loads(result.strip())
             judgment = result_json.get("judgment", "INSUFFICIENT")
             reason = result_json.get("reason", "파싱 실패")
@@ -449,7 +454,7 @@ def llm_retrieval_validation_node(state: GraphState) -> Dict[str, Any]:
         except json.JSONDecodeError:
             # JSON 파싱 실패 시 기존 방식으로 폴백
             result_clean = result.strip().upper()
-            is_sufficient = "SUFFICIENT" in result_clean
+            is_sufficient = "SUFFICIENT" in result_clean and "INSUFFICIENT" not in result_clean
             print(f"   - 📊 LLM 검증 결과 (폴백): {result.strip()}")
             print(f"   - 🎯 최종 판단: {'✅ 충분' if is_sufficient else '⚠️ 불충분'}")
         
@@ -482,7 +487,7 @@ def build_graph():
     g.add_node("web_search", web_search_node)
     g.add_node("combine_context", combine_context_node)
     g.add_node("generate_draft", generate_draft_node)
-    g.add_node("refine_answer", refine_answer_node)
+    # refine_answer 노드 제거됨
     # 2차 검증/폴백 노드 제거
 
     g.set_entry_point("load_store")
@@ -498,57 +503,76 @@ def build_graph():
     )
     g.add_edge("web_search", "combine_context")
     g.add_edge("combine_context", "generate_draft")
-    g.add_edge("generate_draft", "refine_answer")
-    # 2차 검증 제거: 최종 답변 생성 후 바로 종료
-    g.add_edge("refine_answer", END)
+    # refine_answer 제거: generate_draft에서 바로 최종 답변 생성 후 종료
+    g.add_edge("generate_draft", END)
 
     # 2차 검증 흐름 제거에 따라 관련 분기 제거 (복구 가능)
     # 필요 시 추후 복구 가능
 
     app = g.compile()
-    try:
-        graph_image_path = "agent_workflow_openai.png"
-        with open(graph_image_path, "wb") as f:
-            f.write(app.get_graph().draw_mermaid_png())
-        print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
-    except Exception as e:
-        print(f"그래프 시각화 중 오류: {e}")
+    # try:
+    #     graph_image_path = "agent_workflow_openai.png"
+    #     with open(graph_image_path, "wb") as f:
+    #         f.write(app.get_graph().draw_mermaid_png())
+    #     print(f"\nLangGraph 구조가 '{graph_image_path}' 파일로 저장되었습니다.")
+    # except Exception as e:
+    #     print(f"그래프 시각화 중 오류: {e}")
     return app
 
+def _get_disaster_app():
+    """재해대응 에이전트 애플리케이션을 지연 로딩으로 가져오기"""
+    global _disaster_app
+    if _disaster_app is None:
+        print("⚠️ 재해_agent 모듈 로딩 중...")
+        _disaster_app = build_graph()
+        print("✅ 재해_agent 모듈 로딩 완료")
+    return _disaster_app
+
 # =========[ OchestratorTest.py 호환 함수 ]=========
-async def run(state: dict) -> dict:
+def run(state: dict) -> dict:
     """
-    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (비동기)
+    OchestratorTest.py에서 호출되는 재해대응 에이전트 실행 함수 (동기)
     
     Args:
         state: OchestratorTest.py에서 전달받은 상태 딕셔너리
                - query: 사용자 질문 (필수)
+               - milvus_data: MilvusDB 연결 정보 (선택)
     
     Returns:
         dict: 실행 결과
-            - pred_answer: 최종 답변
+            - agent_answer: 최종 답변
             - source: "disaster_agent"
     """
     try:
-        # 질문 추출
+        # 질문 및 MilvusDB 연결 정보 추출
         query = state.get("query", "")
+        milvus_data = state.get("milvus_data", {})
+        
         if not query:
             return {"agent_answer": "질문이 제공되지 않았습니다. 재해 관련 질문을 해주세요."}
         
         print(f"[재해_agent_LLM] 질문 처리 시작: {query}")
+        print(f"[재해_agent_LLM] MilvusDB 연결: {'연결됨' if milvus_data.get('connection_status') else '연결 안됨'}")
         
-        # 그래프 빌드 및 실행
-        app = build_graph()
+        # 그래프를 지연 로딩으로 가져오기
+        app = _get_disaster_app()
         
-        # 그래프 실행
-        result = app.invoke({"question": query})
+        # 그래프 실행 (milvus_data 포함)
+        result = app.invoke({
+            "question": query,
+            "milvus_data": milvus_data
+        })
         
         # 답변 추출
         answer = result.get("answer", "답변을 생성할 수 없습니다.")
         
         print(f"[재해_agent_LLM] 답변 생성 완료: {len(answer)}자")
         
-        return {"agent_answer": answer}
+        # 전체 그래프 상태를 반환 (RAGAS 평가를 위해)
+        return {
+            "agent_answer": answer,
+            **result  # 그래프의 모든 상태 정보 포함
+        }
         
     except Exception as e:
         error_msg = f"재해대응 에이전트 실행 중 오류가 발생했습니다: {e}"
@@ -589,7 +613,8 @@ if __name__ == "__main__":
         if not q:
             raise ValueError("질문이 비어 있습니다.")
         try:
-            out = app.invoke({"question": q})
+            # 단독 실행 시에는 milvus_data를 빈 딕셔너리로 설정
+            out = app.invoke({"question": q, "milvus_data": {}})
             if args.show_context:
                 print_context_and_reason(out)
             print("\n=== 답변 ===")
@@ -606,7 +631,8 @@ if __name__ == "__main__":
             if not q:
                 continue
             try:
-                out = app.invoke({"question": q})
+                # 단독 실행 시에는 milvus_data를 빈 딕셔너리로 설정
+                out = app.invoke({"question": q, "milvus_data": {}})
                 if args.show_context:
                     print_context_and_reason(out)
                 print("\n=== 답변 ===")

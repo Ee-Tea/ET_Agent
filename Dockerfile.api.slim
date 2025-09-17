@@ -12,9 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 최소 의존성만 설치
-COPY requirements.bff.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# uv + 루트 락파일로 버전 고정 설치 (bff 전용 requirements)
+COPY pyproject.toml uv.lock /app/
+COPY requirements.bff.txt /app/requirements.txt
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system --no-cache-dir -r /app/requirements.txt
 
 # BFF 코드만 복사
 COPY api/ /app/api

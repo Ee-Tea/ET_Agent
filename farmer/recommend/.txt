@@ -1,0 +1,15 @@
+OPENAI_API_KEY -> GROQ_API_KEY 
+
+gpt-4o-mini
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
+최고 품질 대화/코딩: llama-3.3-70b-versatile 
+GroqCloud
+
+실시간 UX/저비용: llama-3.1-8b-instant 
+GroqCloud
+
+툴 호출 많은 에이전트: llama3-groq-70b-8192-tool-use-preview (프리뷰)
+

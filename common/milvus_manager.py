@@ -31,6 +31,8 @@ class MilvusDBManager:
         """
         self.host = host or os.getenv("MILVUS_HOST", "localhost")
         self.port = port or os.getenv("MILVUS_PORT", "19530")
+        # Prefer full URI if provided to avoid localhost fallback
+        self.uri = os.getenv("MILVUS_URI", f"http://{self.host}:{self.port}")
         self.embedding_model_name = embedding_model_name
         
         # 연결 상태
@@ -39,7 +41,7 @@ class MilvusDBManager:
         self.collections = {}  # 컬렉션별 Milvus 객체 캐시
         
         
-        logger.info(f"MilvusDB Manager 초기화: {self.host}:{self.port}")
+        logger.info(f"MilvusDB Manager 초기화: {self.uri}")
     
     def connect(self) -> bool:
         """MilvusDB에 연결"""
@@ -48,8 +50,8 @@ class MilvusDBManager:
             if "default" in connections.list_connections():
                 connections.disconnect("default")
             
-            # 새 연결 생성
-            connections.connect(alias="default", host=self.host, port=self.port)
+            # 새 연결 생성 - URI로 고정 (host/port 혼선 방지)
+            connections.connect(alias="default", uri=self.uri)
             self.is_connected = True
             
             # 임베딩 모델 초기화
@@ -131,7 +133,7 @@ class MilvusDBManager:
             vectorstore = Milvus(
                 embedding_function=self.embeddings_model,
                 collection_name=collection_name,
-                connection_args={"host": self.host, "port": self.port},
+                connection_args={"uri": self.uri},
                 text_field=text_field,
                 vector_field=vector_field,
                 search_params={"metric_type": metric_type, "params": {"nprobe": 10}}
@@ -283,7 +285,7 @@ class MilvusDBManager:
             vectorstore = Milvus(
                 embedding_function=self.embeddings_model,
                 collection_name=collection_name,
-                connection_args={"host": self.host, "port": self.port},
+                connection_args={"uri": self.uri},
                 text_field=text_field,
                 vector_field=vector_field,
                 search_params={"metric_type": metric_type, "params": {"nprobe": 10}}

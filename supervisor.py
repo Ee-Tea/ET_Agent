@@ -711,7 +711,13 @@ class MainOrchestrator:
         try:
             # 세션 상태 저장
             import asyncio
-            asyncio.run(self.save_session(state))
+            try:
+                # 이미 이벤트 루프가 돌고 있으면 비동기로 스케줄만 함
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.save_session(state))
+            except RuntimeError:
+                # 루프가 없으면 동기 컨텍스트에서 실행
+                asyncio.run(self.save_session(state))
             print("💾 세션 상태 저장 완료")
         except Exception as e:
             print(f"❌ 세션 상태 저장 실패: {e}")
@@ -1061,7 +1067,21 @@ class MainOrchestrator:
     def load_short_term_memory(self) -> Dict[str, Any]:
         """숏텀 메모리에서 서비스별 데이터 로드"""
         try:
-            key = f"short_term:{self.session_key}"
+            # 신규 세션키(session_id) 우선, 없으면 기존 키 폴백
+            session_id = None
+            if self.hybrid_session_service:
+                try:
+                    row = self.hybrid_session_service.redis.get(f"active_session:{self.user_id}:{self.chat_id}")
+                    if row:
+                        try:
+                            import json as _json
+                            r = _json.loads(row)
+                            session_id = r.get("session_id") or None
+                        except Exception:
+                            session_id = None
+                except Exception:
+                    session_id = None
+            key = f"short_term:{session_id}" if session_id else f"short_term:{self.session_key}"
             data = self.memory.redis.get(key)
             if data:
                 if isinstance(data, bytes):
@@ -1075,7 +1095,21 @@ class MainOrchestrator:
     def save_short_term_memory(self, data: Dict[str, Any]) -> None:
         """숏텀 메모리에 서비스별 데이터 저장"""
         try:
-            key = f"short_term:{self.session_key}"
+            # 신규 세션키(session_id) 우선, 없으면 기존 키 폴백
+            session_id = None
+            if self.hybrid_session_service:
+                try:
+                    row = self.hybrid_session_service.redis.get(f"active_session:{self.user_id}:{self.chat_id}")
+                    if row:
+                        try:
+                            import json as _json
+                            r = _json.loads(row)
+                            session_id = r.get("session_id") or None
+                        except Exception:
+                            session_id = None
+                except Exception:
+                    session_id = None
+            key = f"short_term:{session_id}" if session_id else f"short_term:{self.session_key}"
             self.memory.redis.setex(key, 3600, json.dumps(data, ensure_ascii=False))  # 1시간 TTL
             print(f"💾 숏텀 메모리 저장 완료: {key}")
         except Exception as e:

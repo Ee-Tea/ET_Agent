@@ -52,10 +52,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # 경로 설정
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from DisasterAgent_LLM import run
+from common.milvus_manager import MilvusDBManager
 
 class DisasterRAGASEvaluator:
-    def __init__(self, csv_path="./farmer/disaster/data/golden_dataset_open_single_20250912_171334.csv", config=None):
+    def __init__(self, csv_path="./farmer/disaster/data/final_disaster_results_20250917_0731.csv", config=None):
         """DisasterAgent_LLM RAGAS 평가기 초기화"""
         print(f"🔧 DisasterRAGAS 평가기 초기화 시작...")
         print(f"📁 CSV 파일 경로: {csv_path}")
@@ -66,6 +68,21 @@ class DisasterRAGASEvaluator:
         self.evaluation_results = []
         
         try:
+            # MilvusDB 관리자 초기화
+            print("🔗 MilvusDB 관리자 초기화 중...")
+            self.milvus_manager = MilvusDBManager()
+            
+            # MilvusDB 연결
+            try:
+                if not self.milvus_manager.connect():
+                    print("⚠️ MilvusDB 연결 실패 - 일부 기능이 제한될 수 있습니다.")
+                    self.milvus_manager = None  # 연결 실패 시 None으로 설정
+                else:
+                    print("✅ MilvusDB 연결 성공")
+            except Exception as e:
+                print(f"❌ MilvusDB 연결 중 오류 발생: {e}")
+                self.milvus_manager = None  # 오류 발생 시 None으로 설정
+            
             # 공식 문서에 따라 모델 설정
             print("🤖 모델 설정 중...")
             self._setup_models()
@@ -75,7 +92,9 @@ class DisasterRAGASEvaluator:
             self.test_questions = self._create_test_questions()
             print(f"✅ 테스트 질문 생성 완료: {len(self.test_questions)}개")
             
+            self.evaluation_results = []
             print("🎯 평가기 초기화 완료!")
+            print(f"🔗 MilvusDB 연결 상태: {'✅ 연결됨' if self.milvus_manager and self.milvus_manager.is_connected else '❌ 연결 안됨'}")
             
         except Exception as e:
             print(f"❌ 평가기 초기화 실패: {e}")
@@ -250,14 +269,38 @@ class DisasterRAGASEvaluator:
         else:
             return ""
 
+    def _is_milvus_connected(self):
+        """MilvusDB 연결 상태 확인"""
+        return self.milvus_manager is not None and self.milvus_manager.is_connected
+
     def run_disaster_agent_evaluation(self, question):
         """DisasterAgent_LLM을 실행하여 답변과 컨텍스트 수집 (동기)"""
         print(f"🤖 DisasterAgent_LLM 실행 시작: {question[:50]}...")
         
         try:
+            # MilvusDB 연결 정보 준비
+            milvus_data = {}
+            if self._is_milvus_connected():
+                milvus_data = {
+                    "connection_status": True,
+                    "host": self.milvus_manager.host,
+                    "port": self.milvus_manager.port,
+                    "embedding_model_name": self.milvus_manager.embedding_model_name
+                }
+                print("🔗 MilvusDB 연결 정보 주입됨")
+            else:
+                milvus_data = {
+                    "connection_status": False,
+                    "error": "MilvusDB 연결되지 않음"
+                }
+                print("⚠️ MilvusDB 연결 정보 없음")
+            
             # DisasterAgent_LLM 실행 (동기적으로 실행)
             print("🔄 DisasterAgent_LLM 실행 중...")
-            initial_state = {"query": question}
+            initial_state = {
+                "query": question,
+                "milvus_data": milvus_data  # MilvusDB 연결 정보 주입
+            }
             
             # 동기적으로 실행
             result_state = run(initial_state)

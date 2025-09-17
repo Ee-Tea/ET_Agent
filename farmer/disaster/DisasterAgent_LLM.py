@@ -313,7 +313,7 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
             milvus_data=milvus_data,
             collection_name=COLLECTION_NAME,
             query=q,
-            k=30
+            k=5
         )
         
         if not documents:

@@ -1,4 +1,5 @@
 # api/services/hybrid_session_service.py
+import os
 import redis
 import asyncpg
 import json
@@ -15,11 +16,17 @@ class HybridSessionService:
         # PostgreSQL: 영구 저장소
         self.postgres_url = postgres_url
         self.pool = None
+        # 한번만 테이블 생성하도록 플래그
+        self._tables_ready: bool = False
+        # 세션 기반 Redis 키 사용 여부 (신규 키 스킴)
+        self.use_session_redis_keys: bool = str(os.getenv("USE_SESSION_REDIS_KEYS", "")).lower() in {"1", "true", "yes", "on"}
     
     async def init_postgres(self):
-        """PostgreSQL 연결 풀 초기화"""
-        self.pool = await asyncpg.create_pool(self.postgres_url)
-        await self.create_tables_if_not_exists()
+        """PostgreSQL 연결 풀 초기화 (idempotent)"""
+        await self._ensure_pool()
+        if not getattr(self, "_tables_ready", False):
+            await self.create_tables_if_not_exists()
+            self._tables_ready = True
     
     async def _ensure_pool(self):
         """연결 풀 보장: None/closed 상태이면 재생성"""
@@ -287,23 +294,34 @@ class HybridSessionService:
     
     # ==================== Redis (실시간 세션) ====================
     
-    def get_active_session_key(self, user_id: str, chat_id: str) -> str:
-        """활성 세션 Redis 키"""
+    def get_active_session_key(self, user_id: str, chat_id: str, session_id: Optional[str] = None) -> str:
+        """활성 세션 Redis 키 (토글 가능): session_id 우선"""
+        if self.use_session_redis_keys and session_id:
+            return f"active_session:{session_id}"
         return f"active_session:{user_id}:{chat_id}"
     
-    def get_shared_key(self, user_id: str, chat_id: str) -> str:
-        """공유 메모리 Redis 키"""
+    def get_shared_key(self, user_id: str, chat_id: str, session_id: Optional[str] = None) -> str:
+        """공유 메모리 Redis 키 (토글 가능): session_id 우선"""
+        if self.use_session_redis_keys and session_id:
+            return f"shared:{session_id}"
         return f"shared:{user_id}:{chat_id}"
     
-    def get_history_key(self, user_id: str, chat_id: str) -> str:
-        """채팅 히스토리 Redis 키"""
+    def get_history_key(self, user_id: str, chat_id: str, session_id: Optional[str] = None) -> str:
+        """채팅 히스토리 Redis 키 (토글 가능): session_id 우선"""
+        if self.use_session_redis_keys and session_id:
+            return f"history:{session_id}"
         return f"history:{user_id}:{chat_id}"
     
     async def start_session(self, user_id: str, chat_id: str, initial_data: Dict[str, Any] = None, title: Optional[str] = None):
         """새 세션 시작 (Redis에 저장)"""
-        session_key = self.get_active_session_key(user_id, chat_id)
-        shared_key = self.get_shared_key(user_id, chat_id)
-        history_key = self.get_history_key(user_id, chat_id)
+        # session_id 확보 (신규 키 스킴 사용 시 필요)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        session_key = self.get_active_session_key(user_id, chat_id, sid)
+        shared_key = self.get_shared_key(user_id, chat_id, sid)
+        history_key = self.get_history_key(user_id, chat_id, sid)
         
         # Redis에 실시간 세션 데이터 저장
         session_data = {
@@ -337,7 +355,11 @@ class HybridSessionService:
     
     async def update_active_session(self, user_id: str, chat_id: str, updates: Dict[str, Any]):
         """활성 세션 업데이트 (Redis)"""
-        session_key = self.get_active_session_key(user_id, chat_id)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        session_key = self.get_active_session_key(user_id, chat_id, sid)
         
         # 기존 데이터 로드
         existing = self.redis.get(session_key)
@@ -355,19 +377,41 @@ class HybridSessionService:
     
     async def get_active_session(self, user_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
         """활성 세션 조회 (Redis)"""
-        session_key = self.get_active_session_key(user_id, chat_id)
-        data = self.redis.get(session_key)
+        sid = None
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        # 신규 키 우선
+        primary_key = self.get_active_session_key(user_id, chat_id, sid)
+        data = self.redis.get(primary_key)
+        if not data:
+            # 구 키 폴백
+            legacy_key = self.get_active_session_key(user_id, chat_id, None)
+            data = self.redis.get(legacy_key)
         return json.loads(data) if data else None
     
     async def save_shared_memory(self, user_id: str, chat_id: str, shared_data: Dict[str, Any]):
         """공유 메모리 저장 (Redis)"""
-        shared_key = self.get_shared_key(user_id, chat_id)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        shared_key = self.get_shared_key(user_id, chat_id, sid)
         self.redis.setex(shared_key, 86400, json.dumps(shared_data))
     
     async def get_shared_memory(self, user_id: str, chat_id: str) -> Dict[str, Any]:
         """공유 메모리 조회 (Redis)"""
-        shared_key = self.get_shared_key(user_id, chat_id)
-        data = self.redis.get(shared_key)
+        sid = None
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        primary_key = self.get_shared_key(user_id, chat_id, sid)
+        data = self.redis.get(primary_key)
+        if not data:
+            legacy_key = self.get_shared_key(user_id, chat_id, None)
+            data = self.redis.get(legacy_key)
         return json.loads(data) if data else {}
     
     async def add_chat_message(self, user_id: str, chat_id: str, message_type: str, content: str, metadata: Dict[str, Any] = None) -> Optional[int]:
@@ -382,7 +426,11 @@ class HybridSessionService:
         }
         
         # Redis에 실시간 히스토리 추가 (최근 50개만)
-        history_key = self.get_history_key(user_id, chat_id)
+        try:
+            sid = await self.get_or_create_session_id(user_id, chat_id)
+        except Exception:
+            sid = None
+        history_key = self.get_history_key(user_id, chat_id, sid)
         history = self.redis.get(history_key)
         if history:
             history_list = json.loads(history)
@@ -487,6 +535,17 @@ class HybridSessionService:
         async with self.pool.acquire() as conn:
             # ensure existing session_id (hashed)
             session_id = await self.get_or_create_session_id(user_id, chat_id)
+
+            # 메시지 인덱스(chat_id)를 세션 내 1부터 증가로 부여
+            next_index_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(MAX(CASE WHEN chat_id ~ '^[0-9]+$' THEN chat_id::int ELSE 0 END), 0) + 1 AS next_idx
+                FROM chat_messages
+                WHERE session_id = $1
+                """,
+                session_id,
+            )
+            msg_index = str(int(next_index_row["next_idx"]) if next_index_row and "next_idx" in next_index_row else 1)
             # speaker 표준화
             normalized_speaker = self._normalize_speaker(message_type)
             try:
@@ -504,7 +563,7 @@ class HybridSessionService:
                     RETURNING id
                     """,
                     user_id,
-                    chat_id,
+                    msg_index,
                     session_id,
                     normalized_speaker,
                     content,

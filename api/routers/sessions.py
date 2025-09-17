@@ -3,7 +3,7 @@
 """
 
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Request
 from datetime import datetime
 
 from ..models import (
@@ -35,50 +35,76 @@ async def create_session(request: SessionRequest):
         # chat_id 자동 증가 규칙
         chat_id = request.chat_id or await _hybrid.get_next_chat_id(user_id)
 
-        # 해시 session_id 생성/보장
-        session_id = await _hybrid.get_or_create_session_id(user_id, chat_id, request.service_type)
-
-        # 메타데이터 저장(UPSERT)
-        await _hybrid.save_session_metadata(
+        # 숏텀(Shared/History) 포함하여 세션 초기화 + 메타데이터 업서트
+        await _hybrid.start_session(
             user_id,
             chat_id,
-            {
-                "session_id": session_id,
-                "status": "active",
-                "service_type": request.service_type,
-            },
+            {"service_type": request.service_type or "teacher"},
             title=None,
         )
 
-        # 인메모리 캐시에도 보관(호환)
-        session_data = {
+        # 생성된 session_id/제목/시간을 DB에서 확인 후 응답 구성
+        async with _hybrid.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT session_id, title, created_at,
+                       COALESCE((session_data->>'service_type'),'teacher') AS service_type
+                FROM chat_sessions
+                WHERE user_id = $1 AND chat_id = $2
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                user_id,
+                chat_id,
+            )
+        session_id = row["session_id"] if row else await _hybrid.get_or_create_session_id(user_id, chat_id, request.service_type)
+        title = row["title"] if row else None
+        created_at = (row["created_at"].isoformat() if hasattr(row["created_at"], 'isoformat') else str(row["created_at"])) if row else datetime.now().isoformat()
+        service_type = row["service_type"] if row else (request.service_type or "teacher")
+
+        # 인메모리 캐시(선택)
+        sessions_db[session_id] = {
             "session_id": session_id,
             "user_id": user_id,
             "chat_id": chat_id,
-            "created_at": datetime.now().isoformat(),
+            "title": title,
+            "created_at": created_at,
             "status": "active",
-            "service_type": request.service_type,
+            "service_type": service_type,
             "message_count": 0,
         }
-        sessions_db[session_id] = session_data
 
-        return SessionResponse(**session_data)
+        return SessionResponse(
+            session_id=session_id,
+            user_id=user_id,
+            chat_id=str(chat_id),
+            title=title,
+            created_at=created_at,
+            status="active",
+            service_type=service_type,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Session creation failed: {str(e)}")
 
 @router.get("/", response_model=SessionListResponse)
 async def list_sessions(
-    user_id: str = Query(..., description="사용자 ID"),
+    request: Request,
+    user_id: str | None = Query(None, description="사용자 ID (미지정 시 헤더/쿠키에서 추출)"),
     limit: int = Query(50, description="최대 결과 수"),
     offset: int = Query(0, description="오프셋")
 ):
     """사용자의 세션 목록 조회 (오래된 것 하단 노출 요구에 맞게 created_at 오름차순 반환)"""
     try:
+        # 보조 추출: 헤더/쿠키
+        if not user_id:
+            user_id = request.headers.get("x-user-id") or request.cookies.get("user_id")
+        if not user_id:
+            return SessionListResponse(sessions=[], total=0)
         await _hybrid.init_postgres()
         async with _hybrid.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT session_id, user_id, chat_id, created_at, 'active' AS status,
+                SELECT session_id, user_id, chat_id, title, created_at, 'active' AS status,
                        COALESCE((session_data->>'service_type'),'teacher') AS service_type
                 FROM chat_sessions
                 WHERE user_id = $1
@@ -92,6 +118,7 @@ async def list_sessions(
                     session_id=r["session_id"],
                     user_id=r["user_id"],
                     chat_id=str(r["chat_id"]),
+                    title=r["title"],
                     created_at=r["created_at"].isoformat() if hasattr(r["created_at"], 'isoformat') else str(r["created_at"]),
                     status=r["status"],
                     service_type=r["service_type"],

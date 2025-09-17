@@ -46,6 +46,7 @@ class SessionResponse(BaseModel):
     session_id: str = Field(..., description="세션 ID")
     user_id: str = Field(..., description="사용자 ID")
     chat_id: str = Field(..., description="채팅 ID")
+    title: Optional[str] = Field(default=None, description="세션 제목")
     created_at: str = Field(..., description="생성 시간")
     status: str = Field(..., description="세션 상태")
     service_type: str = Field(..., description="서비스 타입")

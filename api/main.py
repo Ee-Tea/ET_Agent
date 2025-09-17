@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import Response
 from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -405,7 +406,7 @@ async def health_check():
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: Request):
+async def chat(request: Request, response: Response):
     """메인 채팅 엔드포인트 - 직접 LangGraph 실행"""
     global orchestrator, hybrid_session_service
     
@@ -535,6 +536,13 @@ async def chat(request: Request):
                 },
             )
         
+        # 클라이언트가 세션을 안정적으로 바인딩할 수 있도록 헤더로도 전달
+        try:
+            if session_id_in:
+                response.headers["x-session-id"] = session_id_in
+        except Exception:
+            pass
+
         return ChatResponse(
             response=result.get("response", "응답을 생성할 수 없습니다."),
             service_used=result.get("service_used", "unknown"),
@@ -788,21 +796,41 @@ async def clear_session_endpoint(request: Request):
 
         user_id = str(payload.get("user_id", "api_user"))
         chat_id = str(payload.get("chat_id", "api_chat"))
+        session_id = str(payload.get("session_id", "")) or request.headers.get("x-session-id") or ""
         session_key = f"{user_id}_{chat_id}"
 
         redis = hybrid_session_service.redis
 
-        # 삭제 대상 키들
+        # 삭제 대상 키들 (신규/기존 키 모두)
         keys_to_delete = []
         # 락
         keys_to_delete.append(f"lock:{session_key}")
+        if session_id:
+            keys_to_delete.append(f"lock:{session_id}")
         # 숏텀/히스토리/세션
         keys_to_delete.append(f"short_term:{session_key}")
+        if session_id:
+            keys_to_delete.append(f"short_term:{session_id}")
         keys_to_delete.append(f"history:{user_id}:{chat_id}")
+        if session_id:
+            keys_to_delete.append(f"history:{session_id}")
         keys_to_delete.append(f"active_session:{user_id}:{chat_id}")
+        if session_id:
+            keys_to_delete.append(f"active_session:{session_id}")
         keys_to_delete.append(f"shared:{user_id}:{chat_id}")
+        if session_id:
+            keys_to_delete.append(f"shared:{session_id}")
         # 질문들 (패턴)
-        q_keys = redis.keys(f"questions:{session_key}:*")
+        q_keys = []
+        try:
+            q_keys = list(redis.keys(f"questions:{session_key}:*"))
+        except Exception:
+            q_keys = []
+        if session_id:
+            try:
+                q_keys += list(redis.keys(f"questions:{session_id}:*"))
+            except Exception:
+                pass
 
         deleted = 0
         for k in keys_to_delete:
@@ -816,7 +844,7 @@ async def clear_session_endpoint(request: Request):
             except Exception:
                 pass
 
-        return {"message": "cleared", "deleted": deleted, "session": f"{user_id}:{chat_id}"}
+        return {"message": "cleared", "deleted": deleted, "session": f"{user_id}:{chat_id}", "session_id": session_id or None}
     except HTTPException:
         raise
     except Exception as e:
@@ -843,6 +871,8 @@ async def get_recent_questions(
             user_id = request.headers.get("x-user-id") or request.cookies.get("user_id")
         if not chat_id:
             chat_id = request.headers.get("x-chat-id") or request.cookies.get("chat_id")
+        # session_id 헤더도 수용(신규 키 스킴)
+        session_id = request.headers.get("x-session-id") or session_id
 
         # 보강: chat_id가 없고 session_id가 오면 매핑 조회
         if user_id and not chat_id and session_id:
@@ -900,6 +930,14 @@ async def get_recent_questions(
         actual_limit = min(limit, added_count) if added_count > 0 else 0
 
         keys = list(redis.keys(pattern))
+        # 신규 키 스킴(session_id) 우선 검색
+        if session_id:
+            try:
+                new_keys = list(redis.keys(f"questions:{session_id}:*"))
+                if new_keys:
+                    keys = new_keys
+            except Exception:
+                pass
         # 키명 기준 역순 정렬 (완전한 시간 순서는 아니지만 근사치)
         keys.sort(reverse=True)
 

@@ -302,7 +302,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     milvus_data=self._current_milvus_data,
                     collection_name="concepts",
                     subject_area=subject_area,
-                    k=20
+                    k=2
                 )
                 
                 # 과목명으로 문제 관련 문서 검색
@@ -310,7 +310,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     milvus_data=self._current_milvus_data,
                     collection_name="problems",
                     subject_area=subject_area,
-                    k=30
+                    k=2
                 )
                 
                 # 문서 합치기

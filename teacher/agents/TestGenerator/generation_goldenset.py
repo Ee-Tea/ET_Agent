@@ -1,363 +1,385 @@
 # -*- coding: utf-8 -*-
 """
-정보처리기사 'generator 에이전트' 컨텍스트 기반 RAGAS 골든셋 생성기
-- RAGAS TestsetGenerator로 샘플 수/분포 확보
-- question: "문제 생성 요청" 프롬프트(문제 수 = 1~N(≤100) 랜덤)
-- ground_truth: [{question, options[4]}, ...]  # 정답/해설 없음
-- contexts: generator의 create_context_from_documents 결과 '전량'을 리스트 1원소로 저장
+정보처리기사 '문제 생성 에이전트'용 RAGAS 골든셋 생성기
 
-환경변수(.env)
-- OPENAI_API_KEY=REDACTED OPENAI_BASE_URL (선택)
-- RAGAS_TARGET_Q              : 샘플 수(기본 50)
-- RAGAS_LANG                  : ko (기본)
-- MILVUS_SUBJECTS             : 콤마구분
-- MILVUS_TOPK_CONCEPTS        : 기본 20
-- MILVUS_TOPK_PROBLEMS        : 기본 30
-- OUT_DIR                     : 기본 teacher/agents/TestGenerator/goldensets
-- EXAM_JSON_DIR               : 로컬 폴백
-- MAX_Q_PER_REQUEST           : 한 샘플에서 생성할 최대 문제 수(기본 20, 상한 100)
-- GLOBAL_RANGE_PROB           : 과목지정 대신 전체범위로 요청할 확률(0~1, 기본 0.5)
+형식 (RAGAS JSONL 1줄/샘플):
+{
+  "question": "<사용자 문제 생성 요청 프롬프트>",
+  "ground_truth": [
+      {"question": "...", "options": ["...", "...", "...", "..."]},
+      ...
+  ],
+  "contexts": ["<컨텍스트 전량(또는 컷) 문자열 1덩어리>"]
+}
 
-pip install ragas datasets langchain_text_splitters langchain-openai langchain-huggingface pymilvus pandas
+설명
+- question: generator에게 보낼 "문제 생성 요청" 프롬프트 (과목 지정/전체 범위 랜덤, 개수 1~≤100 랜덤)
+- ground_truth: 평가 타겟 형태에 맞춰 '보기만' 제공(정답/해설 없음)
+- contexts: 지정 폴더의 JSON들을 읽어 만든 컨텍스트(전량 1원소). 너무 크면 MAX_CTX_CHARS로 컷
+
+환경변수(.env 가능)
+- EXAM_DIR=teacher/exam/parsed_exam_json
+- CONCEPT_DIR=teacher/agents/retrieve/data/json
+- OUT_DIR=teacher/agents/TestGenerator/goldensets   (없으면 생성)
+- TARGET_SAMPLES=50          # 만들 샘플 수
+- MAX_Q_PER_REQUEST=100      # 한 요청 최대 문항수
+- SUBJECTS=콤마구분 과목명   # 기본 5과목 + '전체 범위' 자동 포함
+- MIN_CTX_CHARS=50           # 너무 짧은 조각은 스킵
+- MAX_CTX_CHARS=0            # 0이면 전량, >0이면 그 길이만큼 잘라서 contexts[0]에 저장
+- SEED=42
+
+필요: pip install pandas python-dotenv
 """
 
-import os, re, json, glob, random, sys
-from typing import List, Dict, Any, Tuple
+import os
+import re
+import json
+import glob
+import random
+import pandas as pd
 from datetime import datetime
-from dataclasses import dataclass
+from typing import List, Dict, Any, Tuple, Optional, Union
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from langchain.schema import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import ChatOpenAI
+# -------------------- 경로/환경 --------------------
+DEFAULT_EXAM_DIR = os.path.join("teacher", "exam", "parsed_exam_json")
+DEFAULT_CONCEPT_DIR = os.path.join("teacher", "agents", "retrieve", "data", "json")
+DEFAULT_OUT_DIR = os.path.join("teacher", "agents", "TestGenerator", "goldensets")
 
-# RAGAS
-from ragas.testset import TestsetGenerator
-from ragas.llms import LangchainLLMWrapper
-from ragas.testset.synthesizers import SingleHopSpecificQuerySynthesizer
-from ragas.testset.persona import Persona
-from ragas.testset.transforms.extractors.llm_based import NERExtractor
-from ragas.embeddings import HuggingFaceEmbeddings
+EXAM_DIR = os.getenv("EXAM_DIR", DEFAULT_EXAM_DIR)
+CONCEPT_DIR = os.getenv("CONCEPT_DIR", DEFAULT_CONCEPT_DIR)
+OUT_DIR = os.getenv("OUT_DIR", DEFAULT_OUT_DIR)
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# generator 에이전트 동일 헬퍼
-from common.milvus_helpers import (
-    search_milvus_documents_by_subject,
-    create_context_from_documents,
-)
-try:
-    from common.milvus_helpers import get_milvus_connection_info
-except Exception:
-    get_milvus_connection_info = None
+TARGET_SAMPLES = int(os.getenv("TARGET_SAMPLES", "20"))
+MAX_Q_PER_REQUEST = max(1, int(os.getenv("MAX_Q_PER_REQUEST", "5")))
+MIN_CTX_CHARS = int(os.getenv("MIN_CTX_CHARS", "50"))
+MAX_CTX_CHARS = int(os.getenv("MAX_CTX_CHARS", "0"))  # 0 => 전량
+SEED = int(os.getenv("SEED", "42"))
+CTX_PROBLEM_COUNT = int(os.getenv("CTX_PROBLEM_COUNT", "2"))     # 컨텍스트에 넣을 '공식 문제' 개수
+CTX_CONCEPT_MAX_CHARS = int(os.getenv("CTX_CONCEPT_MAX_CHARS", "4000"))  # 컨셉트 텍스트 컷 (0이면 전량)
 
-# ---------------- 설정 ----------------
-OPENAI_API_KEY=REDACTED("OPENAI_API_KEY=REDACTED = os.getenv("OPENAI_BASE_URL")
-if not OPENAI_API_KEY=REDACTED("❌ OPENAI_API_KEY=REDACTED를 확인하세요."); sys.exit(1)
+# generator.py의 5과목 명칭을 그대로 사용 + '전체 범위' 가능
+GENERATOR_SUBJECTS_DEFAULT = [
+    "소프트웨어설계",
+    "소프트웨어개발",
+    "데이터베이스구축",
+    "프로그래밍언어활용",
+    "정보시스템구축관리",
+]
+SUBJECTS = [
+    s.strip() for s in os.getenv("SUBJECTS", ",".join(GENERATOR_SUBJECTS_DEFAULT)).split(",")
+    if s.strip()
+]
+# '전체 범위'도 랜덤 대상에 포함
+ALL_SCOPE_TOKEN = "전체 범위"
+if ALL_SCOPE_TOKEN not in SUBJECTS:
+    SUBJECTS.append(ALL_SCOPE_TOKEN)
 
-TARGET_Q             = int(os.getenv("RAGAS_TARGET_Q", "50"))
-RAGAS_LANG           = (os.getenv("RAGAS_LANG", "ko") or "ko").strip().lower()
-TOPK_CONCEPTS        = int(os.getenv("MILVUS_TOPK_CONCEPTS", "20"))
-TOPK_PROBLEMS        = int(os.getenv("MILVUS_TOPK_PROBLEMS", "30"))
-OUT_DIR              = os.getenv("OUT_DIR", os.path.join("teacher","agents","TestGenerator","goldensets"))
-EXAM_JSON_DIR        = os.getenv("EXAM_JSON_DIR", os.path.join("teacher","exam","parsed_exam_json"))
-MAX_Q_PER_REQUEST    = min(100, int(os.getenv("MAX_Q_PER_REQUEST", "20")))  # 안전 상한 (기본 20, 최대 100)
-GLOBAL_RANGE_PROB    = max(0.0, min(1.0, float(os.getenv("GLOBAL_RANGE_PROB", "0.5"))))
+random.seed(SEED)
 
-DEFAULT_SUBJECTS = ["소프트웨어설계","소프트웨어개발","데이터베이스구축","프로그래밍언어활용","정보시스템구축관리"]
-SUBJECTS = [s.strip() for s in os.getenv("MILVUS_SUBJECTS","").split(",") if s.strip()] or DEFAULT_SUBJECTS
+# -------------------- 유틸 --------------------
+def log(msg: str):
+    print(f"[goldenset] {msg}")
 
-random.seed(42)
+def clean_text(s: Any) -> str:
+    if s is None:
+        return ""
+    t = str(s)
+    t = t.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
-# ---------------- 유틸 ----------------
-_ZWS = "\u200b\u200c\u200d\ufeff"
-def clean_text(s: str) -> str:
-    s = str(s or "").replace(_ZWS, "")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+def list_json_files(root: str) -> List[str]:
+    if not root or not os.path.isdir(root):
+        return []
+    return sorted(glob.glob(os.path.join(root, "**", "*.json"), recursive=True))
 
-def split_docs(docs: List[Document]) -> List[Document]:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=120, separators=["\n\n","\n"," ",""])
-    out=[]
-    for d in docs:
-        if len(d.page_content) > 1800: out.extend(splitter.split_documents([d]))
-        else: out.append(d)
-    return [x for x in out if len(x.page_content) >= 60]
+# -------------------- 컨텍스트 구축 --------------------
 
-# ---- 로컬 폴백 로더 ----
-def load_exam_docs(root_dir: str) -> List[Document]:
-    paths = glob.glob(os.path.join(root_dir, "**", "*.json"), recursive=True)
-    docs: List[Document] = []
-    def make_doc(item: Dict[str,Any], default_subject: str):
-        q=item.get("question") or item.get("item_title") or ""
-        opts=item.get("options") or []
-        ans=item.get("answer"); exp=item.get("explanation") or item.get("content") or ""
-        subj=item.get("subject") or default_subject or "미지정"
-        ans_txt=None
-        if isinstance(ans,str) and ans.strip().isdigit():
-            idx=int(ans.strip())-1
-            if isinstance(opts,list) and 0<=idx<len(opts): ans_txt=str(opts[idx])
-        if not ans_txt: ans_txt=str(ans) if ans is not None else ""
-        q=clean_text(q); opts=[clean_text(o) for o in (opts if isinstance(opts,list) else [])]
-        exp=clean_text(exp); subj=clean_text(subj)
-        if not q: return None
-        lines=[f"[과목] {subj}", f"{q}"]
-        if opts: lines.append("; ".join(opts))
-        if ans_txt: lines.append(f"정답: {ans_txt}")
-        if exp: lines.append(f"해설: {exp}")
-        pc="\n".join(lines).strip()
-        if len(pc)<40: return None
-        return Document(page_content=pc, metadata={"subject":subj,"source":"local_json"})
-    for p in paths:
+def load_concept_corpus(concept_dir: str) -> List[Dict[str, str]]:
+    """
+    개념/요약 JSON에서 'content'와 'subject'를 추출
+    - 포맷 A: {"subject": ..., "items":[{"item_title","content","subject"}, ...]}
+    - 포맷 B: [{"item_title","content","subject"}, ...]
+    - 포맷 C: {"content": ..., "subject": ...}
+    """
+    out: List[Dict[str, str]] = []
+
+    def push_content(txt: Any, subject: str = ""):
+        txt = clean_text(txt)
+        subj = clean_text(subject)
+        if len(txt) >= MIN_CTX_CHARS:
+            out.append({"content": txt, "subject": subj})
+
+    for fp in list_json_files(concept_dir):
         try:
-            data=json.load(open(p,"r",encoding="utf-8"))
+            data = json.load(open(fp, "r", encoding="utf-8"))
         except Exception as e:
-            print(f"⚠️ JSON 로드 실패: {p} ({e})"); continue
-        if isinstance(data,dict):
-            subj=data.get("subject"); items=data.get("items")
-            if isinstance(items,list):
-                for it in items:
-                    if isinstance(it,dict):
-                        d=make_doc(it,subj); 
-                        if d: docs.append(d)
-            else:
-                d=make_doc(data,subj); 
-                if d: docs.append(d)
-        elif isinstance(data,list):
+            log(f"⚠️ 개념 JSON 로드 실패: {fp} ({e})")
+            continue
+
+        # 포맷 A: dict with "items"
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            subj = data.get("subject", "")
+            for it in data["items"]:
+                if isinstance(it, dict) and "content" in it:
+                    push_content(it["content"], it.get("subject", subj))
+            # 혹시 최상위에도 content/subject가 있으면 수집
+            if "content" in data:
+                push_content(data["content"], data.get("subject", subj))
+
+        # 포맷 B: list of dicts
+        elif isinstance(data, list):
             for it in data:
-                if isinstance(it,dict):
-                    d=make_doc(it,it.get("subject")); 
-                    if d: docs.append(d)
-    print(f"📚 로컬 exam JSON 문서: {len(docs)}개")
-    return docs
+                if isinstance(it, dict) and "content" in it:
+                    push_content(it["content"], it.get("subject", ""))
 
-# ---- Milvus 연결 ----
-def resolve_milvus_data() -> Dict[str,Any]:
-    if get_milvus_connection_info is not None:
+        # 포맷 C: 단일 dict
+        elif isinstance(data, dict) and "content" in data:
+            push_content(data["content"], data.get("subject", ""))
+
+    # 공백 content 제거
+    return [item for item in out if item["content"].strip()]
+
+
+def load_problem_bank(exam_dir: str) -> List[Dict[str, Any]]:
+    """
+    문제 JSON: {"exam_title":..., "questions":[{question, options[], answer, explanation, subject}]}
+    - ground_truth로 쓸 보기-only 샘플을 뽑기 위해 로드
+    """
+    bank: List[Dict[str, Any]] = []
+    for fp in list_json_files(exam_dir):
         try:
-            md=get_milvus_connection_info()
-            if md and md.get("connection_status",False):
-                print("✅ Milvus 연결(get_milvus_connection_info) 성공"); return md
-            else:
-                print("⚠️ get_milvus_connection_info 유효하지 않음 → 직접 연결 시도")
+            data = json.load(open(fp, "r", encoding="utf-8"))
         except Exception as e:
-            print("⚠️ get_milvus_connection_info 실패:",e)
-    try:
-        from pymilvus import connections
-        uri=os.getenv("MILVUS_URI","http://localhost:19530")
-        user=os.getenv("MILVUS_USERNAME"); pwd=os.getenv("MILVUS_PASSWORD"); token=os.getenv("MILVUS_TOKEN")
-        kwargs={"uri":uri}
-        if token: kwargs["token"]=token
-        else:
-            if user: kwargs["user"]=user
-            if pwd: kwargs["password"]=pwd
-        connections.connect(alias="default", **kwargs)
-        print(f"✅ Milvus 직접 연결 성공: {uri}")
-        return {"connection_status":True,"alias":"default"}
-    except Exception as e:
-        print("❌ Milvus 직접 연결 실패:",e)
-        return {"connection_status":False}
+            log(f"⚠️ 문제 JSON 로드 실패: {fp} ({e})")
+            continue
+        qs = data.get("questions", []) if isinstance(data, dict) else []
+        for q in qs:
+            if not isinstance(q, dict): 
+                continue
+            qtext = clean_text(q.get("question", ""))
+            opts = [clean_text(o) for o in (q.get("options") or [])]
+            subj = clean_text(q.get("subject", ""))
+            if not qtext or len(opts) < 4:
+                continue
+            # 보기 4개로 정규화
+            opts = opts[:4]
+            bank.append({
+                "question": qtext,
+                "options": opts,
+                "subject": subj
+            })
+    return bank
 
-# ---- 컨텍스트 수집 ----
-@dataclass
-class SubjectBundle:
-    subject: str|None
-    docs: List[Document]
-    merged_context_full: str  # 전량
+def build_context_for_sample(
+    subject: Optional[str],
+    concepts: List[Union[str, Dict[str, Any]]],
+    problems: List[Dict[str, Any]],
+) -> List[str]:
+    """
+    컨텍스트 구성:
+    - (A) 개념/요약: 전량 합친 뒤 CTX_CONCEPT_MAX_CHARS로 컷
+    - (B) 공식 문제: subject 기준으로 필터 후 최대 CTX_PROBLEM_COUNT개 샘플(문항+보기4개)
+    반환: contexts 필드에 바로 넣을 리스트[str]
+    """
+    # ----- (A) 개념/요약 블록 만들기 -----
+    concept_lines: List[str] = []
+    for c in concepts or []:
+        if isinstance(c, str):
+            txt = clean_text(c)
+            if len(txt) >= MIN_CTX_CHARS:
+                concept_lines.append(txt)
+        elif isinstance(c, dict):
+            content = clean_text(c.get("content", ""))
+            subj = clean_text(c.get("subject", ""))
+            if len(content) >= MIN_CTX_CHARS:
+                concept_lines.append(f"[{subj}]\n{content}" if subj else content)
 
-def fetch_subject_bundle(subject: str, milvus_data: Dict[str,Any]) -> SubjectBundle:
-    concept_docs = search_milvus_documents_by_subject(milvus_data,"concepts",subject,TOPK_CONCEPTS)
-    problem_docs = search_milvus_documents_by_subject(milvus_data,"problems",subject,TOPK_PROBLEMS)
-    docs = concept_docs + problem_docs
-    merged = create_context_from_documents(docs) if docs else ""
-    return SubjectBundle(subject=subject, docs=docs, merged_context_full=merged)
+    concept_blob = "\n\n".join(concept_lines).strip()
+    if CTX_CONCEPT_MAX_CHARS and CTX_CONCEPT_MAX_CHARS > 0 and len(concept_blob) > CTX_CONCEPT_MAX_CHARS:
+        concept_blob = concept_blob[:CTX_CONCEPT_MAX_CHARS]
 
-# ---- 사용자 프롬프트(골든셋 question) ----
-from typing import Tuple
+    parts: List[str] = []
+    if concept_blob:
+        parts.append("### 개념/요약\n" + concept_blob)
 
-def build_user_prompt(subject: str | None) -> Tuple[str, int]:
-    # 1~min(100, MAX_Q_PER_REQUEST)에서 랜덤 선택
-    k = random.randint(1, max(1, min(100, MAX_Q_PER_REQUEST)))
-    # 과목이 있어도 일정 확률로 전체 범위를 사용
-    use_global = (subject is None) or (random.random() < GLOBAL_RANGE_PROB)
+    # ----- (B) 공식 문제 2개(기본) 선별 -----
+    pool = problems
+    if subject in GENERATOR_SUBJECTS_DEFAULT:
+        def _match(s: str) -> bool:
+            s = (s or "").replace(" ", "")
+            t = subject.replace(" ", "")
+            return t in s or s in t
+        filt = [q for q in problems if _match(q.get("subject", ""))]
+        if filt:
+            pool = filt
 
-    if use_global:
+    if pool:
+        k_ctx = min(CTX_PROBLEM_COUNT, len(pool))
+        picks = random.sample(pool, k_ctx) if len(pool) > k_ctx else pool
+        lines = []
+        for p in picks:
+            q = clean_text(p.get("question", ""))
+            opts = [clean_text(o) for o in (p.get("options") or [])][:4]
+            if not q or len(opts) < 4:
+                continue
+            olines = "\n".join([f"- {o}" for o in opts])
+            lines.append(f"문제: {q}\n{olines}")
+        if lines:
+            parts.append("### 공식 문제 (컨텍스트)\n" + "\n\n".join(lines))
+
+    context_blob = "\n\n".join(parts).strip()
+    return [context_blob if context_blob else ""]
+
+
+
+# -------------------- 프롬프트/샘플러 --------------------
+def pick_subject_for_prompt() -> str:
+    """5과목 + '전체 범위' 중에서 랜덤."""
+    return random.choice(SUBJECTS)
+
+
+def build_user_prompt(subject: Optional[str]) -> Tuple[str, int]:
+    """
+    1~min(100, MAX_Q_PER_REQUEST)에서 랜덤 k,
+    - subject가 5과목 중 하나면 과목 지시
+    - subject가 '전체 범위'면 전 범위 지시
+    - 그 외에도 동작 (기본 전 범위)
+    """
+    k = random.randint(1, max(1, min(10, MAX_Q_PER_REQUEST)))
+    if subject in GENERATOR_SUBJECTS_DEFAULT:
+        text = (
+            f"정보처리기사 {subject} 과목 객관식 {k}문제 만들어줘. "
+            f"각 문항은 보기 4개만 제공하고 정답과 해설은 주지 마."
+        )
+    elif subject == ALL_SCOPE_TOKEN:
         text = (
             f"정보처리기사 전체 범위에서 객관식 {k}문제 만들어줘. "
-            f"각 문항은 보기 4개만 제공해."
+            f"각 문항은 보기 4개만 제공하고 정답과 해설은 주지 마."
         )
     else:
-        # subject가 유효하지 않으면 랜덤 과목 선택
-        subj = subject if (subject in SUBJECTS) else random.choice(SUBJECTS)
+        # 안전 폴백: 전체 범위
         text = (
-            f"정보처리기사 {subj} 과목 객관식 {k}문제 만들어줘. "
-            f"각 문항은 보기 4개만 제공해."
+            f"정보처리기사 전체 범위에서 객관식 {k}문제 만들어줘. "
+            f"각 문항은 보기 4개만 제공하고 정답과 해설은 주지 마."
         )
     return text, k
 
-# ---- ground_truth 생성용 프롬프트 ----
-def build_generation_prompt(context_full: str, subject: str|None, k: int) -> str:
-    subject_part = f"{subject} 과목" if subject else "전체 범위"
-    return f"""당신은 정보처리기사 출제 전문가입니다. 아래 컨텍스트를 근거로 {subject_part}에서 객관식 문제 {k}개를 생성하세요.
+def sample_ground_truth(bank: List[Dict[str, Any]], subject: Optional[str], k: int) -> List[Dict[str, Any]]:
+    """
+    ground_truth는 보기-only로 k개 샘플.
+    - 과목 지정이면 subject 필터(포함 매칭)
+    - '전체 범위'면 전체에서 무작위
+    """
+    pool = bank
+    if subject in GENERATOR_SUBJECTS_DEFAULT:
+        def _match(s: str) -> bool:
+            # generator.py의 과목 alias까지 엄밀히 쓰진 않되, 포함 매칭으로 관대하게
+            s = (s or "").replace(" ", "")
+            t = subject.replace(" ", "")
+            return t in s or s in t
+        pool = [q for q in bank if _match(q.get("subject", ""))] or bank
 
-반드시 다음 형식을 지키세요:
-1) 출력은 오직 JSON 하나(배열)만.
-2) JSON 스키마: 
-[
-  {{"question":"문항 본문","options":["보기1","보기2","보기3","보기4"]}},
-  ...
-]  # 길이 = {k}
-3) 각 options는 정확히 4개, 중복/유사 반복 금지.
-4) 정답과 해설은 포함하지 마세요(키 자체를 만들지 마세요).
-5) 모든 문항은 컨텍스트의 사실에 기반.
+    if len(pool) <= k:
+        picks = pool[:]  # 부족하면 전량
+    else:
+        picks = random.sample(pool, k)
 
-[컨텍스트 시작]
-{context_full}
-[컨텍스트 끝]
-"""
-
-def parse_mcq_list_json(text: str, k: int) -> List[Dict[str,Any]]:
-    content=text.strip()
-    m=re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
-    if m: content=m.group(1).strip()
-    # 배열 블록 추출
-    m2=re.search(r"\[\s*[\s\S]*\s*\]", content)
-    if m2: content=m2.group(0)
-    data=json.loads(content)
-    if not isinstance(data, list):
-        raise ValueError("배열 JSON이 아님")
-    out=[]
-    for item in data:
-        q=clean_text((item or {}).get("question"))
-        opts=[clean_text(o) for o in ((item or {}).get("options") or []) if o]
-        if not q or len(opts)!=4:
+    # 보기-only로 리셰이프 (정답/해설 제외)
+    out = []
+    for q in picks:
+        opts = (q.get("options") or [])[:4]
+        if len(opts) < 4:
             continue
-        # 정답/해설 키 제거(혹시 들어오면)
-        item_norm={"question":q,"options":opts}
-        out.append(item_norm)
-        if len(out)>=k:
-            break
-    if len(out)<max(1,k//2):  # 최소 절반은 확보(너무 부족하면 실패 처리)
-        raise ValueError(f"생성 문항 수 부족: {len(out)}<{k}")
+        out.append({
+            "question": q.get("question", ""),
+            "options": opts
+        })
     return out
 
-# ---------------- 메인 ----------------
+# -------------------- 메인 --------------------
 def main():
-    print("=== RAGAS 기반 골든셋 생성 (랜덤 문제수 + 보기만 + 컨텍스트 포함) ===")
-    print(f"TARGET_Q = {TARGET_Q}")
-    print(f"SUBJECTS = {SUBJECTS}")
-    print(f"TOPK: concepts={TOPK_CONCEPTS}, problems={TOPK_PROBLEMS}")
-    print(f"MAX_Q_PER_REQUEST = {MAX_Q_PER_REQUEST} (상한 100)")
+    log("경로 확인")
+    log(f"EXAM_DIR    = {EXAM_DIR} (exists: {os.path.isdir(EXAM_DIR)})")
+    log(f"CONCEPT_DIR = {CONCEPT_DIR} (exists: {os.path.isdir(CONCEPT_DIR)})")
+    log(f"OUT_DIR     = {OUT_DIR}")
+    log(f"TARGET_SAMPLES={TARGET_SAMPLES}, MAX_Q_PER_REQUEST={MAX_Q_PER_REQUEST}, MAX_CTX_CHARS={MAX_CTX_CHARS}")
 
-    # LLM for RAGAS + 생성용
-    base_llm = ChatOpenAI(model=os.getenv("RAGAS_OPENAI_MODEL","gpt-4o-mini"),
-                          temperature=0.2, max_tokens=3000,
-                          base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY=REDACTED = LangchainLLMWrapper(base_llm)
-    emb = HuggingFaceEmbeddings(model="intfloat/multilingual-e5-large")
+    # 1) 로드
+    concept_texts = load_concept_corpus(CONCEPT_DIR)  # 문자열 리스트
+    problem_bank = load_problem_bank(EXAM_DIR)        # 문제 dict 리스트 (보기-only 추출용)
+    log(f"개념 텍스트 조각: {len(concept_texts)}")
+    log(f"문제 풀(보기 4개 이상): {len(problem_bank)}")
 
-    # RAGAS synthesizer
-    synth = SingleHopSpecificQuerySynthesizer(llm=llm_wrapper)
-    import asyncio
-    try:
-        prompts = asyncio.run(synth.adapt_prompts(RAGAS_LANG, llm=llm_wrapper))
-        synth.set_prompts(**prompts)
-    except Exception:
-        pass
+    # 2) 컨텍스트 전량(필요 시 컷) 1덩어리
+    #    - generator는 과목별 검색도 하지만, 본 골든셋은 '동일 컨텍스트'를 전달해도 RAGAS의 비교에는 충분
+    #    - 과목별로 문맥이 너무 방대하면 MAX_CTX_CHARS로 제어
+    rows: List[Dict[str, Any]] = []
+    for i in range(TARGET_SAMPLES):
+        subject = pick_subject_for_prompt()
+        prompt, k = build_user_prompt(subject)
 
-    # 컨텍스트 준비
-    milvus_data = resolve_milvus_data()
-    bundles: List[SubjectBundle] = []
-    if milvus_data.get("connection_status",False):
-        for subj in SUBJECTS:
-            b = fetch_subject_bundle(subj, milvus_data)
-            if b.docs:
-                bundles.append(b)
-                print(f"📚 {subj}: 문서 {len(b.docs)}개 / 컨텍스트 길이={len(b.merged_context_full)}")
-            else:
-                print(f"⚠️ {subj}: 문서 없음")
-    else:
-        print("⚠️ Milvus 미연결 → 로컬 JSON 폴백")
-        local_docs = load_exam_docs(EXAM_JSON_DIR)
-        if not local_docs:
-            print("❌ 컨텍스트 없음"); sys.exit(1)
-        merged = create_context_from_documents(local_docs)
-        bundles.append(SubjectBundle(subject=None, docs=local_docs, merged_context_full=merged))
-
-    if not bundles:
-        print("❌ 컨텍스트 번들을 구성하지 못했습니다."); sys.exit(1)
-
-    # RAGAS에 전달할 문서 구성(분포 확보용)
-    ragas_docs: List[Document] = []
-    for b in bundles:
-        ragas_docs.append(Document(page_content=b.merged_context_full, metadata={"subject": b.subject or "전체"}))
-        ragas_docs.extend(split_docs(b.docs))
-
-    # RAGAS Testset 생성(샘플 수 확보; 실제 ground_truth/contexts는 아래에서 재구성)
-    generator = TestsetGenerator(
-        llm=llm_wrapper,
-        embedding_model=emb,
-        persona_list=[Persona(name="ExamGeneratorRequestor", role_description="사용자 관점의 요청문을 생성")]
-    )
-    testset = generator.generate_with_langchain_docs(
-        documents=ragas_docs,
-        testset_size=TARGET_Q,
-        transforms=[NERExtractor()],
-        query_distribution=[(synth, 1.0)],
-    )
-
-    # RAGAS 결과 수 만큼, 요구 스키마로 후처리
-    rows=[]
-    bi=0
-    for _ in testset.to_evaluation_dataset():
-        b = bundles[bi % len(bundles)]; bi+=1
-
-        # 사용자 요청 프롬프트 + 랜덤 문제 수
-        user_prompt_text, k = build_user_prompt(b.subject)
-
-        # 보기만 포함하는 문제 리스트 생성 (컨텍스트 전량 사용)
-        gen_prompt = build_generation_prompt(b.merged_context_full, b.subject, k)
-        try:
-            resp = base_llm.invoke(gen_prompt)
-            gt_list = parse_mcq_list_json(getattr(resp,"content",str(resp)), k)
-        except Exception as e:
-            print(f"⚠️ 문제 리스트 생성 실패({b.subject}): {e}")
+        # ground_truth: 기존 로직 그대로 유지 (k개, 보기-only)
+        gt = sample_ground_truth(problem_bank, subject, k)
+        if not gt:
             continue
 
-        # === RAGAS 평가 포맷 ===
+        # ✅ 컨텍스트: 공식 문제 2개 + 개념(컷) — subject 기반으로 매번 생성
+        contexts_field = build_context_for_sample(subject, concept_texts, problem_bank)
+
         rows.append({
-            "question": user_prompt_text,        # 요청문
-            "ground_truth": gt_list,             # [{question, options[4]}, ...]
-            "contexts": [b.merged_context_full], # 전량 1개(리스트)
-            "subject": b.subject or "전체",
-            "requested_n": k,
-            "generated_n": len(gt_list),
+            "question": prompt,
+            "ground_truth": gt,
+            "contexts": contexts_field
         })
+        if (i + 1) % 10 == 0:
+            log(f"진행: {i+1}/{TARGET_SAMPLES}")
 
-    if not rows:
-        print("❌ 생성 실패"); sys.exit(1)
+    # 3) 샘플 생성
+    rows: List[Dict[str, Any]] = []
+    for i in range(TARGET_SAMPLES):
+        subject = pick_subject_for_prompt()
+        prompt, k = build_user_prompt(subject)
+        gt = sample_ground_truth(problem_bank, subject, k)
+        if not gt:
+            continue
+        rows.append({
+            "question": prompt,
+            "ground_truth": gt,
+            "contexts": contexts_field
+        })
+        if (i + 1) % 10 == 0:
+            log(f"진행: {i+1}/{TARGET_SAMPLES}")
 
+    # 4) 저장 (JSONL + CSV 미리보기)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    os.makedirs(OUT_DIR, exist_ok=True)
-    jsonl_path = os.path.join(OUT_DIR, f"goldenset_generator_ragas_{ts}.jsonl")
-    csv_path   = os.path.join(OUT_DIR, f"goldenset_generator_ragas_{ts}.csv")
+    jsonl_path = os.path.join(OUT_DIR, f"generator_golden_{ts}.jsonl")
+    csv_path = os.path.join(OUT_DIR, f"generator_golden_{ts}.csv")
 
-    with open(jsonl_path,"w",encoding="utf-8") as f:
+    with open(jsonl_path, "w", encoding="utf-8", newline="") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    # CSV는 ground_truth/contexts를 문자열화해 함께 저장
-    import pandas as pd
-    df = pd.DataFrame([{
-        "question": r["question"],
-        "ground_truth": json.dumps(r["ground_truth"], ensure_ascii=False),
-        "contexts": json.dumps(r["contexts"], ensure_ascii=False),
-        "contexts_len": len(r["contexts"][0]),
-        "subject": r["subject"],
-        "requested_n": r["requested_n"],
-        "generated_n": r["generated_n"],
-    } for r in rows])
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    # CSV는 사람이 보기 좋게 일부 요약
+    csv_rows = []
+    for r in rows:
+        q = r["question"]
+        n = len(r["ground_truth"])
+        ctx_preview = (r["contexts"][0][:300] + "…") if r["contexts"] and len(r["contexts"][0]) > 300 else (r["contexts"][0] if r["contexts"] else "")
+        csv_rows.append({
+            "question": q,
+            "gt_len": n,
+            "contexts_preview": ctx_preview
+        })
+    pd.DataFrame(csv_rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
-    print(f"✅ 저장 완료\n - JSONL: {jsonl_path}\n - CSV  : {csv_path}\n📊 샘플 수: {len(rows)}")
+    log(f"✅ 완료: {len(rows)} 샘플 저장")
+    log(f"JSONL → {jsonl_path}")
+    log(f"CSV   → {csv_path}")
 
 if __name__ == "__main__":
     main()

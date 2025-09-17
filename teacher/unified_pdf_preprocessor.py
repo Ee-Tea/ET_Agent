@@ -231,4 +231,4 @@ if __name__ == "__main__":
     out_json = os.path.splitext(os.path.basename(args.pdf))[0] + "_qa.json"
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
-    print(f"\n�� 저장: {out_json}")
+    print(f"\n저장: {out_json}")

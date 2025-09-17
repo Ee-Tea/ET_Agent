@@ -14,7 +14,7 @@ from langchain_core.documents import Document
 load_dotenv()
 
 # === 설정 ===
-DATA_DIR = "./data/cropinfo" 
+DATA_DIR = "./data/redis/cropinfo" 
 COLLECTION_NAME = "crop_grow" # 새로운 컬렉션 이름
 EMBED_MODEL_NAME = "jhgan/ko-sroberta-multitask"
 CHUNK_SIZE = 800

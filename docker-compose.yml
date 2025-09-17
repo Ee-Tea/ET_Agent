@@ -1,7 +1,4 @@
-# AUTO-MERGED docker-compose (sources: docker-compose.yml, docker-compose.api.yml, docker-compose.override.yml)
-# This file preserves settings from the above files with later files overriding earlier ones.
-# Edit build.dockerfile paths per-service if needed:
-#   Available Dockerfiles in this upload: Dockerfile, Dockerfile.api, Dockerfile.auth
+version: '3.5'
 
 volumes:
   langgraph-data:
@@ -235,4 +232,3 @@ networks:
   default:
     name: et-agent-network
     driver: bridge
-

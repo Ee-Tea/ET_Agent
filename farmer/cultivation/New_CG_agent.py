@@ -107,7 +107,13 @@ def _get_web_only_prompt():
     return ChatPromptTemplate.from_template(WEB_ONLY_PROMPT_TEMPLATE)
 
 VALIDATION_PROMPT = """
-주어진 맥락만 사용하여 다음 질문에 대한 완전하고 상세한 답변을 생성할 수 있는지 여부를 '네' 또는 '아니오'로만 답변하세요.
+주어진 맥락을 바탕으로 다음 질문에 대한 유용한 답변을 제공할 수 있는지 여부를 '네' 또는 '아니오'로만 답변하세요.
+
+기준:
+- 질문과 관련된 정보가 맥락에 포함되어 있으면 '네'
+- 완전하지 않더라도 부분적인 답변을 제공할 수 있으면 '네'
+- 전혀 관련이 없거나 아무 정보가 없을 때만 '아니오'
+
 질문: {question}
 맥락: {db_context}
 답변:
@@ -240,7 +246,9 @@ def generate_final_answer_node(state: GraphState) -> Dict[str, Any]:
     return {**state, "answer": answer}
 
 def remove_markdown_and_special_chars(text: str) -> str:
-    text = re.sub(r'#{1,6}\s', '', text)
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 헤더 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거
     text = re.sub(r'[\*\-]', '', text)
     text = re.sub(r'\[.*?\]\(.*?\)', '', text)
     return text.strip()
@@ -334,8 +342,11 @@ def run(state: Dict[str, Any]) -> Dict[str, Any]:
             final_response = final_state.get('answer', '답변을 생성할 수 없습니다.')
             print("✅ 답변 생성 완료")
             
+            # 마크다운 제거
+            cleaned_response = remove_markdown_and_special_chars(final_response)
+            
             return {
-                "agent_answer": final_response,
+                "agent_answer": cleaned_response,
                 "status": "success",
                 "error": None
             }

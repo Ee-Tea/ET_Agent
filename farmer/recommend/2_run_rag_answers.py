@@ -294,7 +294,9 @@ def build_graph():  # LangGraph 워크플로우를 구성하는 함수
     return g.compile()  # 구성된 그래프를 컴파일하여 실행 가능한 객체로 반환
 
 def remove_markdown_and_special_chars(text: str) -> str:  # 마크다운 및 특수 문자를 제거하는 함수
-    text = re.sub(r'#{1,6}\s', '', text)  # 마크다운 제목(#) 제거
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 마크다운 제목(#) 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거 (- *)
     text = re.sub(r'[\*\-]', '', text)  # 마크다운 강조(*, -) 제거
     text = re.sub(r'\[.*?\]\(.*?\)', '', text)  # 마크다운 링크 제거
     text = re.sub(r'\s+', ' ', text)  # 여러 공백을 하나의 공백으로 축소

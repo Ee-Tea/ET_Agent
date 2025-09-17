@@ -53,25 +53,35 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
 KST = ZoneInfo("Asia/Seoul")
 
-# 시/군/구 키워드 (필요하면 계속 추가)
-CITY_KEYWORDS = [
-    "서울","부산","대구","인천","광주","대전","울산","세종",
-    "수원","성남","용인","고양","부천","안산","남양주","의정부","화성","평택","파주","김포","광명","시흥",
-    "군포","하남","오산","이천","안성","의왕","구리","과천","여주","양주",
-    "춘천","강릉","청주","천안","전주","광양","여수","순천","목포","익산","군산",
-    "창원","진주","통영","거제","사천","밀양","양산","포항","구미","안동",
-    "제주","서귀포"
-]
+# 지역 매핑 로드
+from .utils import load_region_map, REGION_MAP
+load_region_map()
 
 def _normalize_question(q: str) -> str:
     return re.sub(r'[\/\s]+$', '', (q or '').strip())
 
 def _extract_city(text: str) -> Optional[str]:
+    """CSV에서 로드된 지역 정보를 사용하여 지역 추출"""
     if not text:
         return None
-    for c in CITY_KEYWORDS:
-        if c in text:
-            return c
+    
+    # CSV에서 로드된 지역 매핑 사용
+    from .utils import REGION_MAP
+    if not REGION_MAP:
+        # CSV가 로드되지 않은 경우 기본 지역들만 사용
+        basic_cities = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종"]
+        for city in basic_cities:
+            if city in text:
+                return city
+        return None
+    
+    # CSV에서 로드된 모든 지역명 확인
+    for region_name in REGION_MAP.keys():
+        if isinstance(region_name, str) and region_name in text:
+            # 시/군/구 단위로 매칭 (전국, 경기도 등은 제외)
+            if not any(suffix in region_name for suffix in ["전국", "도", "광역시", "특별시", "자치시"]):
+                return region_name
+    
     return None
 
 def _parse_kst_maybe(s: str) -> Optional[datetime]:
@@ -202,34 +212,17 @@ def _get_answer_prompt():
 
 답변 구조:
 순번) 개요: 핵심 요약
-순번) 기상특보 현황: (컨텍스트에 [live_advisory] 데이터가 있으면 반드시 포함)
-순번) 단기예보: (컨텍스트에 [live_forecast] 데이터가 있으면 반드시 포함)
-순번) 중기예보: (컨텍스트에 [mid_forecast] 데이터가 있으면 반드시 포함)
+순번) 기상특보 현황: (질문 지역 관련 특보 아닐 경우 섹션 제외 해당 데이터 없으면 섹션 제외)
+순번) 단기예보: (지역별 날씨 정보 해당 데이터 없으면 섹션 제외)
+순번) 중기예보: (주간 예보 정보 해당 데이터 없으면 섹션 제외)
 순번) 종합 요약
 
 주의사항:
-- 지역 정보가 명확하지 않은 경우, 서울/수도권 기준으로 답변하세요
-- 데이터가 없는 섹션은 아예 생략하세요. "없습니다"라고 표시하지 마세요
-- **중요**: 컨텍스트에 [live_advisory] 데이터가 있으면 기상특보 현황 섹션을 반드시 포함하세요
-- **중요**: 컨텍스트에 [live_forecast] 데이터가 있으면 단기예보 섹션을 반드시 포함하세요
-- 단기예보는 나열식 불릿이 아니라, 날짜와 시간대를 연결하여 자연스러운 문장 형태로 서술하세요. 대신 날짜별로 줄바꿈도 해야함
-  (예: "12일 오전에는 구름이 많고 강수 확률은 20%입니다. 오후에는 흐리고 기온은 28도로 올라가며 비가 올 확률은 60%입니다.")
-- 날짜 계산은 현재 날짜를 기준으로 정확하게 계산하세요
-  (예: 이번 주가 일요일~토요일이면 "이번 주" → 해당 주간 전체 포함,
-       다음 주는 다음 주의 일요일~토요일 전체 포함)
-- "이번 주" 또는 "다음 주"와 같은 주간 예보 요청은 포괄적으로 판단하세요
-  → 단기예보와 중기예보, 기상특보를 함께 사용해야 합니다
-- 주간 예보 요청 시 해당 기간의 모든 데이터를 빠짐없이 나열하듯이 답변하세요
-- 발표 예정인 특보는 반드시 "발표 예정" 또는 "예정"이라고 명시하세요
-- **절대 금지**: 데이터가 없을 경우 "없음", "데이터가 없습니다" 등의 문구를 출력하지 말고, 그 섹션 자체를 출력하지 마세요.
-- **중요**: 데이터가 없는 섹션은 아예 제외하세요
-- **중요**: 불릿 구조는 반드시 유지하세요 (번호 대신 - 로 구분)
-- **중요**: 기상특보 데이터가 없으면 "기상특보 현황" 섹션을 아예 제외하세요
-- **중요**: 중기예보 데이터가 없으면 "중기예보" 섹션을 아예 제외하세요
-- **중요**: 단기예보 데이터가 없으면 "단기예보" 섹션을 아예 제외하세요
-- 웹검색 결과가 있으면: 기상청 공식 데이터를 우선하되, 웹검색 결과의 최신 정보도 참고하세요
-- 마크다운 문법을 사용하지 말고 일반 텍스트로 작성하세요
-- 답변 끝에 안내 문구는 추가하지 마세요
+- 데이터가 없는 섹션은 아예 생략하세요
+- **기상특보**: 질문에서 언급된 지역과 관련된 특보만 표시하세요. 다른 지역 특보는 제외하세요
+- **단기예보/중기예보**: 이미 지역 필터링된 데이터이므로 그대로 사용하세요
+- 각 순번 사이에 빈 줄을 넣으세요
+- 마크다운 사용 금지
 
 답변:"""
 )
@@ -373,8 +366,15 @@ def advisory_node_wrapper(state: GraphState) -> Dict[str, Any]:
                 continue
 
             # ✅ 지역 매칭 (공통 유틸 함수 사용)
-            if match_region_with_default(target_region, name, state.get("region_from_default", False)):
-                filtered.append(it)
+            if not match_region_with_default(target_region, name, state.get("region_from_default", False)):
+                continue
+            
+            # ✅ 추가 지역 필터링: 질문에서 명시적으로 언급된 지역이 있으면 더 엄격하게 필터링
+            question = state.get("question", "").lower()
+            if target_region != "서울" and target_region in question:
+                # 질문에서 특정 지역을 명시한 경우, 해당 지역만 허용
+                if target_region not in name:
+                    continue
 
             # ✅ 기간 매칭
             if date_range:
@@ -389,6 +389,7 @@ def advisory_node_wrapper(state: GraphState) -> Dict[str, Any]:
                 if not ok:
                     continue
 
+            # 모든 조건을 통과한 경우만 추가
             filtered.append(it)
         except Exception:
             pass
@@ -404,7 +405,7 @@ def advisory_node_wrapper(state: GraphState) -> Dict[str, Any]:
             return (4, n)
         filtered.sort(key=_rank)
 
-    print(f"   - {target_region} 지역 필터링: {len(filtered)}개")
+    print(f"   - {target_region} 지역 필터링 완료: {len(filtered)}개 (원본: {len(result.get('advisory_data', []))}개)")
     return {"advisory_data": filtered}
 
 # 3) 단기예보 래퍼
@@ -757,6 +758,50 @@ def _get_weather_app():
         print("✅ 날씨_agent 모듈 로딩 완료")
     return _weather_app
 
+# =========[ 마크다운 제거 및 포맷팅 함수 ]=========
+def remove_markdown_and_special_chars(text: str) -> str:
+    """마크다운 및 특수문자를 제거하고 날씨 정보를 포맷팅하는 함수"""
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # 헤더 제거 - 공백 없이도 제거
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)  # 앞에 공백이 있는 헤더도 제거
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)  # 불릿 포인트 제거
+    text = re.sub(r'[\*\-]', '', text)  # 불릿(*, -) 제거
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)  # 링크 제거
+    text = re.sub(r'\s+', ' ', text)  # 여러 공백을 하나로 축소
+    
+    # 날씨 정보 포맷팅 추가
+    text = format_weather_response(text)
+    
+    return text.strip()  # 양 끝 공백 제거
+
+def format_weather_response(text: str) -> str:
+    """날씨 응답을 포맷팅하는 함수"""
+    # 1. 빈 섹션 완전 제거 (제목만 있고 내용이 없는 경우)
+    text = re.sub(r'\d+\)\s*[^:]+:\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\d+\)\s*[^:]+:\s*\n\s*$', '', text, flags=re.MULTILINE)
+    
+    # 2. "해당 데이터가 없습니다" 같은 문구 제거
+    text = re.sub(r'해당 데이터가 없습니다\.?', '', text)
+    text = re.sub(r'데이터가 없습니다\.?', '', text)
+    text = re.sub(r'없습니다\.?', '', text)
+    
+    # 3. 순번 패턴 찾아서 강제로 줄바꿈 추가
+    # 순번 앞에 줄바꿈 추가
+    text = re.sub(r'(\d+\)\s*[^:]+:)', r'\n\n\1', text)
+    
+    # 4. 각 순번의 제목과 내용 사이에 줄바꿈 추가
+    text = re.sub(r'(\d+\)\s*[^:]+:)\s*([^\n])', r'\1\n\2', text)
+    
+    # 5. 각 섹션 끝에 줄바꿈 추가
+    text = re.sub(r'(\d+\)\s*[^:]+:.*?)(?=\n\s*\d+\)\s*[^:]+:)', r'\1\n', text, flags=re.DOTALL)
+    
+    # 6. 연속된 줄바꿈 정리 (3개 이상을 2개로)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    # 7. 시작과 끝의 불필요한 줄바꿈 제거
+    text = text.strip()
+    
+    return text
+
 # OchestratorTest.py 호환 함수
 def run(state: dict) -> dict:
     try:
@@ -768,8 +813,12 @@ def run(state: dict) -> dict:
         app = _get_weather_app()
         result = app.invoke({"question": query})
         answer = result.get("answer", "답변을 생성할 수 없습니다.")
-        print(f"[날씨_agent_simple] 답변 생성 완료: {len(answer)}자")
-        return {"agent_answer": answer}
+        
+        # 마크다운 제거
+        cleaned_answer = remove_markdown_and_special_chars(answer)
+        
+        print(f"[날씨_agent_simple] 답변 생성 완료: {len(cleaned_answer)}자")
+        return {"agent_answer": cleaned_answer}
 
     except Exception as e:
         error_msg = f"날씨 에이전트 실행 중 오류가 발생했습니다: {e}"

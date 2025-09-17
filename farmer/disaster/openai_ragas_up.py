@@ -19,6 +19,7 @@ from datetime import datetime
 import fitz  # PyMuPDF
 import easyocr
 import pdfplumber
+import numpy as np
 from langchain.schema import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -40,12 +41,12 @@ if not OPENAI_API_KEY:
     print("❌ OPENAI_API_KEY 없음")
     sys.exit(1)
 
-PDF_DIR = "./farmer/disaster/pdfs"
+PDF_DIR = "./farmer/disaster/data"
 SINGLE_PDF_PATH = "./farmer/disaster/2025 기상재해 대응기술 가이드북(주요 20작물).pdf"
 IMAGE_DIR = ""
-TARGET_QUESTIONS = 50   # 🔥 생성할 질문 수
-CHUNK_SIZE = 2000      # 더 긴 context로 변경
-CHUNK_OVERLAP = 300    # overlap도 비례적으로 증가
+TARGET_QUESTIONS = 300  # 🔥 생성할 질문 수
+CHUNK_SIZE = 900      # 더 긴 context로 변경
+CHUNK_OVERLAP = 150    # overlap도 비례적으로 증가
 
 # ===================== 전처리 (OCR + 표 파싱) =====================
 ocr_reader = None
@@ -226,7 +227,7 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
     # 더 강력한 LLM 사용 (질문 품질 향상)
     generator_llm = LangchainLLMWrapper(ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0.4,  # 창의성과 일관성의 균형
+        temperature=0.5,  # 창의성과 일관성의 균형
         max_tokens=2000   # 더 긴 답변 생성
     ))
     generator_embeddings = embedding_factory("openai", model="text-embedding-3-large")
@@ -259,6 +260,16 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         transforms=transforms,
         query_distribution=[(query, 1.0)]
     )
+    
+        # 🔥 관련성 높은 context만 추려내는 함수
+    def get_top_k_contexts(query: str, documents: list[Document], embedder, k: int = 5) -> list[str]:
+        query_vec = embedder.embed_query(query)
+        doc_vecs = embedder.embed_documents([doc.page_content for doc in documents])
+        scores = np.dot(doc_vecs, query_vec) / (
+            np.linalg.norm(doc_vecs, axis=1) * np.linalg.norm(query_vec)
+        )
+        top_idx = np.argsort(scores)[::-1][:k]
+        return [documents[i].page_content for i in top_idx]
 
     eval_dataset = dataset.to_evaluation_dataset()
 
@@ -267,11 +278,12 @@ def generate_golden_set(documents: list[Document], mode: str = "multi_pdf"):
         print(f"\n질문 {i+1}")
         print("  Question:", sample.user_input)
         print("  Ground Truth:", sample.reference)
-        print("  Contexts:", sample.reference_contexts)
+        filtered_contexts = get_top_k_contexts(sample.user_input, documents, generator_embeddings, k=5)
+        print("  Contexts:", filtered_contexts)
         results.append({
             "question": sample.user_input,
             "ground_truth": sample.reference,
-            "contexts": sample.reference_contexts
+            "contexts": filtered_contexts  # 필터링된 context 사용
         })
 
     # 저장 (타임스탬프 추가) - farmer/disaster/data 폴더에 저장

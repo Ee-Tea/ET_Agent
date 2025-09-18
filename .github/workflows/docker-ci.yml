@@ -79,27 +79,3 @@ jobs:
           cache-from: type=registry,ref=${{ matrix.image }}:buildcache
           cache-to: type=registry,ref=${{ matrix.image }}:buildcache,mode=max
 
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-
-    steps:
-      - name: Deploy over SSH (pull & up -d --no-build)
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          script: |
-            set -euo pipefail
-            echo "[*] Ensure docker is running"
-            sudo systemctl start docker
-            echo "[*] Docker login to Docker Hub"
-            echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-            echo "[*] Pull latest images & restart compose (no local build)"
-            cd "${{ secrets.DEPLOY_DIR }}"
-            sudo docker compose pull
-            sudo docker compose up -d --pull always --no-build
-            sudo docker compose ps

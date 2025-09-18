@@ -154,6 +154,7 @@ services:
     - ./alembic:/app/alembic
     - ./alembic.ini:/app/alembic.ini
   langgraph-api:
+    <<: *hostgw
     build:
       context: .
       dockerfile: Dockerfile
@@ -182,6 +183,7 @@ services:
     volumes:
     - ./:/deps/LLM-T:rw
   bff-api:
+    <<: *hostgw
     build:
       context: .
       dockerfile: Dockerfile.api.slim

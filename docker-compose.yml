@@ -208,6 +208,11 @@ services:
       LANGGRAPH_API_URL: http://langgraph-api:8000
       MILVUS_HOST: "host.docker.internal"   # :왼쪽_화살표::왼쪽_화살표: 필요하다면 bff도 직접 참조
       MILVUS_PORT: "19530"
+      # 프론트엔드용 외부 접근 URL
+      FRONTEND_ELASTIC_IP: ${FRONTEND_ELASTIC_IP:-43.203.101.187}
+      BFF_EXTERNAL_URL: http://${FRONTEND_ELASTIC_IP:-43.203.101.187}:8100
+      AUTH_EXTERNAL_URL: http://${FRONTEND_ELASTIC_IP:-43.203.101.187}:8124
+      LANGGRAPH_EXTERNAL_URL: http://${FRONTEND_ELASTIC_IP:-43.203.101.187}:8123
     volumes:
     - ./supervisor.py:/app/supervisor.py
     - ./teacher:/app/teacher

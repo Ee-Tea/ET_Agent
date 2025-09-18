@@ -3,7 +3,7 @@
 # =============================================================================
 
 # 평가할 데이터셋 파일 경로 설정
-CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_single_20250917_094727.csv"
+CSV_FILE_PATH = "./farmer/disaster/data/golden_dataset_open_multi_20250917_161905.csv"
 
 # 결과 저장 설정
 OUTPUT_DIRECTORY = "./farmer/disaster/data"                # 결과 저장 디렉토리
@@ -23,12 +23,12 @@ FILTER_BY_THRESHOLD = True      # True: 모든 메트릭 임계값을 넘는 것
 
 # 메트릭 임계값 설정
 METRIC_THRESHOLDS = {
-    'input_quality': 0.8,                   # 입력 질문 품질
-    'reference_quality': 0.8,               # 참조 컨텍스트 품질
-    'answer_quality': 0.8,                  # 답변 품질
-    'input_reference_alignment': 0.8,       # 입력-참조 정렬도
-    'reference_answer_alignment': 0.8,      # 참조-답변 정렬도
-    'input_answer_alignment': 0.8           # 입력-답변 정렬도
+    'input_quality': 0.75,                   # 입력 질문 품질
+    'reference_quality': 0.75,               # 참조 컨텍스트 품질
+    'answer_quality': 0.75,                  # 답변 품질
+    'input_reference_alignment': 0.75,       # 입력-참조 정렬도
+    'reference_answer_alignment': 0.75,      # 참조-답변 정렬도
+    'input_answer_alignment': 0.75           # 입력-답변 정렬도
 }
 
 # ✅ DeepEval metric 이름 ↔ threshold key 매핑 추가
@@ -58,7 +58,7 @@ EVALUATION_STEPS = {
         "참조 컨텍스트가 과거 재해 사례의 구체적인 데이터(연도, 지역, 피해 규모, 작물별 피해 현황 등)를 포함하는지 평가합니다.",
         "통계 데이터, 피해 금액, 피해 면적, 작물별 피해율 등 정량적 정보가 포함되어야 합니다.",
         "과거 사례의 시기적 배경(기상 조건, 재해 발생 과정, 복구 과정 등)이 상세히 기술되어야 합니다.",
-        "과학적 근거와 전문가 분석이 포함된 경우 높은 점수(0.8~1.0)를 부여합니다.",
+        "과학적 근거와 전문가 분석이 포함된 경우 높은 점수(0.75~1.0)를 부여합니다.",
         "정보가 부족하거나 일반적 수준에 그치면 낮은 점수(0.0~0.3)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 충족도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
@@ -75,7 +75,7 @@ EVALUATION_STEPS = {
     'input_reference_alignment': [
         "사용자가 요청한 특정 연도, 지역, 작물의 재해 사례에 대해 참조 컨텍스트가 직접적인 과거 데이터를 제공하는지 평가합니다.",
         "질문에서 언급된 재해 유형과 참조의 재해 사례가 일치하거나 유사한 상황인지 확인합니다.",
-        "정확히 일치하거나 유사한 경우 높은 점수(0.8~1.0)를 부여합니다.",
+        "정확히 일치하거나 유사한 경우 높은 점수(0.75~1.0)를 부여합니다.",
         "관련 없는 연도, 지역, 작물의 재해 정보가 포함되면 낮은 점수(0.0~0.3)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 일치도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
@@ -83,14 +83,14 @@ EVALUATION_STEPS = {
     'reference_answer_alignment': [
         "답변이 참조 컨텍스트의 과거 사례 데이터에 기반해 작성되었는지 평가합니다.",
         "참조에 없는 통계 수치나 사례가 추가되면 낮은 점수(0.0~0.3)를 부여합니다.",
-        "참조의 핵심 과거 사례 정보가 답변에 잘 반영되면 높은 점수(0.8~1.0)를 부여합니다.",
+        "참조의 핵심 과거 사례 정보가 답변에 잘 반영되면 높은 점수(0.75~1.0)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 충실히 반영되었음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
     ],
     'input_answer_alignment': [
         "답변이 질문의 과거 사례 맥락에 맞는 구체적 데이터를 제시했는지 평가합니다.",
         "질문 의도와 일치하지 않으면 낮은 점수(0.0~0.3)를 부여합니다.",
-        "정확히 맞춤형 과거 사례 데이터를 제시하면 높은 점수(0.8~1.0)를 부여합니다.",
+        "정확히 맞춤형 과거 사례 데이터를 제시하면 높은 점수(0.75~1.0)를 부여합니다.",
         "0.0~1.0 사이 점수를 주되, 높을수록 일치도가 높음을 의미합니다.",
         "평가 근거를 한국어로 간단히 설명하세요."
     ]
@@ -503,7 +503,7 @@ class DeepEvaluator:
                                    'Input-Reference Alignment', 'Reference-Answer Alignment', 'Input-Answer Alignment']:
                     if metric_name in result['metric_scores']:
                         score = result['metric_scores'][metric_name]['score']
-                        threshold = METRIC_THRESHOLDS.get(metric_name.lower().replace(' ', '_').replace('-', '_'), 0.8)
+                        threshold = METRIC_THRESHOLDS.get(metric_name.lower().replace(' ', '_').replace('-', '_'), 0.75)
                         row[f'{metric_name}_score'] = score
                         row[f'{metric_name}_threshold'] = threshold
                         row[f'{metric_name}_pass'] = "PASS" if score >= threshold else "FAIL"

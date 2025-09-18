@@ -184,7 +184,7 @@ services:
     env_file:
     - .env
     environment:
-      REDIS_URI: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/0
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'

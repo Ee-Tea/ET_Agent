@@ -1,16 +1,8 @@
 x-hostgw: &hostgw
   extra_hosts:
     - "host.docker.internal:host-gateway"
-volumes:
-  langgraph-data:
-    driver: local
-  redis_data: null
-  postgres_data: null
 services:
   redis:
-    build:
-      context: .
-      dockerfile: Dockerfile.redis
     image: udd43/et-agent-redis:latest
     healthcheck:
       test:
@@ -23,12 +15,7 @@ services:
     ports:
     - 6380:6379
     command: redis-server --appendonly no
-    volumes:
-    - ./data/redis:/data
   postgres-init:
-    build:
-      context: .
-      dockerfile: Dockerfile.postgres
     image: udd43/et-agent-postgres-init:latest
     environment:
       POSTGRES_DB: postgres
@@ -109,9 +96,6 @@ services:
       langgraph-postgres:
         condition: service_healthy
   langgraph-postgres:
-    build:
-      context: .
-      dockerfile: Dockerfile.postgres
     image: udd43/et-agent-postgres:latest
     ports:
     - 5433:5432
@@ -119,8 +103,6 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    volumes:
-    - langgraph-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -128,9 +110,6 @@ services:
       retries: 5
       start_period: 10s
   auth-api:
-    build:
-      context: .
-      dockerfile: Dockerfile.auth.slim
     image: udd43/et-agent-auth:latest
     ports:
     - 8124:8000
@@ -149,15 +128,8 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
-    volumes:
-    - ./auth:/app/auth
-    - ./alembic:/app/alembic
-    - ./alembic.ini:/app/alembic.ini
   langgraph-api:
     <<: *hostgw
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: udd43/et-agent-langgraph:latest
     ports:
     - 8123:8000
@@ -171,7 +143,7 @@ services:
     env_file:
     - .env
     environment:
-      REDIS_URI: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
@@ -180,13 +152,8 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres
       MILVUS_HOST: "host.docker.internal"
       MILVUS_PORT: "19530"
-    volumes:
-    - ./:/deps/LLM-T:rw
   bff-api:
     <<: *hostgw
-    build:
-      context: .
-      dockerfile: Dockerfile.api.slim
     image: udd43/et-agent-bff:latest
     ports:
     - 8100:8000
@@ -213,12 +180,6 @@ services:
       BFF_EXTERNAL_URL: http://${FRONTEND_ELASTIC_IP:-43.203.101.187}:8100
       AUTH_EXTERNAL_URL: http://${FRONTEND_ELASTIC_IP:-43.203.101.187}:8124
       LANGGRAPH_EXTERNAL_URL: http://${FRONTEND_ELASTIC_IP:-43.203.101.187}:8123
-    volumes:
-    - ./supervisor.py:/app/supervisor.py
-    - ./teacher:/app/teacher
-    - ./farmer:/app/farmer
-    - ./common:/app/common
-    - ./api:/app/api
     depends_on:
     - redis
     - langgraph-postgres

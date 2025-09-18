@@ -459,6 +459,7 @@ class DisasterRAGASEvaluator:
                         reference=reference,
                         retrieved_contexts=contexts  # 실제 컨텍스트 사용
                     )
+                    
                     score = response_relevancy_scorer.single_turn_score(sample)
                     print(f"✅ Answer Relevancy: {float(score) if score is not None else 0.0:.3f}")
                     return ("answer_relevancy", float(score) if score is not None else 0.0)
@@ -628,66 +629,124 @@ class DisasterRAGASEvaluator:
             return None
 
     def save_results(self, output_path=None):
-        """평가 결과를 JSON 파일로 저장합니다."""
+        """평가 결과를 CSV 파일로 저장합니다."""
         if not self.evaluation_results:
             print("❌ 저장할 평가 결과가 없습니다.")
             return None
         
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        # ./farmer/disaster/data 디렉토리에 저장
+        data_dir = "./farmer/disaster/data"
+        os.makedirs(data_dir, exist_ok=True)  # 디렉토리가 없으면 생성
+        
+        # CSV 파일 저장
         if not output_path:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # ./farmer/disaster/data 디렉토리에 저장
-            data_dir = "./farmer/disaster/data"
-            os.makedirs(data_dir, exist_ok=True)  # 디렉토리가 없으면 생성
-            output_path = os.path.join(data_dir, f"disaster_ragas_evaluation_results_{timestamp}.json")
+            csv_output_path = os.path.join(data_dir, f"disaster_ragas_evaluation_results_{timestamp}.csv")
+        else:
+            csv_output_path = output_path
         
-        # 평균 점수 계산
-        context_precision_scores = []
-        faithfulness_scores = []
-        answer_relevancy_scores = []
-        context_recall_scores = []
-        
-        for result in self.evaluation_results:
-            if 'individual_ragas_score' in result and result['individual_ragas_score']:
-                scores = result['individual_ragas_score']
-                if 'context_precision' in scores:
-                    context_precision_scores.append(scores['context_precision'])
-                if 'faithfulness' in scores:
-                    faithfulness_scores.append(scores['faithfulness'])
-                if 'answer_relevancy' in scores:
-                    answer_relevancy_scores.append(scores['answer_relevancy'])
-                if 'context_recall' in scores:
-                    context_recall_scores.append(scores['context_recall'])
-        
-        # 평균 점수 계산
-        avg_scores = {}
-        if context_precision_scores:
-            avg_scores['context_precision'] = sum(context_precision_scores) / len(context_precision_scores)
-        if faithfulness_scores:
-            avg_scores['faithfulness'] = sum(faithfulness_scores) / len(faithfulness_scores)
-        if answer_relevancy_scores:
-            avg_scores['answer_relevancy'] = sum(answer_relevancy_scores) / len(answer_relevancy_scores)
-        if context_recall_scores:
-            avg_scores['context_recall'] = sum(context_recall_scores) / len(context_recall_scores)
-        
-        # 전체 결과 구성
-        full_results = {
-            'evaluation_summary': {
-                'total_questions': len(self.evaluation_results),
-                'successful_evaluations': len([r for r in self.evaluation_results if r.get('individual_ragas_score')]),
-                'failed_evaluations': len(self.evaluation_results) - len([r for r in self.evaluation_results if r.get('individual_ragas_score')]),
-                'average_scores': avg_scores,
-                'evaluation_timestamp': datetime.now().isoformat()
-            },
-            'detailed_results': self.evaluation_results
-        }
-        
-        # 결과 저장
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(full_results, f, ensure_ascii=False, indent=2)
-        
-        print(f"✅ 평가 결과 저장 완료: {output_path}")
-        print(f"📊 평균 점수도 포함되어 저장되었습니다.")
-        return output_path
+        self._save_results_to_csv(csv_output_path)
+        print(f"✅ CSV 평가 결과 저장 완료: {csv_output_path}")
+        return csv_output_path
+
+    def _save_results_to_csv(self, csv_output_path):
+        """평가 결과를 CSV 파일로 저장합니다."""
+        try:
+            # 평가 결과를 DataFrame으로 변환
+            csv_data = []
+            
+            for i, result in enumerate(self.evaluation_results, 1):
+                row = {
+                    'question_id': i,
+                    'question': result.get('question', ''),
+                    'reference': result.get('reference', ''),
+                    'answer': result.get('answer', ''),
+                    'context': result.get('context', ''),
+                    'timestamp': result.get('timestamp', ''),
+                }
+                
+                # RAGAS 점수 추가
+                if 'individual_ragas_score' in result and result['individual_ragas_score']:
+                    scores = result['individual_ragas_score']
+                    row.update({
+                        'context_precision': scores.get('context_precision', 0.0),
+                        'faithfulness': scores.get('faithfulness', 0.0),
+                        'answer_relevancy': scores.get('answer_relevancy', 0.0),
+                        'context_recall': scores.get('context_recall', 0.0),
+                    })
+                else:
+                    row.update({
+                        'context_precision': 0.0,
+                        'faithfulness': 0.0,
+                        'answer_relevancy': 0.0,
+                        'context_recall': 0.0,
+                    })
+                
+                csv_data.append(row)
+            
+            # 평균 점수 계산
+            context_precision_scores = []
+            faithfulness_scores = []
+            answer_relevancy_scores = []
+            context_recall_scores = []
+            
+            for result in self.evaluation_results:
+                if 'individual_ragas_score' in result and result['individual_ragas_score']:
+                    scores = result['individual_ragas_score']
+                    if 'context_precision' in scores:
+                        context_precision_scores.append(scores['context_precision'])
+                    if 'faithfulness' in scores:
+                        faithfulness_scores.append(scores['faithfulness'])
+                    if 'answer_relevancy' in scores:
+                        answer_relevancy_scores.append(scores['answer_relevancy'])
+                    if 'context_recall' in scores:
+                        context_recall_scores.append(scores['context_recall'])
+            
+            # 평균 점수 계산
+            avg_scores = {}
+            if context_precision_scores:
+                avg_scores['context_precision'] = sum(context_precision_scores) / len(context_precision_scores)
+            if faithfulness_scores:
+                avg_scores['faithfulness'] = sum(faithfulness_scores) / len(faithfulness_scores)
+            if answer_relevancy_scores:
+                avg_scores['answer_relevancy'] = sum(answer_relevancy_scores) / len(answer_relevancy_scores)
+            if context_recall_scores:
+                avg_scores['context_recall'] = sum(context_recall_scores) / len(context_recall_scores)
+            
+            # 평균 점수를 별도 행으로 추가
+            if avg_scores:
+                avg_row = {
+                    'question_id': 'AVERAGE',
+                    'question': '전체 평균 점수',
+                    'reference': '',
+                    'answer': '',
+                    'context': '',
+                    'timestamp': datetime.now().isoformat(),
+                    'context_precision': avg_scores.get('context_precision', 0.0),
+                    'faithfulness': avg_scores.get('faithfulness', 0.0),
+                    'answer_relevancy': avg_scores.get('answer_relevancy', 0.0),
+                    'context_recall': avg_scores.get('context_recall', 0.0),
+                }
+                csv_data.append(avg_row)
+            
+            # DataFrame 생성 및 CSV 저장
+            df = pd.DataFrame(csv_data)
+            df.to_csv(csv_output_path, index=False, encoding='utf-8-sig')
+            
+            print(f"📊 CSV 데이터 저장 완료: {len(csv_data)}개 행 (평균 점수 포함)")
+            
+            # 평균 점수 출력
+            if avg_scores:
+                print(f"📈 전체 평균 점수:")
+                print(f"  Context Precision: {avg_scores.get('context_precision', 0.0):.3f}")
+                print(f"  Faithfulness: {avg_scores.get('faithfulness', 0.0):.3f}")
+                print(f"  Answer Relevancy: {avg_scores.get('answer_relevancy', 0.0):.3f}")
+                print(f"  Context Recall: {avg_scores.get('context_recall', 0.0):.3f}")
+            
+        except Exception as e:
+            print(f"❌ CSV 저장 실패: {e}")
+            import traceback
+            traceback.print_exc()
 
     def print_summary(self):
         """평가 결과 요약을 출력합니다."""
@@ -733,8 +792,8 @@ if __name__ == "__main__":
         # 평가기 초기화 (정상적인 클래스 사용)
         evaluator = DisasterRAGASEvaluator()
         
-        # 동기 평가 실행 (전체 50개 질문)
-        results = evaluator.run_full_evaluation(max_questions=50)
+        # 동기 평가 실행 (전체 질문)
+        results = evaluator.run_full_evaluation()
         
         if results:
             evaluator.print_summary()

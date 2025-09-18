@@ -31,3 +31,5 @@ rank-bm25
 docling
 pdfplumber
 reportlab
+tavily-python
+faiss-cpu

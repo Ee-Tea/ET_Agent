@@ -1,0 +1,11 @@
+FROM postgres:16
+
+# PostgreSQL 설정 파일 복사 (선택사항)
+# COPY postgresql.conf /etc/postgresql/postgresql.conf
+
+# 초기화 스크립트 복사 (선택사항)
+# COPY init-scripts/ /docker-entrypoint-initdb.d/
+
+# 기본 명령어 유지
+CMD ["postgres"]
+

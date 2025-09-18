@@ -1,15 +1,17 @@
-version: '3.5'
-
+x-hostgw: &hostgw
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
 volumes:
   langgraph-data:
     driver: local
   redis_data: null
   postgres_data: null
-
 services:
-
   redis:
-    image: redis:7.2
+    build:
+      context: .
+      dockerfile: Dockerfile.redis
+    image: udd43/et-agent-redis:latest
     healthcheck:
       test:
       - CMD
@@ -23,9 +25,11 @@ services:
     command: redis-server --appendonly no
     volumes:
     - ./data/redis:/data
-
   postgres-init:
-    image: postgres:16
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    image: udd43/et-agent-postgres-init:latest
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -40,9 +44,7 @@ services:
           sleep 2
         done
         echo 'PostgreSQL is up - executing command'
-        
         # PostgresSaver 테이블 생성
-        
         # 사용자/세션/메시지 테이블 생성 및 컬럼 보강
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE TABLE IF NOT EXISTS users (
@@ -53,7 +55,6 @@ services:
             updated_at TIMESTAMP DEFAULT NOW()
           );
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE TABLE IF NOT EXISTS chat_sessions (
             id SERIAL PRIMARY KEY,
@@ -69,12 +70,10 @@ services:
             UNIQUE(user_id, chat_id)
           );
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
           ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title TEXT;
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE TABLE IF NOT EXISTS chat_messages (
             id SERIAL PRIMARY KEY,
@@ -87,37 +86,33 @@ services:
             created_at TIMESTAMP DEFAULT NOW()
           );
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
           ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS speaker TEXT;
         \"
-
         # 인덱스 생성
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE INDEX IF NOT EXISTS idx_chat_sessions_session_id ON chat_sessions(session_id);
         \"
-
         psql -h langgraph-postgres -U postgres -d postgres -c \"
           CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
         \"
-        
         echo 'Database initialization completed'
       "
     depends_on:
       langgraph-postgres:
         condition: service_healthy
-
   langgraph-postgres:
-    image: postgres:16
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    image: udd43/et-agent-postgres:latest
     ports:
     - 5433:5432
     environment:
@@ -132,11 +127,11 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
-
   auth-api:
     build:
       context: .
       dockerfile: Dockerfile.auth.slim
+    image: udd43/et-agent-auth:latest
     ports:
     - 8124:8000
     depends_on:
@@ -158,11 +153,11 @@ services:
     - ./auth:/app/auth
     - ./alembic:/app/alembic
     - ./alembic.ini:/app/alembic.ini
-
   langgraph-api:
     build:
       context: .
       dockerfile: Dockerfile
+    image: udd43/et-agent-langgraph:latest
     ports:
     - 8123:8000
     depends_on:
@@ -182,14 +177,15 @@ services:
       RUN_IN_CONTAINER: '1'
       REDIS_DEBUG: 'false'
       DATABASE_URL: postgresql://postgres:postgres@langgraph-postgres:5432/postgres
-
+      MILVUS_HOST: "host.docker.internal"
+      MILVUS_PORT: "19530"
     volumes:
     - ./:/deps/LLM-T:rw
-
   bff-api:
     build:
       context: .
       dockerfile: Dockerfile.api.slim
+    image: udd43/et-agent-bff:latest
     ports:
     - 8100:8000
     env_file:
@@ -208,6 +204,8 @@ services:
       GIT_PYTHON_REFRESH: quiet
       LANGGRAPH_API_BASE: http://langgraph-api:8000
       LANGGRAPH_API_URL: http://langgraph-api:8000
+      MILVUS_HOST: "host.docker.internal"   # :왼쪽_화살표::왼쪽_화살표: 필요하다면 bff도 직접 참조
+      MILVUS_PORT: "19530"
     volumes:
     - ./supervisor.py:/app/supervisor.py
     - ./teacher:/app/teacher
@@ -219,7 +217,7 @@ services:
     - langgraph-postgres
     - postgres-init
     - langgraph-api
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload 
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""]
       interval: 10s
@@ -227,8 +225,8 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
-
 networks:
   default:
     name: et-agent-network
     driver: bridge
+

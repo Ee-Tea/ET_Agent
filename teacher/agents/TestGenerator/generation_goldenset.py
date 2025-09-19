@@ -135,27 +135,35 @@ def load_exam_docs(root_dir: str) -> List[Document]:
 
 # ---- Milvus 연결 ----
 def resolve_milvus_data() -> Dict[str,Any]:
-    if get_milvus_connection_info is not None:
-        try:
-            md=get_milvus_connection_info()
-            if md and md.get("connection_status",False):
-                print("✅ Milvus 연결(get_milvus_connection_info) 성공"); return md
-            else:
-                print("⚠️ get_milvus_connection_info 유효하지 않음 → 직접 연결 시도")
-        except Exception as e:
-            print("⚠️ get_milvus_connection_info 실패:",e)
+    """단일 방법으로만 연결(충돌 방지). alias 충돌 시 우선 끊고 재연결."""
     try:
         from pymilvus import connections
-        uri=os.getenv("MILVUS_URI","http://localhost:19530")
+        alias = os.getenv("MILVUS_ALIAS","default")
+        # 기존 연결이 있으면 우선 끊기(서로 다른 설정 충돌 방지)
+        try:
+            if alias in connections.list_connections():
+                connections.disconnect(alias)
+        except Exception:
+            pass
+
+        uri=os.getenv("MILVUS_URI")
+        host=os.getenv("MILVUS_HOST","localhost")
+        port=os.getenv("MILVUS_PORT","19530")
         user=os.getenv("MILVUS_USERNAME"); pwd=os.getenv("MILVUS_PASSWORD"); token=os.getenv("MILVUS_TOKEN")
-        kwargs={"uri":uri}
+
+        kwargs: Dict[str,Any] = {}
+        if uri:
+            kwargs["uri"]=uri
+        else:
+            kwargs["host"]=host; kwargs["port"]=port
         if token: kwargs["token"]=token
         else:
             if user: kwargs["user"]=user
             if pwd: kwargs["password"]=pwd
-        connections.connect(alias="default", **kwargs)
-        print(f"✅ Milvus 직접 연결 성공: {uri}")
-        return {"connection_status":True,"alias":"default"}
+
+        connections.connect(alias=alias, **kwargs)
+        print("✅ Milvus 직접 연결 성공:", kwargs.get("uri", f"{host}:{port}"))
+        return {"connection_status":True, "alias":alias}
     except Exception as e:
         print("❌ Milvus 직접 연결 실패:",e)
         return {"connection_status":False}

@@ -27,8 +27,8 @@ def get_milvus_connection_info(milvus_data: Dict[str, Any]) -> Dict[str, Any]:
     from common.milvus_manager import MilvusDBManager
     
     milvus_manager = MilvusDBManager(
-        host=milvus_data.get("host", "localhost"),
-        port=milvus_data.get("port", "19530"),
+        host=milvus_data.get("host") or os.getenv("MILVUS_HOST", "localhost"),
+        port=milvus_data.get("port") or os.getenv("MILVUS_PORT", "19530"),
         embedding_model_name=milvus_data.get("embedding_model_name", "jhgan/ko-sroberta-multitask")
     )
     

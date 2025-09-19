@@ -44,9 +44,11 @@ class MilvusDBManager:
     def connect(self) -> bool:
         """MilvusDB에 연결"""
         try:
-            # 기존 연결이 있으면 정리
-            if "default" in connections.list_connections():
+            # 기존 연결이 있으면 우선 해제 (멱등)
+            try:
                 connections.disconnect("default")
+            except Exception:
+                pass
             
             # 새 연결 생성
             connections.connect(alias="default", host=self.host, port=self.port)

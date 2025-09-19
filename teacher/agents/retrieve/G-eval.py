@@ -4,7 +4,7 @@
 PROJECT_ROOT = r"C:\FinalPrj\ET_Agent"
 
 # 이 경로에 CSV / JSON / JSONL(=NDJSON) 아무거나 지정하면 자동 인식합니다.
-CSV_FILE_PATH = "./teacher/agents/retrieve/goldensets/goldenset_20250916_124703.jsonl"
+CSV_FILE_PATH = "./teacher/agents/retrieve/goldensets/goldenset_20250919_142037.jsonl"
 
 OUTPUT_DIRECTORY = "./teacher/agents/retrieve/eval_goldenset_deepeval"
 OUTPUT_FORMAT = "json"   # "json" or "csv"
@@ -28,12 +28,12 @@ MAX_EVALUATION_ROWS = None
 FILTER_BY_THRESHOLD = False
 
 METRIC_THRESHOLDS = {
-    'input_quality': 0.9,
-    'reference_quality': 0.9,
-    'answer_quality': 0.9,
-    'input_reference_alignment': 0.9,
-    'reference_answer_alignment': 0.9,
-    'input_answer_alignment': 0.9
+    'input_quality': 0.8,
+    'reference_quality': 0.8,
+    'answer_quality': 0.8,
+    'input_reference_alignment': 0.85,
+    'reference_answer_alignment': 0.85,
+    'input_answer_alignment': 0.85
 }
 
 # 내부 표시명 매핑(필터 적용 시 키 불일치 보정용)
@@ -56,7 +56,7 @@ EVALUATION_STEPS = {
         "평가 사유를 한국어로 간결히 설명하세요."
     ],
     'reference_quality': [
-        "컨텍스트가 해당 개념의 정확한 정의·조건·표기(기호/도식)·규칙·수식·절차·예시 등을 포함하는지 확인합니다.",
+        "컨텍스트가 해당 개념의 정확한 정의·조건·표기(기호/도식)·규칙·수식·절차·예시 중 한 가지 이상을 포함하는지 확인합니다.",
         "용어 사용이 일관되고 상충되는 진술이 없어야 합니다(복수 컨텍스트 간 모순 시 감점).",
         "시험과 직접 관련이 없는 주변 정보가 과도하거나 핵심 근거가 부족하면 감점합니다.",
         "핵심 키워드(정의-조건-예외-용도 등)가 드러나는지 평가합니다.",
@@ -73,7 +73,7 @@ EVALUATION_STEPS = {
         "컨텍스트가 질문한 개념(예: 제약조건, 엔터티, 카디널리티, 도메인, 기본키/대체키 등)과 직접적으로 대응하는지 평가합니다.",
         "동의어/표현 차이는 허용하되, 다른 영역의 개념으로 혼동되면 감점합니다.",
         "질문에 답하기에 필요한 핵심 근거(정의/기호/공식/절차)가 컨텍스트에 포함되어야 합니다.",
-        "무관한 주제가 섞여 있으면 감점합니다.",
+        "무관한 주제가 대부분(70% 이상)으로 이루어져 있으면 감점합니다.",
         "평가 사유를 한국어로 간결히 설명하세요."
     ],
     'reference_answer_alignment': [

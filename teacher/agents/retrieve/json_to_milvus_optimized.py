@@ -128,7 +128,11 @@ class MilvusDBManager:
     ):
         self.host = host or os.getenv("MILVUS_HOST", "localhost")
         self.port = port or os.getenv("MILVUS_PORT", "19530")
-        self.collection_name = collection_name or os.getenv("CONCEPT_COLL", "concepts")
+        self.uri = os.getenv("MILVUS_URI")  # ex) 127.0.0.1:19530
+        self.token = os.getenv("MILVUS_TOKEN")  # if auth enabled
+        self.secure = os.getenv("MILVUS_SECURE", "false").lower() == "true"
+        # 환경변수에 공백이 포함되는 경우가 있어 안전하게 trim
+        self.collection_name = (collection_name or os.getenv("CONCEPT_COLL", "concepts")).strip()
         self.dimension = int(os.getenv("EMBED_DIM", "768"))
         self.chunk_tokens = int(os.getenv("CHUNK_TOKENS", chunk_tokens))
         self.chunk_overlap_units = int(os.getenv("CHUNK_OVERLAP_UNITS", chunk_overlap_units))
@@ -143,9 +147,22 @@ class MilvusDBManager:
 
     def connect(self) -> bool:
         try:
-            connections.connect(alias="default", host=self.host, port=self.port)
-            log.info(f"Connected to Milvus at {self.host}:{self.port}")
-            return True
+            # Prefer modern URI style if provided
+            if self.uri:
+                connections.connect(alias="default", uri=self.uri, token=self.token, secure=self.secure)
+                log.info(f"Connected to Milvus via uri={self.uri}")
+                return True
+            # else build uri from host:port (more reliable than host/port in some client versions)
+            uri = f"{self.host}:{self.port}"
+            try:
+                connections.connect(alias="default", uri=uri, token=self.token, secure=self.secure)
+                log.info(f"Connected to Milvus via uri={uri}")
+                return True
+            except Exception as e2:
+                log.warning(f"URI connect failed ({uri}), fallback to host/port: {e2}")
+                connections.connect(alias="default", host=self.host, port=self.port)
+                log.info(f"Connected to Milvus at {self.host}:{self.port}")
+                return True
         except Exception as e:
             log.error(f"Milvus connect failed: {e}")
             return False
@@ -288,6 +305,63 @@ class MilvusDBManager:
         log.info(f"Processed {len(out)} chunks from '{os.path.basename(file_path)}'")
         return out
 
+    def process_jsonl_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """Process newline-delimited JSON, mapping title->subject, text->content."""
+        out: List[Dict[str, Any]] = []
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+        except Exception as e:
+            log.error(f"Read jsonl failed: {file_path} | {e}")
+            return out
+
+        for ln in lines:
+            try:
+                it = json.loads(ln)
+            except Exception:
+                continue
+
+            # Map jsonl schema → internal schema
+            subject = (it.get("title") or os.path.splitext(os.path.basename(file_path))[0]).strip()
+            item_title = (it.get("metadata", {}).get("section_title") or subject or "").strip()[:2000]
+            content = (it.get("text") or "").strip()
+            if not content:
+                continue
+
+            # Prefer original source path if present in jsonl
+            source_hint = it.get("source")
+            source_file = os.path.basename(source_hint) if source_hint else os.path.basename(file_path)
+
+            base_item_id = str(it.get("id") or f"{os.path.basename(file_path)}:{it.get('chunk_index', 0)}")
+
+            units = self._units_for_item(item_title, content)
+            units = [u for u in units if good_enough(u, self.min_chunk_chars, self.min_chunk_tokens, self.tok)]
+            if not units:
+                continue
+
+            chunks = pack_units_to_chunks(units, self.tok, self.chunk_tokens, self.chunk_overlap_units)
+            for cidx, ch in enumerate(chunks):
+                text = ch["text"].strip()
+                if not good_enough(text, self.min_chunk_chars, self.min_chunk_tokens, self.tok):
+                    continue
+                record = {
+                    "subject": subject,
+                    "source_file": source_file,
+                    "item_id": base_item_id if len(chunks) == 1 else f"{base_item_id}_chunk_{cidx+1}",
+                    "item_title": item_title,
+                    "content": text[:16000],
+                    "content_hash": sha1(text),
+                    "chunk_index": cidx,
+                    "unit_count": len(units),
+                    "n_tokens": len(self.tok(text, add_special_tokens=False, truncation=False)["input_ids"]),
+                }
+                ns = uuid.UUID("00000000-0000-0000-0000-000000000000")
+                record["id"] = str(uuid.uuid5(ns, f"{record['source_file']}|{record['item_id']}|{record['content_hash']}"))
+                out.append(record)
+
+        log.info(f"Processed {len(out)} chunks from jsonl '{os.path.basename(file_path)}'")
+        return out
+
     # ---------- dedup & insert ----------
 
     def _existing_hashes(self, hashes: List[str]) -> set:
@@ -372,13 +446,16 @@ class MilvusDBManager:
         if not os.path.exists(json_dir):
             log.error(f"No such directory: {json_dir}")
             return 0
-        files = [os.path.join(json_dir, f) for f in os.listdir(json_dir) if f.endswith(".json")]
+        files = [os.path.join(json_dir, f) for f in os.listdir(json_dir) if f.endswith(".json") or f.endswith(".jsonl")]
         files.sort()
-        log.info(f"Found {len(files)} json files under {json_dir}")
+        log.info(f"Found {len(files)} json/jsonl files under {json_dir}")
 
         total = 0
         for fp in files:
-            recs = self.process_json_file(fp)
+            if fp.lower().endswith(".jsonl"):
+                recs = self.process_jsonl_file(fp)
+            else:
+                recs = self.process_json_file(fp)
             total += self.insert_records(recs)
         log.info(f"All done. Newly inserted: {total}")
         return total

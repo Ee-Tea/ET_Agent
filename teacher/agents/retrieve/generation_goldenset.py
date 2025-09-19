@@ -3,7 +3,7 @@
 로컬 JSON 코퍼스 기반 RAGAS 골든셋 생성기 (ragas 0.3.3 호환, 한국어 패치 버전)
 
 개요:
-- 지정 폴더(하위 포함)의 모든 .json을 스캔하여 LangChain Document로 적재
+- 지정 폴더(하위 포함)의 모든 .json/.jsonl 을 스캔하여 LangChain Document로 적재
 - RAGAS TestsetGenerator + SingleHopSpecificQuerySynthesizer로 질문/정답/컨텍스트 생성
 - 한국어 질의 프롬프트/페르소나/정규화/임베딩을 한글 친화적으로 설정
 - 결과를 JSONL/CSV로 저장
@@ -61,6 +61,8 @@ JSON_CORPUS_DIR = os.getenv(
     os.path.join("teacher", "agents", "retrieve", "data", "json")
 )
 RAGAS_LANG      = os.getenv("RAGAS_LANG", "ko").strip().lower() or "ko"
+EMBED_MODEL     = os.getenv("RAGAS_EMBED_MODEL", "intfloat/multilingual-e5-base").strip()
+EMBED_FALLBACK  = os.getenv("RAGAS_EMBED_MODEL_FALLBACK", "paraphrase-multilingual-MiniLM-L12-v2").strip()
 
 # ===================== 유틸 =====================
 def clean_text(text: str) -> str:
@@ -98,22 +100,84 @@ def split_docs(documents: List[Document]) -> List[Document]:
     return chunks
 
 
+# 개별 샘플의 reference_contexts 내 중복 제거 (정규화 기반, 순서 보존)
+def dedupe_reference_contexts(contexts: List[str]) -> List[str]:
+    seen = set()
+    unique: List[str] = []
+    for c in contexts or []:
+        norm = clean_text(c)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(c.strip())
+    return unique
+
+
 # ===================== JSON → Document 로더 =====================
 def load_json_docs(root_dir: str) -> List[Document]:
     """
-    재귀적으로 root_dir 아래의 *.json 파일을 읽어
-    items[].content(필수)와 item_title(있으면)을 합쳐 page_content로 만들어 Document 생성.
+    재귀적으로 root_dir 아래의 *.json / *.jsonl 파일을 읽어
+    - JSON: items[].content(필수)와 item_title(있으면)을 합쳐 page_content로 만들어 Document 생성
+    - JSONL: 각 라인의 {text, metadata.section_title, title, source}를 이용해 Document 생성
 
     지원 형식:
     - 형태 A: {"subject": "...", "total_items": N, "items": [ {...}, ... ]}
     - 형태 B: [ {...}, {...}, ... ]  # 루트가 리스트인 예외 케이스
     """
-    paths = glob.glob(os.path.join(root_dir, "**", "*.json"), recursive=True)
+    paths_json = glob.glob(os.path.join(root_dir, "**", "*.json"), recursive=True)
+    paths_jsonl = glob.glob(os.path.join(root_dir, "**", "*.jsonl"), recursive=True)
+    paths = sorted(set(paths_json + paths_jsonl))
     docs: List[Document] = []
     files, objects = 0, 0
 
     for path in paths:
-        # JSON 파싱
+        # JSON / JSONL 분기
+        if path.lower().endswith(".jsonl"):
+            # JSONL: 라인별 JSON 오브젝트
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = [ln.strip() for ln in f if ln.strip()]
+                files += 1
+            except Exception as e:
+                print(f"⚠️ JSONL 로드 실패: {path} ({e})")
+                continue
+
+            for idx, ln in enumerate(lines):
+                try:
+                    item = json.loads(ln)
+                except Exception:
+                    continue
+                objects += 1
+
+                # 매핑: text → content, metadata.section_title 또는 title → item_title
+                content = clean_text(item.get("text", ""))
+                if not content:
+                    continue
+                sec_title = ""
+                meta_obj = item.get("metadata") or {}
+                if isinstance(meta_obj, dict):
+                    sec_title = clean_text(meta_obj.get("section_title", ""))
+                title_line = clean_text(item.get("title", ""))
+                title = sec_title or title_line
+
+                page_content = f"{title}\n{content}" if title else content
+                if len(page_content) < MIN_CHARS:
+                    continue
+
+                meta = {
+                    "top_subject": title_line or None,
+                    "subject": title_line or None,
+                    "item_id": (item.get("id") or f"{os.path.basename(path)}:{idx}"),
+                    "item_title": title or None,
+                    "chunk_size": None,
+                    "source": item.get("source") or path,
+                }
+                docs.append(Document(page_content=page_content, metadata=meta))
+
+            # 다음 파일로
+            continue
+
+        # JSON: 파일 전체가 하나의 JSON 오브젝트/리스트
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -189,9 +253,13 @@ def get_concept_persona() -> List[Persona]:
     - 출처 묻기/메타 질문 금지, 개념 내용만 질문하도록 제약
     """
     KOR_GUIDE = (
-        "질문과 정답은 반드시 제공된 컨텍스트의 사실에 근거해야 하며, "
-        "정답에는 컨텍스트 내 표현(정의·키워드)을 가급적 직접 인용하거나 동치로 재서술하라. "
-        "출처/메타질문 금지. 자료 밖 확장·추론 금지. 한 질문은 하나의 핵심 개념만 다뤄라."
+        "질문과 정답은 반드시 제공된 컨텍스트의 사실에만 근거하라. "
+        "정답에는 컨텍스트 내 표현(정의·키워드)을 직접 인용하거나 엄밀한 동치로 재서술하라. "
+        "출처/메타질문 금지, 자료 밖 추론 금지. 한 질문은 하나의 핵심 개념만 다뤄라. "
+        "포괄적 표현(예: 무엇인가/설명하라/특징을 말하라)을 피하고, 숫자·개수·조건(최소/최대/정확히/반드시/예외 등)이나 비교 기준을 명시하여 구체적으로 작성하라. "
+        "단, 너무 구체적인 예시를 묻는 질문은 피하라."
+        "정의를 묻는 질문의 경우, 포괄적인 개념이 아닌 구체적인 개념을 묻도록 하라."
+        "비교형 질문은 비교 축(기준·요소)을 분명히 적시하고, 단계/구성요소를 묻는 경우 특정 단계/요소명을 지칭하라."
     )
     return [
         Persona(
@@ -226,15 +294,18 @@ def generate_golden_set_from_docs(documents: List[Document]) -> None:
     generator_llm = LangchainLLMWrapper(
         ChatOpenAI(
             model="gpt-4o-mini",
-            temperature=0.2,     # 헛소리/창발 최소화
+            temperature=0.2,     # 최대한 구체적/결정적 질문 유도
             max_tokens=2000,
         )
     )
 
     # ✅ 한국어 친화 임베딩 (문서/질문 임베딩 모두에 사용)
-    generator_embeddings = HuggingFaceEmbeddings(
-        model="intfloat/multilingual-e5-large"
-    )
+    # - 기본값을 더 가벼운 모델로 변경, 실패 시 폴백 모델로 자동 대체
+    try:
+        generator_embeddings = HuggingFaceEmbeddings(model=EMBED_MODEL)
+    except (OSError, MemoryError) as e:
+        print(f"⚠️ 임베딩 로드 실패: {EMBED_MODEL} → 폴백으로 재시도 ({e})")
+        generator_embeddings = HuggingFaceEmbeddings(model=EMBED_FALLBACK)
 
     personas = get_concept_persona()
     transforms = [NERExtractor()]  # 헤드라인 분할은 제거 (JSON 단락 특성 반영)
@@ -283,7 +354,7 @@ def generate_golden_set_from_docs(documents: List[Document]) -> None:
             row = {
                 "question": sample.user_input,
                 "ground_truth": sample.reference,
-                "contexts": sample.reference_contexts,
+                "contexts": dedupe_reference_contexts(sample.reference_contexts),
             }
             safe = json.dumps(row, ensure_ascii=False)
             f.write(safe + "\n")
@@ -293,7 +364,7 @@ def generate_golden_set_from_docs(documents: List[Document]) -> None:
         {
             "question": s.user_input,
             "ground_truth": s.reference,
-            "contexts": s.reference_contexts,
+            "contexts": dedupe_reference_contexts(s.reference_contexts),
         }
         for s in eval_dataset
     ]

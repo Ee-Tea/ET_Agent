@@ -10,6 +10,7 @@ import os, json, argparse, time, re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from tqdm import tqdm
+from pymilvus import connections
 
 # ================== (1) 에이전트 로드 ==================
 # 프로젝트 경로에 맞게 import 우선 시도

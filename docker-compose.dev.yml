@@ -143,8 +143,8 @@ services:
     env_file:
     - .env
     environment:
-      REDIS_URL: redis://redis:6379
-      REDIS_URI: redis://redis:6379/0
+      REDIS_URL: redis://redis:6380
+      REDIS_URI: redis://redis:6380
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
@@ -163,8 +163,8 @@ services:
     environment:
       PYTHONPATH: /app
       REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_URL: redis://redis:6379
+      REDIS_PORT: 6380
+      REDIS_URL: redis://redis:6380
       DATABASE_URI: postgresql://postgres:postgres@langgraph-postgres:5432/postgres
       AUTH_API_BASE: http://auth-api:8000
       OPENAI_API_KEY: ${OPENAI_API_KEY}

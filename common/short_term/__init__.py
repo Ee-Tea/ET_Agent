@@ -1,0 +1,1 @@
+# common.short_term 패키지 초기화

@@ -337,3 +337,5 @@ build/
 coverage/
 .cache/
 .parcel-cache/
+
+**/server_env.txt

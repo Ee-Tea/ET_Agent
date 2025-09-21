@@ -5,6 +5,7 @@ MilvusDB 사용을 위한 헬퍼 함수들
 
 import time
 from typing import Dict, List, Any, Optional
+import os
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_milvus import Milvus

@@ -79,7 +79,7 @@ HERE = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))  # -> teacher/
 
 # 기본 경로(프로젝트 루트 기준)
-DEFAULT_EXAMS_PATH            = os.path.join(PROJECT_ROOT, "exam", "test_parsed_exam_json")        # ← 소스(오피셜 정답 JSON 폴더)
+DEFAULT_EXAMS_PATH            = os.path.join(PROJECT_ROOT, "exam", "parsed_exam_json")        # ← 소스(오피셜 정답 JSON 폴더)
 DEFAULT_SIMILAR_PROBLEMS_PATH = os.path.join(PROJECT_ROOT, "exam", "parsed_exam_json")             # ← context(유사문제)
 DEFAULT_CONCEPTS_DIR          = os.path.join(PROJECT_ROOT, "agents", "retrieve", "data", "json")   # ← context(유사개념)
 DEFAULT_OUT_DIR               = os.path.join(PROJECT_ROOT, "agents", "solution", "goldensets")     # ← 결과 저장
@@ -203,6 +203,22 @@ def load_concept_docs(root_dir: str) -> List[Document]:
             for idx, it in enumerate(data):
                 if isinstance(it, dict):
                     _push(it, idx)
+        elif isinstance(data, dict):
+            # subject-keyed 형식 지원: {"과목명": [{"title"/"item_title", "text"/"content", ...}], ...}
+            for subject, arr in data.items():
+                if not isinstance(arr, list):
+                    continue
+                for idx, it in enumerate(arr):
+                    if not isinstance(it, dict):
+                        continue
+                    content_val = it.get("content", "") or it.get("text", "")
+                    title_val = it.get("item_title", "") or it.get("title", "")
+                    item = {
+                        "content": content_val,
+                        "item_title": title_val,
+                        "subject": subject,
+                    }
+                    _push(item, idx)
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=SPLIT_CHARS, chunk_overlap=SPLIT_OVERLAP, separators=["\n\n", "\n", " ", ""]
@@ -345,9 +361,15 @@ def generate_explanation_fixed_answer(answer_idx: str,
     prompt = f"""
 너는 정보처리기사 해설 작성자다.
 정답 번호는 이미 확정되었다: {answer_idx}번. 정답 번호를 바꾸지 말고,
-'왜 {answer_idx}번이 정답인지'를 아래 컨텍스트 블록만을 근거로 3~6문장 한국어 평문 풀이로 작성하라.
-오직 컨텍스트에 명시된 사실만 사용하고, 새로운 지식/추론을 추가하지 말 것.
-가능하면 근거 키워드를 원문 표현과 동치로 재서술하라. 마크다운 금지.
+'왜 {answer_idx}번이 정답인지'를 오직 아래 컨텍스트 블록만을 근거로 3~5문장 한국어 평문 풀이로 작성하라.
+
+필수 규칙:
+- 외부 지식/추론 금지. 컨텍스트의 표현·용어·기호(예: σ, π)를 그대로 재사용하라.
+- 최소 2회 이상 원문 핵심 구절을 따옴표로 인용하고, 각 인용 뒤에 (CTX i)처럼 해당 블록 번호를 표기하라.
+- 1문장째는 결론(정답 근거의 핵심 요지)로 시작하라. 그 다음 1~2문장은 컨텍스트 인용 근거.
+- 마지막 1문장으로 핵심 오답 1개만 간단히 배제(원문 근거와의 불일치 한 줄)하라.
+- 근거가 부족하면 추측하지 말고 "컨텍스트에 X가 명시되어 있어 Y가 성립한다"처럼 컨텍스트-결론 연결만 기술하라.
+- 마크다운/목록 금지. 단정형 어투로 간결하게.
 
 [문제]
 {question_txt}
@@ -361,7 +383,7 @@ def generate_explanation_fixed_answer(answer_idx: str,
 [컨텍스트 블록들]
 {ctx_structured}
 
-출력 형식:
+출력 형식(이 순서/레이블 반드시 유지):
 풀이: ...
 과목(선택): ...
 """.strip()

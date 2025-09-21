@@ -175,19 +175,88 @@ class SubjectBundle:
     docs: List[Document]
     merged_context_full: str  # 전량
 
+def _clip_txt(s: str, n: int) -> str:
+    s = clean_text(s)
+    return s if len(s) <= n else (s[:n] + "…")
+
+
+def _format_problem_with_options(doc: Document) -> str:
+    """문제 본문 + 보기 4개를 하나의 블록으로 정리한다.
+    - metadata.options 가 있으면 이를 사용
+    - 없으면 page_content 내 줄분리 기반으로 추정
+    """
+    q = (doc.page_content or "").strip()
+    opts = []
+    md = getattr(doc, "metadata", {}) or {}
+    meta_opts = md.get("options")
+    if isinstance(meta_opts, list) and meta_opts:
+        opts = [clean_text(str(o)) for o in meta_opts if str(o).strip()][:4]
+    else:
+        # page_content 안에 보기 패턴이 섞여 있는 경우 간단 추출(보수적)
+        lines = [l.strip() for l in q.splitlines() if l.strip()]
+        # 앞 한두 줄은 문제, 뒤에서 최대 4줄은 보기로 간주
+        if len(lines) >= 3:
+            # 문제 본문 후보
+            q = lines[0]
+            tail = lines[1:]
+            # "1) ", "(1)", "-" 스타일 감지
+            for l in tail:
+                if re.match(r"^\(?\d+\)?[).]\s*", l) or re.match(r"^[-•]\s+", l):
+                    opts.append(re.sub(r"^\(?\d+\)?[).]\s*|^[-•]\s+", "", l))
+            if not opts:
+                # 마지막 4줄만 옵션으로 간주
+                opts = tail[-4:]
+            opts = [clean_text(o) for o in opts][:4]
+
+    block = [f"문제: {clean_text(q)}"]
+    if opts:
+        for i, o in enumerate(opts, 1):
+            block.append(f"보기 {i}: {o}")
+    return "\n".join(block)
+
+
+def _build_enriched_context(concept_docs: List[Document], problem_docs: List[Document]) -> str:
+    """개념 요약 + 문제/보기 블록을 함께 제공하는 고품질 컨텍스트를 구성한다."""
+    parts: List[str] = []
+
+    # 개념 요약 섹션(상위 일부만, 과도한 길이 컷)
+    if concept_docs:
+        parts.append("[개념 요약]")
+        take_n = min(10, len(concept_docs))
+        for d in concept_docs[:take_n]:
+            txt = _clip_txt(d.page_content or "", 600)
+            if txt:
+                subj = (getattr(d, "metadata", {}) or {}).get("subject")
+                prefix = f"- ({subj}) " if subj else "- "
+                parts.append(prefix + txt)
+
+    # 공식 문제 섹션(문제+보기 동시 노출)
+    if problem_docs:
+        parts.append("\n[공식 문제 예시]")
+        take_m = min(6, len(problem_docs))
+        for idx, d in enumerate(problem_docs[:take_m], 1):
+            block = _format_problem_with_options(d)
+            if block:
+                parts.append(f"[문항 {idx}]\n{_clip_txt(block, 800)}")
+
+    return "\n\n".join([p for p in parts if p.strip()])
+
+
 def fetch_subject_bundle(subject: str, milvus_data: Dict[str,Any]) -> SubjectBundle:
-    concept_docs = search_milvus_documents_by_subject(milvus_data,"concepts",subject,TOPK_CONCEPTS)
-    problem_docs = search_milvus_documents_by_subject(milvus_data,"problems",subject,TOPK_PROBLEMS)
+    concept_docs = search_milvus_documents_by_subject(milvus_data, "concepts", subject, TOPK_CONCEPTS)
+    problem_docs = search_milvus_documents_by_subject(milvus_data, "problems", subject, TOPK_PROBLEMS)
     docs = concept_docs + problem_docs
-    merged = create_context_from_documents(docs) if docs else ""
+    # 고품질 컨텍스트로 대체 (문제+보기 동시 포함, 개념 요약 포함)
+    merged = _build_enriched_context(concept_docs, problem_docs) if docs else ""
     return SubjectBundle(subject=subject, docs=docs, merged_context_full=merged)
 
 # ---- 사용자 프롬프트(골든셋 question) ----
 from typing import Tuple
 
 def build_user_prompt(subject: str | None) -> Tuple[str, int]:
-    # 1~min(100, MAX_Q_PER_REQUEST)에서 랜덤 선택
-    k = random.randint(1, max(1, min(100, MAX_Q_PER_REQUEST)))
+    # 요청 문항 수는 항상 5 이하로 제한
+    cap = max(1, min(5, MAX_Q_PER_REQUEST))
+    k = random.randint(1, cap)
     # 과목이 있어도 일정 확률로 전체 범위를 사용
     use_global = (subject is None) or (random.random() < GLOBAL_RANGE_PROB)
 
@@ -219,7 +288,7 @@ def build_generation_prompt(context_full: str, subject: str|None, k: int) -> str
 ]  # 길이 = {k}
 3) 각 options는 정확히 4개, 중복/유사 반복 금지.
 4) 정답과 해설은 포함하지 마세요(키 자체를 만들지 마세요).
-5) 모든 문항은 컨텍스트의 사실에 기반.
+5) 모든 문항은 컨텍스트의 사실에 기반. 컨텍스트의 [공식 문제 예시]와 동일/유사 문항을 그대로 복제하지 말고, [개념 요약]을 근거로 변형/확장하세요.
 
 [컨텍스트 시작]
 {context_full}

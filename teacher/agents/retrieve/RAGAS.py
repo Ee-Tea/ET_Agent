@@ -292,7 +292,7 @@ def run_evaluation(
 
 # ---------- CLI ----------
 def main():
-    input_path = "teacher/agents/retrieve/goldensets/goldenset_20250916_124703.jsonl"
+    input_path = "teacher/agents/retrieve/goldensets/merged_success_combined_20250920_150018.jsonl"
     out_dir = "teacher/agents/retrieve/eval_results"
     limit = None
     sleep_sec = 0.0

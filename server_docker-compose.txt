@@ -1,3 +1,4 @@
+sudo tee docker-compose.yml >/dev/null <<'YML'
 x-hostgw: &hostgw
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -144,7 +145,6 @@ services:
     - .env
     environment:
       REDIS_URL: redis://redis:6379
-      REDIS_URI: redis://redis:6379/0
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'
@@ -198,4 +198,4 @@ networks:
   default:
     name: et-agent-network
     driver: bridge
-
+YML

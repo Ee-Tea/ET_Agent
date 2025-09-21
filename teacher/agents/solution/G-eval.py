@@ -15,7 +15,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))  # -> teacher/
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 # 너가 준 골든셋 경로
-CSV_FILE_PATH = os.path.join(PROJECT_ROOT, "agents", "solution", "goldensets", "ipa_golden_20250921_171600.jsonl")
+CSV_FILE_PATH = os.path.join(PROJECT_ROOT, "agents", "solution", "goldensets", "ipa_golden_20250921_181946.jsonl")
 
 # 결과 저장 위치
 OUTPUT_DIRECTORY = os.path.join(PROJECT_ROOT, "agents", "solution", "eval_goldenset_geval")

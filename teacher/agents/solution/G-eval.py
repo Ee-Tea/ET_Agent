@@ -35,12 +35,12 @@ FILTER_BY_THRESHOLD = False
 
 # 메트릭 임계값 (필요시 조정)
 METRIC_THRESHOLDS = {
-    'input_quality': 0.80,
-    'reference_quality': 0.80,
-    'answer_quality': 0.80,
-    'input_reference_alignment': 0.85,
-    'reference_answer_alignment': 0.85,
-    'input_answer_alignment': 0.85
+    'input_quality': 0.75,
+    'reference_quality': 0.75,
+    'answer_quality': 0.75,
+    'input_reference_alignment': 0.8,
+    'reference_answer_alignment': 0.8,
+    'input_answer_alignment': 0.8
 }
 
 # 내부 표시명 매핑

@@ -128,11 +128,6 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
-    volumes:
-    - ./auth:/app/auth
-    - ./common:/app/common  # 추가
-    - ./alembic:/app/alembic
-    - ./alembic.ini:/app/alembic.ini
   langgraph-api:
     <<: *hostgw
     image: udd43/et-agent-langgraph:latest
@@ -149,7 +144,7 @@ services:
     - .env
     environment:
       REDIS_URL: redis://redis:6379
-      REDIS_URI: redis://redis:6379/0
+      REDIS_URI: redis://redis:6379
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
       PYTHONPATH: /deps/LLM-T
       LANGGRAPH_GRAPHS: '[{"id":"agent","import_path":"graph:graph"}]'

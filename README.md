@@ -35,6 +35,7 @@ ET_Agent/
 │   └── short_term/redis_memory.py # Redis 단기 메모리
 ├── farmer/                     # 농업 도메인 에이전트/평가 스크립트
 │   ├── cultivation/           # 재배 관련 스크립트 및 노트북
+|   ├── recommand/             # 작물 추천 에이전트
 │   ├── disaster/              # 재해 대응 에이전트 및 평가
 │   ├── sales/                 # 판매/시세 에이전트 및 RAGAS
 │   └── weather/               # 날씨/예보 노드

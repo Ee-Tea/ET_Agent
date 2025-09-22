@@ -14,6 +14,45 @@
 - 사용자 취약 유형 분석을 통한 보완점 제공
 - 틀린 문제에 대한 오답 노트 생성
 
+---
+
+## 📁 폴더 구조
+
+```
+ET_Agent/
+├── api/                        # FastAPI 백엔드 (엔드포인트, 서비스)
+│   ├── routers/               # 라우터: health, chat, sessions
+│   ├── services/              # 비즈니스 로직 (세션/하이브리드 등)
+│   ├── clients/               # 외부 API 클라이언트
+│   └── models.py              # API 레이어 모델
+├── auth/                       # 인증/사용자 서비스 (별도 FastAPI)
+│   ├── models/                # SQLAlchemy 모델
+│   ├── auth_routes.py         # 인증 라우트
+│   └── auth_service.py        # 인증 도메인 로직
+├── common/                     # 공용 유틸/통합 모듈
+│   ├── milvus_manager.py      # Milvus 관리
+│   ├── milvus_helpers.py      # Milvus 헬퍼
+│   └── short_term/redis_memory.py # Redis 단기 메모리
+├── farmer/                     # 농업 도메인 에이전트/평가 스크립트
+│   ├── cultivation/           # 재배 관련 스크립트 및 노트북
+│   ├── disaster/              # 재해 대응 에이전트 및 평가
+│   ├── sales/                 # 판매/시세 에이전트 및 RAGAS
+│   └── weather/               # 날씨/예보 노드
+├── teacher/                    # 교육(시험) 에이전트
+│   ├── agents/                # 문제 생성/해설 등 서브에이전트
+│   ├── exam/                  # 시험 데이터/샘플
+│   ├── golden/                # 골든 데이터셋 및 평가 러너
+│   └── streamlit_app.py       # 간단 UI
+├── graph.py                   # 상위 그래프(오케스트레이션)
+├── supervisor.py              # 메인 상태 수집/Redis 저장
+├── docker-compose*.yml        # 로컬/운영 도커 컴포즈 파일
+├── Dockerfile*                # 이미지 빌드 파일
+├── pyproject.toml             # Python 패키지/의존성
+├── README.md                  # 개요/가이드
+└── README_COMPREHENSIVE.md    # 상세 문서
+```
+
+프로젝트 루트는 `c:\project\Ee-Tea\Back\ET_Agent` 입니다.
 
 ---
 

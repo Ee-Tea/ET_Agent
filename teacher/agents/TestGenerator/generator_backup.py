@@ -24,7 +24,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from base_agent import BaseAgent
 
-***REMOVED*** 관련 임포트
+# OpenAI 관련 임포트
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
 
@@ -114,8 +114,9 @@ class InfoProcessingExamAgent(BaseAgent):
         os.makedirs(self.data_folder, exist_ok=True)
 
         if groq_api_key:
-            os.environ["OPENAI_API_KEY=REDACTED
-        elif not os.getenv("OPENAI_API_KEY=REDACTED ValueError("OpenAI API 키가 필요합니다.")
+            os.environ["OPENAI_API_KEY"] = groq_api_key
+        elif not os.getenv("OPENAI_API_KEY"):
+            raise ValueError("OpenAI API 키가 필요합니다.")
 
         self.embeddings_model = None
         self.llm = None
@@ -282,7 +283,9 @@ class InfoProcessingExamAgent(BaseAgent):
                 timeout=LLM_TIMEOUT,
                 max_retries=LLM_MAX_RETRIES,
                 base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-                api_key=os.getenv("OPENAI_API_KEY=REDACTED = self.llm.invoke("ping")
+                api_key=os.getenv("OPENAI_API_KEY")
+            )
+            _ = self.llm.invoke("ping")
         except Exception as e:
             raise ValueError(f"모델 초기화 중 오류 발생: {e}")
 

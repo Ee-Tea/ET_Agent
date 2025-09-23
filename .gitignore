@@ -335,3 +335,10 @@ build/
 coverage/
 .cache/
 .parcel-cache/
+
+# caches (HuggingFace, pip, etc.)
+**/huggingface_cache/**
+**/.cache/**
+**/.cache/*
+**/pip-cache/**
+**/.mypy_cache/

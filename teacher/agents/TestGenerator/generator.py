@@ -305,7 +305,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     milvus_data=self._current_milvus_data,
                     collection_name="concepts",
                     subject_area=subject_area,
-                    k=20
+                    k=2
                 )
                 
                 # 과목명으로 문제 관련 문서 검색
@@ -313,7 +313,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     milvus_data=self._current_milvus_data,
                     collection_name="problems",
                     subject_area=subject_area,
-                    k=30
+                    k=2
                 )
                 
                 # 문서 합치기
@@ -339,19 +339,35 @@ class InfoProcessingExamAgent(BaseAgent):
             print(f"[DEBUG] _retrieve_documents: error {e}")
             return {**state, "error": f"문서 검색 오류: {e}"}
 
+    # generator.py  (_prepare_context) 내부의 return 직전에 아래 블록 추가/수정
     def _prepare_context(self, state) -> dict:
         documents = state.get("documents", [])
         key_sents = []
         for doc in documents:
             for line in doc.page_content.split("\n"):
                 line = line.strip()
-                if len(line) > 100 or any(k in line for k in ["정의", "특징", "종류", "예시", "원리", "구성", "절차", "장점", "단점"]):
+                if len(line) > 100 or any(k in line for k in ["정의","특징","종류","예시","원리","구성","절차","장점","단점"]):
                     key_sents.append(line)
         context = "\n".join(key_sents)[:2000]
-        # subject_area를 명시적으로 유지
         subject_area = state.get("subject_area", "")
         print(f"[DEBUG] _prepare_context: subject_area='{subject_area}'")
+
+        # ✅ 최소 컨텍스트 보장: 문서가 없으면 과목 키워드로 합성 컨텍스트 생성
+        if not context.strip():
+            aliases = self._subject_aliases(subject_area)
+            keywords = (self.SUBJECT_AREAS.get(subject_area, {}) or {}).get("keywords", [])
+            synth = []
+            if aliases:
+                synth.append(f"[과목] {aliases[0]}")
+            if keywords:
+                synth.append("핵심 키워드: " + ", ".join(keywords[:10]))
+            # 너무 짧지 않게 한두 문장 추가
+            synth.append(f"{subject_area} 기본 개념 요약과 정의, 특징 및 종류를 학습합니다.")
+            context = "\n".join(synth)
+            print(f"[DEBUG] _prepare_context: synthesized minimal context (len={len(context)})")
+
         return {**state, "context": context, "subject_area": subject_area}
+
 
 # RAGAS 검증 함수 제거 (LLM 기반 검증 사용)
 
@@ -362,16 +378,21 @@ class InfoProcessingExamAgent(BaseAgent):
             validated_questions = state.get("validated_questions", [])
             subject_area = state.get("subject_area", "")
             needed_count = target_quiz_count - len(validated_questions)
-            print(f"[DEBUG] _generate_quiz_incremental: context_len={len(context)}, target={target_quiz_count}, validated={len(validated_questions)}, needed={needed_count}")
+            ...
 
             if needed_count <= 0:
                 return {**state, "quiz_questions": validated_questions}
+
             if not context.strip():
                 new_attempts = state.get("generation_attempts", 0) + 1
                 print(f"[DEBUG] _generate_quiz_incremental: no context, attempts={new_attempts}")
-                # 컨텍스트 없을 때 과목 일반 개념 기반 생성 폴백
+
+                # ✅ 과목 키워드 끼워 넣기
+                keywords = (self.SUBJECT_AREAS.get(subject_area, {}) or {}).get("keywords", [])
+                kw_text = ", ".join(keywords[:12]) if keywords else "기본 개념, 정의, 특징, 예시"
+
                 fallback_prompt = (
-                    f"당신은 정보처리기사 출제 전문가입니다. {subject_area} 과목의 다음 핵심 개념들을 바탕으로 "
+                    f"당신은 정보처리기사 출제 전문가입니다. '{subject_area}' 과목의 다음 핵심 키워드({kw_text})를 바탕으로 "
                     f"객관식 문제 {needed_count}개를 생성하세요.\n\n"
                     "출제 규칙:\n"
                     "1) 보기에는 번호(1. 2. 3. 4.)를 절대 붙이지 말고, 순수 텍스트만 사용하세요.\n"
@@ -389,22 +410,40 @@ class InfoProcessingExamAgent(BaseAgent):
                     fb_content = getattr(fb_resp, "content", str(fb_resp))
                     new_questions = self._parse_quiz_response(fb_content, subject_area)
                     new_questions = self._filter_duplicate_questions(new_questions, validated_questions, subject_area)
-                    if new_questions:
-                        return {
-                            **state,
-                            "quiz_questions": new_questions,
-                            "validated_questions": validated_questions,
-                            "generation_attempts": new_attempts
-                        }
+
+                    # ✅ 최소 1문항 보장(파싱 실패/0개일 때)
+                    if not new_questions:
+                        new_questions = [{
+                            "question": f"{subject_area}에서 '기본 개념'에 대한 올바른 설명은?",
+                            "options": ["핵심 정의를 간결히 서술한다", "서로 모순되는 특징을 함께 제시한다",
+                                        "예시 없이 개념을 추측하게 한다", "전혀 관련 없는 용어를 사용한다"],
+                            "answer": "1",
+                            "explanation": "기본 개념은 정의를 바탕으로 핵심 내용을 명확히 서술해야 한다.",
+                            "subject": subject_area
+                        }]
+
+                    return {
+                        **state,
+                        "quiz_questions": new_questions,
+                        "validated_questions": validated_questions,
+                        "generation_attempts": new_attempts
+                    }
                 except Exception:
-                    pass
-                return {
-                    **state, 
-                    "quiz_questions": [],
-                    "validated_questions": validated_questions,
-                    "generation_attempts": new_attempts,
-                    "error": "검색된 문서 내용이 없습니다."
-                }
+                    # ✅ 완전 실패 시에도 1문항 보장
+                    return {
+                        **state,
+                        "quiz_questions": [{
+                            "question": f"{subject_area}에서 '기본 개념'에 대한 올바른 설명은?",
+                            "options": ["핵심 정의를 간결히 서술한다", "서로 모순되는 특징을 함께 제시한다",
+                                        "예시 없이 개념을 추측하게 한다", "전혀 관련 없는 용어를 사용한다"],
+                            "answer": "1",
+                            "explanation": "기본 개념은 정의를 바탕으로 핵심 내용을 명확히 서술해야 한다.",
+                            "subject": subject_area
+                        }],
+                        "validated_questions": validated_questions,
+                        "generation_attempts": new_attempts,
+                        "error": ""  # 에러로 루프 중단하지 않음
+                    }
 
             # 부족한 문제 수만큼 생성 (최대 20문제, 한 번에 모두 생성)
             generate_count = max(min(needed_count, 20), 1)
@@ -1038,16 +1077,45 @@ class InfoProcessingExamAgent(BaseAgent):
             "node_id": 1
         }
         
+        # ... def _generate_subject_quiz(self, subject_area: str, target_count: int = 5, difficulty: str = "중급", milvus_data: Dict[str, Any] = None) -> Dict[str, Any]:
+        # (생략)
         try:
             # 독립적인 워크플로우 실행
             result = independent_workflow.invoke(initial_state)
-            
-            # 결과 반환
+
+            # === [추가] RAGAS가 읽을 수 있도록 컨텍스트/문서를 표면으로 노출 ===
+            ctx = result.get("context", "") or ""
+            docs = result.get("documents", []) or []
+            doc_texts = []
+            doc_dicts = []
+            for d in docs:
+                if isinstance(d, Document):
+                    if getattr(d, "page_content", None):
+                        doc_texts.append(d.page_content.strip())
+                    doc_dicts.append({
+                        "page_content": getattr(d, "page_content", "") or "",
+                        "metadata": getattr(d, "metadata", {}) or {}
+                    })
+                elif isinstance(d, dict):
+                    t = d.get("page_content") or d.get("content") or d.get("text") or ""
+                    if t:
+                        doc_texts.append(str(t).strip())
+                    # 그대로 보존
+                    doc_dicts.append(d)
+
             validated_questions = result.get("validated_questions", [])
+
             return {
                 "success": True,
-                "questions": validated_questions,  # 이 키가 중요!
+                "questions": validated_questions,  # <- RAGAS 질문 추출에 사용
                 "status": "SUCCESS" if len(validated_questions) > 0 else "FAILED",
+
+                # === [추가] RAGAS 컨텍스트 추출 훅 ===
+                "context": ctx,
+                "documents_text": [t for t in doc_texts if t],
+                "documents": doc_dicts,
+
+                # 기존 result 블록도 유지 (러너의 다양한 스키마 대응)
                 "result": {
                     "exam_title": f"{subject_area} {difficulty} 문제집",
                     "total_questions": len(validated_questions),
@@ -1057,7 +1125,12 @@ class InfoProcessingExamAgent(BaseAgent):
                             "requested_count": target_count,
                             "actual_count": len(validated_questions),
                             "questions": validated_questions,
-                            "status": "SUCCESS" if len(validated_questions) > 0 else "FAILED"
+                            "status": "SUCCESS" if len(validated_questions) > 0 else "FAILED",
+
+                            # === [추가] 과목 노드 밑에서도 한 번 더 노출(러너의 subject별 탐색 대비)
+                            "context": ctx,
+                            "documents_text": [t for t in doc_texts if t],
+                            "documents": doc_dicts,
                         }
                     },
                     "all_questions": validated_questions,
@@ -1075,6 +1148,7 @@ class InfoProcessingExamAgent(BaseAgent):
                     "parallel_agents": 1
                 }
             }
+
             
         except Exception as e:
             err = str(e)

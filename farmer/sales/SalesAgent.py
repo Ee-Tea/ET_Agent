@@ -252,7 +252,7 @@ def fetch_api_data(query=None):
         "p_cert_id": api_id,
         "p_returntype": "json"
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, allow_redirects=False)
     docs = []
     if response.status_code == 200:
         try:

@@ -874,15 +874,98 @@ async def get_recent_questions(
         # session_id 헤더도 수용(신규 키 스킴)
         session_id = request.headers.get("x-session-id") or session_id
 
-        # 보강: chat_id가 없고 session_id가 오면 매핑 조회
-        if user_id and not chat_id and session_id:
+        # 세션 ID만으로 바로 처리 (Postgres 의존 없이 Redis만 조회) → 실패해도 200 빈 리스트
+        if session_id:
             try:
-                await hybrid_session_service.init_postgres()
-                row = await hybrid_session_service.get_session_by_session_id(session_id)
-                if row and str(row.get("user_id")) == str(user_id):
-                    chat_id = str(row.get("chat_id"))
+                redis = hybrid_session_service.redis
+                # added_count: short_term/shared 에서 세션 기반 먼저 확인
+                added_count = 0
+                try:
+                    st_sid_key = f"short_term:{session_id}"
+                    st_sid_raw = redis.get(st_sid_key)
+                    if st_sid_raw:
+                        st = json.loads(st_sid_raw)
+                        teacher_data = st.get("teacher", {})
+                        added_count = int(teacher_data.get("added_count", 0) or 0)
+                except Exception:
+                    added_count = 0
+                if added_count <= 0:
+                    try:
+                        shared_sid_key = f"shared:{session_id}"
+                        shared_sid_raw = redis.get(shared_sid_key)
+                        if shared_sid_raw:
+                            shared = json.loads(shared_sid_raw)
+                            added_count = int(shared.get("added_count", 0) or 0)
+                    except Exception:
+                        added_count = 0
+
+                # 질문 키 조회 (세션 기반)
+                try:
+                    keys = list(redis.keys(f"questions:{session_id}:*"))
+                except Exception:
+                    keys = []
+                keys.sort(reverse=True)
+
+                actual_limit = min(limit, added_count) if added_count > 0 else min(limit, len(keys))
+                if actual_limit == 0:
+                    return {"questions": [], "count": 0, "session": session_id}
+
+                items: List[Dict[str, Any]] = []
+                for key in keys[:actual_limit]:
+                    data = redis.hgetall(key) or {}
+                    if not data:
+                        continue
+                    options_val = data.get("options", "[]")
+                    try:
+                        options = json.loads(options_val) if isinstance(options_val, str) else []
+                    except Exception:
+                        options = []
+                    items.append({
+                        "qid": key,
+                        "question": data.get("question", ""),
+                        "options": options,
+                        "correctAnswer": data.get("answer", ""),
+                        "explanation": data.get("explanation", ""),
+                        "subject": data.get("subject", ""),
+                    })
+                # 세션 기반 키에 없으면 레거시 키(questions:{user_id}_{chat_id}:*)도 조회 시도
+                if not items:
+                    try:
+                        await hybrid_session_service.init_postgres()
+                        row = await hybrid_session_service.get_session_by_session_id(session_id)
+                        if row and row.get("user_id") is not None and row.get("chat_id") is not None:
+                            uid = str(row.get("user_id"))
+                            cid = str(row.get("chat_id"))
+                            legacy_keys = []
+                            try:
+                                legacy_keys = list(redis.keys(f"questions:{uid}_{cid}:*"))
+                            except Exception:
+                                legacy_keys = []
+                            legacy_keys.sort(reverse=True)
+                            items = []
+                            for key in legacy_keys[:limit]:
+                                data = redis.hgetall(key) or {}
+                                if not data:
+                                    continue
+                                options_val = data.get("options", "[]")
+                                try:
+                                    options = json.loads(options_val) if isinstance(options_val, str) else []
+                                except Exception:
+                                    options = []
+                                items.append({
+                                    "qid": key,
+                                    "question": data.get("question", ""),
+                                    "options": options,
+                                    "correctAnswer": data.get("answer", ""),
+                                    "explanation": data.get("explanation", ""),
+                                    "subject": data.get("subject", ""),
+                                })
+                    except Exception:
+                        pass
+                return {"questions": items, "count": len(items), "session": session_id}
             except Exception:
-                pass
+                # 어떤 예외가 나도 200 빈 리스트
+                return {"questions": [], "count": 0, "session": session_id}
 
         # 보강: user_id만 있고 chat_id가 없으면 최근 세션 chat_id로 대체
         if user_id and not chat_id:
@@ -894,10 +977,10 @@ async def get_recent_questions(
             except Exception:
                 pass
 
-        # 식별자 없으면 빈 결과 반환 (항상 questions 키 사용)
+        # 식별자 없으면 빈 결과 반환 (항상 questions 키 사용). session은 가용한 것 우선 반환
         if not user_id or not chat_id:
-            logger.info(f"/recent-questions missing ids uid={user_id} cid={chat_id}")
-            return {"questions": [], "count": 0, "session": None}
+            logger.info(f"/recent-questions missing ids uid={user_id} cid={chat_id} sid={session_id}")
+            return {"questions": [], "count": 0, "session": (session_id or None)}
 
         redis = hybrid_session_service.redis
         session_key = f"{user_id}_{chat_id}"
@@ -973,7 +1056,7 @@ async def get_recent_questions(
             logger.info(f"/recent-questions uid={user_id} cid={chat_id} added_count=0 -> empty")
             return {"questions": [], "count": 0, "session": (session_id or f"{user_id}:{chat_id}")}
 
-        items: list[dict[str, Any]] = []
+        items: List[Dict[str, Any]] = []
         for key in keys[:actual_limit]:
             data = redis.hgetall(key) or {}
             if not data:
